@@ -1,69 +1,24 @@
-#![allow(unexpected_cfgs)]
-#![cfg(feature = "server")]
+//! The InspiRING query/response JSON codec, as an HTTP server would use it.
+//!
+//! Until 2026-09-06 this file was an axum round-trip gated on
+//! `#![cfg(feature = "server")]` - a feature the Raven fork does not define -
+//! so it compiled to an empty binary and ran zero tests, while its 400-path
+//! assertion tested a check its own handler performed. What was worth keeping
+//! is the serde property: a query and a response that cross a JSON wire must
+//! still extract the right bytes. That is asserted here directly, with no HTTP
+//! stack, and it is the only live guard against a JSON field drop or rename on
+//! `ClientQuery` / `ServerResponse` (bincode stability cannot see those).
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+#![allow(
+    clippy::unwrap_used,
+    reason = "test-target fixture helpers; an abort here is the failure report"
+)]
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::InspireParams;
 use raven_inspire::pir::{
-    extract_inspiring, query, respond_inspiring, respond_one_packing, setup, ClientQuery,
-    EncodedDatabase, PackingMode, ServerCrs, ServerResponse,
+    extract_inspiring, query, respond_inspiring, setup, ClientQuery, PackingMode, ServerResponse,
 };
-use serde::{Deserialize, Serialize};
-use tokio::net::TcpListener;
-
-#[derive(Clone)]
-struct AppState {
-    crs: ServerCrs,
-    db: EncodedDatabase,
-}
-
-#[derive(Serialize, Deserialize)]
-struct QueryResponse {
-    response: ServerResponse,
-    processing_time_ms: u64,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-async fn handle_query(
-    State(state): State<Arc<AppState>>,
-    Json(query): Json<ClientQuery>,
-) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let response = match query.packing_mode {
-        PackingMode::Inspiring => {
-            if query.inspiring_packing_keys.is_none() {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "InspiRING packing keys missing (set packing_mode=tree to use tree packing)"
-                            .to_string(),
-                    }),
-                ));
-            }
-            respond_inspiring(&state.crs, &state.db, &query)
-        }
-        PackingMode::Tree => respond_one_packing(&state.crs, &state.db, &query),
-    }
-    .map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Query processing failed: {}", e),
-            }),
-        )
-    })?;
-
-    Ok(Json(QueryResponse {
-        response,
-        processing_time_ms: 0,
-    }))
-}
 
 fn test_params() -> InspireParams {
     InspireParams {
@@ -78,8 +33,8 @@ fn test_params() -> InspireParams {
     }
 }
 
-#[tokio::test]
-async fn http_inspiring_requires_packing_keys() {
+#[test]
+fn inspiring_query_response_json_round_trip() {
     let params = test_params();
     let d = params.ring_dim;
 
@@ -107,59 +62,27 @@ async fn http_inspiring_requires_packing_keys() {
         &mut sampler,
     )
     .expect("query should succeed");
-
     client_query.packing_mode = PackingMode::Inspiring;
 
-    let app_state = Arc::new(AppState {
-        crs: crs.clone(),
-        db: encoded_db.clone(),
-    });
+    // The server must answer from the query AS DECODED, so a field the JSON
+    // codec drops (rgsw rows, packing keys) breaks respond or the extraction.
+    let query_json = serde_json::to_string(&client_query).expect("query to JSON");
+    let wire_query: ClientQuery = serde_json::from_str(&query_json).expect("query from JSON");
 
-    let app = Router::new()
-        .route("/query", post(handle_query))
-        .with_state(app_state);
+    let response =
+        respond_inspiring(&crs, &encoded_db, &wire_query).expect("respond should succeed");
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind should succeed");
-    let addr: SocketAddr = listener.local_addr().expect("local addr");
+    let response_json = serde_json::to_string(&response).expect("response to JSON");
+    let wire_response: ServerResponse =
+        serde_json::from_str(&response_json).expect("response from JSON");
 
-    let server_handle = tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("server should run");
-    });
-
-    let base_url = format!("http://{}", addr);
-    let client = reqwest::Client::new();
-
-    let ok_response = client
-        .post(format!("{}/query", base_url))
-        .json(&client_query)
-        .send()
-        .await
-        .expect("request should succeed");
-
-    assert!(ok_response.status().is_success());
-    let ok_body: QueryResponse = ok_response.json().await.expect("parse response");
-
-    let extracted = extract_inspiring(&crs, &state, &ok_body.response, entry_size)
+    let extracted = extract_inspiring(&crs, &state, &wire_response, entry_size)
         .expect("extract should succeed");
     let expected_start = (target_index as usize) * entry_size;
     let expected = &database[expected_start..expected_start + entry_size];
-    assert_eq!(extracted.as_slice(), expected);
-
-    let mut missing_keys_query = client_query.clone();
-    missing_keys_query.inspiring_packing_keys = None;
-
-    let err_response = client
-        .post(format!("{}/query", base_url))
-        .json(&missing_keys_query)
-        .send()
-        .await
-        .expect("request should succeed");
-
-    assert_eq!(err_response.status(), StatusCode::BAD_REQUEST);
-    let err_body: ErrorResponse = err_response.json().await.expect("parse error response");
-    assert!(err_body.error.contains("InspiRING packing keys missing"));
-
-    server_handle.abort();
+    assert_eq!(
+        extracted.as_slice(),
+        expected,
+        "entry bytes must survive the JSON wire in both directions"
+    );
 }

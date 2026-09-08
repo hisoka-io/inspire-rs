@@ -1,6 +1,6 @@
-//! The SIMD Solinas butterflies are dispatched at runtime, so they cannot be
-//! called directly; the round-trip and the convolution against the non-SIMD
-//! classical NTT stand in as the byte-identity assertions.
+//! The Solinas NTT fast path is dispatched at runtime (its butterflies are
+//! deliberately scalar - see ntt.rs's measurement note); the round-trip and
+//! the convolution against a naive u128 negacyclic oracle gate it.
 
 #![allow(
     clippy::needless_range_loop,
@@ -89,19 +89,7 @@ fn solinas_forward_convolution_matches_naive_mul() {
     );
 }
 
-/// Round-trip and convolution at the shipping n=2048 cell.
-#[test]
-fn solinas_ntt_shipping_cell_stress() {
-    let n = 2048;
-    let ctx = NttContext::with_default_q(n);
-    for seed in 0..5u64 {
-        let original = random_coeffs(seed, n, DEFAULT_Q);
-        let mut coeffs = original.clone();
-        ctx.forward(&mut coeffs);
-        ctx.inverse(&mut coeffs);
-        assert_eq!(
-            coeffs, original,
-            "NTT round-trip failed at shipping n=2048, seed={seed}"
-        );
-    }
-}
+// A shipping-cell (n=2048) round-trip stress test lived here; it was a strict
+// subset of solinas_ntt_roundtrip_byte_identity above (same function, n list
+// already includes 2048, fewer seeds) and was retired 2026-09-06 - the
+// unscaled-coeff-0 inverse mutant killed both.

@@ -461,9 +461,18 @@ impl InspireParams {
         // fixture. The strict version is available for callers who
         // want to opt in:
         //   InspireParams::validate_strict_tree_packed()
-        // The shipping TwoPacking + InspiRING path does NOT use
-        // extract_packed's d_inv branch, so the invariant is not
-        // load-bearing for the production code path.
+        //
+        // CORRECTION 2026-09-06: this block used to end by claiming the
+        // shipping TwoPacking + InspiRING path does not reach
+        // extract_packed's d_inv branch, so the invariant was "not load
+        // bearing". That was measured false. `extract_two_packing`
+        // dispatches on `response.packing_mode`, which is a byte decoded
+        // from the SERVER's response, and routes both `Some(Tree)` and
+        // `None` into extract_packed. Both shipping client entry points
+        // go through it. At d=2048/p=65537 gcd is 1, so the
+        // DegreeNotInvertible guard above never fires, and the packed
+        // path returns wrong bytes with an Ok status. Reachability here
+        // is server-controlled, not a local choice.
         Ok(())
     }
 

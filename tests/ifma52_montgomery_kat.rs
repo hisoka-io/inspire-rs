@@ -1,12 +1,15 @@
 //! IFMA52 Montgomery must be byte-identical to the scalar reference before any
-//! of it reaches the hot path. The SIMD case auto-skips without AVX-512-IFMA.
+//! of it reaches the hot path. The SIMD case skips by name without
+//! AVX-512-IFMA, and fails outright under `RAVEN_REQUIRE_AVX512=1`.
 
-use raven_inspire::math::ifma52::{ifma52_product_lohi, mont_mul_split52};
+use raven_inspire::math::ifma52::mont_mul_split52;
 use raven_inspire::math::mod_q::DEFAULT_Q;
 use raven_inspire::math::ntt::NttContext;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+
+mod simd_capability;
 
 /// `montgomery_mul_at` is private, so reach it through a `to_mont` round-trip.
 fn ref_mont_mul(ctx: &NttContext, a: u64, b: u64) -> u64 {
@@ -20,62 +23,15 @@ fn naive_mul_mod(a: u64, b: u64, q: u64) -> u64 {
     (((a as u128) * (b as u128)) % (q as u128)) as u64
 }
 
-#[test]
-fn ifma52_product_lohi_matches_u128() {
-    let q = DEFAULT_Q;
-    let mut rng = StdRng::seed_from_u64(0xA11CE);
-
-    for _ in 0..10_000 {
-        let a = rng.gen_range(0..q);
-        let b = rng.gen_range(0..q);
-
-        let (lo, hi) = ifma52_product_lohi(a, b);
-        let combined: u128 = (lo as u128) | ((hi as u128) << 64);
-        let expected: u128 = (a as u128) * (b as u128);
-
-        assert_eq!(
-            combined, expected,
-            "ifma52_product_lohi mismatch: a={a} b={b} lo={lo:016x} hi={hi:016x} \
-             combined={combined:032x} expected={expected:032x}"
-        );
-    }
-}
-
-#[test]
-fn ifma52_product_edge_cases() {
-    let q = DEFAULT_Q;
-    let edges: Vec<u64> = vec![
-        0,
-        1,
-        2,
-        (1u64 << 51) - 1,
-        1u64 << 51,
-        (1u64 << 52) - 1,
-        1u64 << 52,
-        (1u64 << 52) + 1,
-        (1u64 << 59),
-        (1u64 << 60) - (1u64 << 14) - 1, // q - 2
-        q - 1,
-    ];
-
-    for &a in &edges {
-        if a >= q {
-            continue;
-        }
-        for &b in &edges {
-            if b >= q {
-                continue;
-            }
-            let (lo, hi) = ifma52_product_lohi(a, b);
-            let combined: u128 = (lo as u128) | ((hi as u128) << 64);
-            let expected: u128 = (a as u128) * (b as u128);
-            assert_eq!(
-                combined, expected,
-                "edge case a={a} b={b} combined={combined:032x} expected={expected:032x}"
-            );
-        }
-    }
-}
+// The ifma52_product_lohi random and edge examples are retired into
+// simd_differential_properties.rs's ifma52_product_lohi_matches_u128_property
+// (2026-09-06; the hi-word misassembly mutant that killed both kills the
+// property). ifma52_x8_matches_scalar_default_q is retired too: an x8 lane
+// swap reddens the surviving _matches_naive below and the rescued full-vector
+// pointwise differential (w4e evidence/w546-mc7b.txt). The two
+// mont_mul_split52 examples below are KEPT: split52 is the classical oracle
+// the Solinas property compares against, and an oracle keeps its own
+// independent anchor.
 
 #[test]
 fn mont_mul_split52_matches_ref_default_q() {
@@ -134,52 +90,8 @@ fn mont_mul_split52_edge_cases_default_q() {
 
 #[cfg(target_arch = "x86_64")]
 #[test]
-fn ifma52_x8_matches_scalar_default_q() {
-    if !is_x86_feature_detected!("avx512ifma") || !is_x86_feature_detected!("avx512f") {
-        eprintln!("SKIP: host lacks AVX-512-IFMA");
-        return;
-    }
-
-    use raven_inspire::math::ifma52::avx512_ifma::pointwise_mont_mul_x8;
-
-    let q = DEFAULT_Q;
-    let ctx = NttContext::with_default_q(2048);
-    let q_inv_neg = ctx.q_inv_neg_for_test(0);
-    let mut rng = StdRng::seed_from_u64(0xCAFE_CAFE);
-
-    let len = 8192usize;
-    let a_std: Vec<u64> = (0..len).map(|_| rng.gen_range(0..q)).collect();
-    let b_std: Vec<u64> = (0..len).map(|_| rng.gen_range(0..q)).collect();
-
-    let a_mont: Vec<u64> = a_std.iter().map(|&a| ctx.to_mont(a)).collect();
-    let b_mont: Vec<u64> = b_std.iter().map(|&b| ctx.to_mont(b)).collect();
-
-    let expected: Vec<u64> = a_mont
-        .iter()
-        .zip(b_mont.iter())
-        .map(|(&am, &bm)| mont_mul_split52(am, bm, q, q_inv_neg))
-        .collect();
-
-    let mut candidate = vec![0u64; len];
-    unsafe {
-        pointwise_mont_mul_x8(&a_mont, &b_mont, &mut candidate, q, q_inv_neg);
-    }
-
-    for i in 0..len {
-        assert_eq!(
-            candidate[i], expected[i],
-            "SIMD IFMA52 lane mismatch at i={i}: candidate={} expected={} \
-             (a_mont={} b_mont={})",
-            candidate[i], expected[i], a_mont[i], b_mont[i]
-        );
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[test]
 fn ifma52_x8_matches_naive_default_q() {
-    if !is_x86_feature_detected!("avx512ifma") || !is_x86_feature_detected!("avx512f") {
-        eprintln!("SKIP: host lacks AVX-512-IFMA");
+    if !simd_capability::require_avx512ifma("ifma52_x8_matches_naive_default_q") {
         return;
     }
 

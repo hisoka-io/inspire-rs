@@ -2,8 +2,9 @@
 
 //! The AVX-512-IFMA52 dispatch in `Poly::mul_acc_ntt_domain` must be
 //! bit-identical to the scalar Solinas-Montgomery path at every coefficient,
-//! over the gadget lengths the production sweep uses. Skips without
-//! AVX-512-IFMA52.
+//! over the gadget lengths the production sweep uses. Needs BOTH the host CPU
+//! feature and `--features simd-packing-offline`; skips by name without either
+//! and fails outright under `RAVEN_REQUIRE_AVX512=1`.
 
 use raven_inspire::math::mod_q::DEFAULT_Q;
 use raven_inspire::math::ntt::NttContext;
@@ -11,6 +12,8 @@ use raven_inspire::math::Poly;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+
+mod simd_capability;
 
 /// Deterministic NTT-domain, Montgomery-form input, as `mul_acc_ntt_domain`
 /// requires.
@@ -77,39 +80,32 @@ fn run_kat_at(n: usize, gamma: usize, base_seed: u64) {
     }
 }
 
+// Four per-gamma tests collapsed into one cell loop (2026-09-06): they
+// differed only in (n, gamma, seed), and the accumulator-zeroing mutant that
+// reddens any of them under --features simd-packing-offline reddens this loop
+// at its first cell. Both preconditions are gates rather than notes: without
+// the CPU feature the kernel cannot run, and without the cargo feature the
+// dispatch IS the scalar reference, so the differential compares a loop with
+// itself. RAVEN_REQUIRE_AVX512=1 turns either into a failure.
 #[test]
-fn dispatched_mul_acc_matches_scalar_at_gamma_16() {
-    if !is_x86_feature_detected!("avx512ifma") {
-        eprintln!("SKIP: host lacks AVX-512-IFMA52 (dispatch falls through to scalar; no divergence to test)");
+fn dispatched_mul_acc_matches_scalar_over_production_cells() {
+    const NAME: &str = "dispatched_mul_acc_matches_scalar_over_production_cells";
+    if !simd_capability::require_avx512ifma(NAME) {
         return;
     }
-    run_kat_at(2048, 16, 0xC0DEC0DE);
-}
-
-#[test]
-fn dispatched_mul_acc_matches_scalar_at_gamma_64() {
-    if !is_x86_feature_detected!("avx512ifma") {
-        eprintln!("SKIP: host lacks AVX-512-IFMA52");
+    if !simd_capability::require_cargo_feature(
+        NAME,
+        "simd-packing-offline",
+        cfg!(feature = "simd-packing-offline"),
+    ) {
         return;
     }
-    run_kat_at(2048, 64, 0xBADCAFE);
-}
-
-#[test]
-fn dispatched_mul_acc_matches_scalar_at_gamma_256() {
-    if !is_x86_feature_detected!("avx512ifma") {
-        eprintln!("SKIP: host lacks AVX-512-IFMA52");
-        return;
+    for (n, gamma, seed) in [
+        (2048, 16, 0xC0DE_C0DE),
+        (2048, 64, 0xBAD_CAFE),
+        (2048, 256, 0xFEED_BEEF),
+        (256, 16, 0x1234_5678),
+    ] {
+        run_kat_at(n, gamma, seed);
     }
-    run_kat_at(2048, 256, 0xFEEDBEEF);
-}
-
-#[test]
-fn dispatched_mul_acc_matches_scalar_smaller_n() {
-    // still divisible by 8, so the SIMD tail edge case is exercised
-    if !is_x86_feature_detected!("avx512ifma") {
-        eprintln!("SKIP: host lacks AVX-512-IFMA52");
-        return;
-    }
-    run_kat_at(256, 16, 0x1234_5678);
 }

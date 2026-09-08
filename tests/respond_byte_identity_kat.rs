@@ -85,31 +85,7 @@ fn respond_byte_identical_par_vs_seq_on_fixed_input() {
     );
 }
 
-#[cfg(feature = "parallel")]
-#[test]
-fn par_iter_map_collect_is_order_identical_to_sequential() {
-    use rayon::prelude::*;
-
-    fn kernel(x: &u64) -> Vec<u64> {
-        (0u64..9)
-            .map(|k| {
-                x.wrapping_mul(k.wrapping_add(1))
-                    .wrapping_add(0x9e37_79b9_7f4a_7c15)
-            })
-            .collect()
-    }
-    let items: Vec<u64> = (0..8192u64).collect();
-    let seq: Vec<Vec<u64>> = items.iter().map(kernel).collect();
-    let par: Vec<Vec<u64>> = items.par_iter().map(kernel).collect();
-    assert_eq!(
-        seq, par,
-        "par_iter().map().collect() must equal the sequential collect"
-    );
-
-    let seq_r: Vec<Vec<u64>> = (0..8192u64).map(|i| kernel(&i)).collect();
-    let par_r: Vec<Vec<u64>> = (0..8192u64).into_par_iter().map(|i| kernel(&i)).collect();
-    assert_eq!(
-        seq_r, par_r,
-        "into_par_iter range collect must equal sequential"
-    );
-}
+// A test pinning rayon's documented guarantee that par_iter().map().collect()
+// preserves order (rayon docs, ParallelIterator::collect) lived here; it ran
+// over a test-local kernel and stayed green while respond's collect order was
+// inverted (2026-09-06 mutation audit). The golden above is the real guard.

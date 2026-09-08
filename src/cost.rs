@@ -312,7 +312,16 @@ impl CostEstimator {
         let (extra_ntt, extra_mul, extra_add) = match self.variant {
             InspireVariant::NoPacking | InspireVariant::OnePacking => (0, 0, 0),
             InspireVariant::TwoPacking => {
-                // y_body: gamma polynomials, each involves tau_g(s)*G - s*w + error
+                // `ClientPackingKeys::generate` builds y_body as gadget_len rows
+                // of tau_g(s)*g^k - s*w_mask[k] + error, then rotates the set
+                // into gamma-1 automorphism copies - so the work scales with
+                // gamma*gadget_len, not with gamma alone, and the rotations are
+                // automorphisms rather than poly multiplications. Left at 2*gamma
+                // as the coarse stand-in it has always been: nothing observes op
+                // counts, whereas the BYTES are now pinned to the wire by
+                // tests/cost_model_matches_the_wire.rs. Reading "gamma rows" off
+                // this comment is what produced the 85x packing-key over-count
+                // below.
                 let gamma = self.num_columns as u64;
                 (gamma * 2, gamma * 2, gamma * 2)
             }
@@ -503,11 +512,17 @@ impl CostEstimator {
         let query_bytes_full = self.rgsw_bytes();
         let query_bytes_seeded = query_bytes_full / 2;
 
-        // InspiRING packing keys (y_body): gamma polynomials, each d * 8 bytes
-        // Only sent for TwoPacking (InspiRING mode)
+        // InspiRING packing keys: only `y_body` crosses the wire, and it holds
+        // one polynomial per gadget digit - `ClientPackingKeys::generate` builds
+        // it from `pack_params.gadget`, and `register_client_packing_keys`
+        // refuses a query whose `y_body.len() != pack_params.gadget.len`. The
+        // `y_all` rotations are derived on both sides and never serialized, so
+        // pricing this by gamma overstated it by gamma/ell (85x at a 512-byte
+        // record); tests/cost_model_matches_the_wire.rs holds it to the wire.
+        // Only sent for TwoPacking (InspiRING mode).
         let packing_key_bytes = match self.variant {
             InspireVariant::NoPacking | InspireVariant::OnePacking => 0,
-            InspireVariant::TwoPacking => gamma
+            InspireVariant::TwoPacking => (self.params.gadget_len as u64)
                 .saturating_mul(self.params.ring_dim as u64)
                 .saturating_mul(self.crt_moduli_count())
                 .saturating_mul(8),
@@ -600,11 +615,15 @@ mod tests {
         // Online: (γ-1)*l+1 = 46 poly_adds
         assert_eq!(breakdown.packing.poly_additions, 301 + 46);
 
-        // Communication: seeded RGSW + y_body packing keys + single packed RLWE
+        // Communication: seeded RGSW + y_body packing keys + single packed RLWE.
+        // y_body is gadget_len polynomials, NOT gamma - this line read `16u64`
+        // (gamma at a 32-byte record) and so restated the estimator's own
+        // over-count instead of checking it. The wire is the oracle now:
+        // tests/cost_model_matches_the_wire.rs.
         let crt_limbs = params.crt_moduli.len().max(1) as u64;
         let rlwe_size = 2u64 * 2048 * crt_limbs * 8;
         let rgsw_seeded = 2u64 * 3 * rlwe_size / 2;
-        let packing_keys = 16u64 * 2048 * crt_limbs * 8;
+        let packing_keys = params.gadget_len as u64 * 2048 * crt_limbs * 8;
         assert_eq!(
             breakdown.communication.bytes,
             rgsw_seeded + packing_keys + rlwe_size
@@ -696,14 +715,27 @@ mod tests {
             "NoPacking ({no_pack}) should exceed TwoPacking ({two_pack})"
         );
 
-        // OnePacking (tree, no packing keys) has smallest query+response for this config
-        // TwoPacking adds y_body packing keys to query, which for small entries can exceed
-        // the tree-packing savings
+        // TwoPacking is the smallest: its seeded query halves the RGSW and the
+        // packing keys it adds back are gadget_len polynomials, not gamma of
+        // them. The reverse ordering this test asserted until 2026-09-07 was an
+        // artifact of that over-count, and it held at every entry width for the
+        // same reason - so the corrected ordering is checked at both ends of the
+        // width range rather than at one point.
         assert!(
-            one_pack < two_pack,
-            "OnePacking ({one_pack}) should be smaller than TwoPacking ({two_pack}) \
-             since y_body keys (gamma*d*8) dominate for 32-byte entries"
+            two_pack < one_pack,
+            "TwoPacking ({two_pack}) should be smaller than OnePacking ({one_pack}): \
+             a seeded query costs half a full RGSW and y_body adds only gadget_len*d*8"
         );
+        for entry_size in [2usize, 512] {
+            let wide = CostEstimator::new(&params, InspireVariant::TwoPacking, entry_size)
+                .estimate()
+                .total_communication_bytes();
+            assert_eq!(
+                wide, two_pack,
+                "TwoPacking communication must not move with the record width \
+                 ({entry_size} B)"
+            );
+        }
     }
 
     #[test]

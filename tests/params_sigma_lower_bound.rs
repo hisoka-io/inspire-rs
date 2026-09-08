@@ -23,18 +23,43 @@ fn a_sub_floor_sigma_makes_the_sampler_constant() {
     );
 }
 
+/// Both sides of the floor: with every other preset field legal,
+/// validate() must reject exactly (!finite || sigma < MIN_SIGMA), and the
+/// boundary is walked at adjacent representable values of MIN_SIGMA itself.
 #[test]
-fn validate_rejects_a_sigma_below_the_floor() {
-    for sigma in [0.0f64, 0.001, 1.0, 3.0, -6.4, f64::NAN, f64::INFINITY] {
+fn validate_sigma_boundary_is_exact_on_both_sides() {
+    let below_floor = f64::from_bits(MIN_SIGMA.to_bits() - 1);
+    let pinned = [
+        0.0f64,
+        0.001,
+        1.0,
+        3.0,
+        -6.4,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        below_floor,
+        MIN_SIGMA,
+        6.4,
+        20.0,
+    ];
+    let swept = (0..=200).map(|i| i as f64 * 0.05);
+    for sigma in pinned.into_iter().chain(swept) {
         let mut params = InspireParams::secure_128_d2048();
         params.sigma = sigma;
-        let err = params
-            .validate()
-            .expect_err("a sigma below the floor must be refused");
-        assert!(
-            err.contains("sigma"),
-            "the error must name sigma, got: {err}"
+        let should_reject = !sigma.is_finite() || sigma < MIN_SIGMA;
+        let outcome = params.validate();
+        assert_eq!(
+            outcome.is_err(),
+            should_reject,
+            "sigma={sigma:?}: validate() disagreed with the floor predicate"
         );
+        if let Err(err) = outcome {
+            assert!(
+                err.contains("sigma"),
+                "the error must name sigma, got: {err}"
+            );
+        }
     }
 }
 

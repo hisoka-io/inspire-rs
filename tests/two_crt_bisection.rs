@@ -1,35 +1,26 @@
-//! Round-trips at increasing `(ring_dim, entries, record_bytes)` cells under
-//! both the single-prime and the 2-CRT modulus, reporting per cell, so the
-//! smallest diverging cell can be read off.
+//! Seeded-query round trips over (ring_dim, record_bytes) cells under both the
+//! single-prime and the 2-CRT modulus. Formerly ~30 hand-enumerated cells
+//! whose per-cell PASS/FAIL report was unreachable (the assert inside
+//! `run_cell` fired on the first failure) and whose d=2048 legs duplicated
+//! commit_e_two_crt_regression_grid.rs cell-for-cell (same fixture, indices
+//! and assertion). Converted 2026-09-06: the d<=1024 cells - including the
+//! single-prime control the grid lacks below d=2048 - are drawn by the
+//! property below, both modulus shapes every case; the d=2048 legs live in the
+//! commit-E grid, which stays.
 
+use proptest::prelude::*;
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::{InspireParams, SecurityLevel, DEFAULT_Q_2CRT_30BIT};
 use raven_inspire::{
     extract_inspiring, query_seeded, respond_seeded_inspiring, setup, PackingMode,
 };
 
-fn default_q_single(ring_dim: usize) -> InspireParams {
-    InspireParams {
-        ring_dim,
-        q: 1_152_921_504_606_830_593,
-        crt_moduli: vec![1_152_921_504_606_830_593],
-        p: 65537,
-        sigma: 6.4,
-        gadget_base: 1 << 20,
-        gadget_len: 3,
-        security_level: SecurityLevel::Bits128,
-    }
-}
-
-/// Same gadget_base as the baseline, so CRT shape and q-width are the only
-/// variables.
-fn two_crt_30bit(ring_dim: usize) -> InspireParams {
-    let crt = DEFAULT_Q_2CRT_30BIT.to_vec();
-    let q: u64 = crt.iter().product();
+fn params_for(ring_dim: usize, crt_moduli: Vec<u64>) -> InspireParams {
+    let q: u64 = crt_moduli.iter().product();
     InspireParams {
         ring_dim,
         q,
-        crt_moduli: crt,
+        crt_moduli,
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 20,
@@ -38,7 +29,7 @@ fn two_crt_30bit(ring_dim: usize) -> InspireParams {
     }
 }
 
-fn smoke_twopacking_inspiring(
+fn round_trip_cell(
     params: &InspireParams,
     entries: u64,
     record_bytes: usize,
@@ -81,85 +72,34 @@ fn smoke_twopacking_inspiring(
     Ok(())
 }
 
-fn run_cell(
-    crt_shape: &str,
-    params: &InspireParams,
-    entries: u64,
-    record_bytes: usize,
-    failures: &mut Vec<String>,
-) {
-    let label = format!(
-        "{:<6}  d={:<5} entries=2^{:<3} record={:<4} B",
-        crt_shape,
-        params.ring_dim,
-        (entries as f64).log2().round() as u32,
-        record_bytes
-    );
-    match smoke_twopacking_inspiring(params, entries, record_bytes) {
-        Ok(()) => println!("  PASS   {label}"),
-        Err(e) => {
-            println!("  FAIL   {label}  - {e}");
-            failures.push(format!("{label}  - {e}"));
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 6,
+        failure_persistence: None,
+        .. ProptestConfig::default()
+    })]
+
+    /// Every drawn (ring_dim, record_bytes) cell round-trips under BOTH the
+    /// single-prime DEFAULT_Q and the 2-CRT 30-bit modulus (both shapes per
+    /// case, so a shape-specific defect cannot escape a run). record_bytes
+    /// includes 128, carried from the deleted d=2048 large-ring test.
+    #[test]
+    fn seeded_round_trip_over_ring_and_record_cells(
+        ring_dim in prop::sample::select(&[256usize, 512, 1024]),
+        record_bytes in prop::sample::select(&[8usize, 32, 128, 256]),
+    ) {
+        let entries = ring_dim as u64;
+        for crt in [
+            vec![1_152_921_504_606_830_593u64],
+            DEFAULT_Q_2CRT_30BIT.to_vec(),
+        ] {
+            let label = if crt.len() == 1 { "1-CRT" } else { "2-CRT" };
+            let params = params_for(ring_dim, crt);
+            if let Err(e) = round_trip_cell(&params, entries, record_bytes) {
+                return Err(TestCaseError::fail(format!(
+                    "{label} d={ring_dim} entries={entries} record={record_bytes}B: {e}"
+                )));
+            }
         }
     }
-    assert!(
-        failures.is_empty(),
-        "cells failed to round-trip: {failures:#?}"
-    );
-}
-
-#[test]
-fn bisection_small_rings() {
-    println!("\n=== smoke bisection (small rings, fast) ===");
-    let mut failures: Vec<String> = Vec::new();
-    for &(d, ents_log2) in &[(256usize, 8u32), (512, 9)] {
-        let entries = 1u64 << ents_log2;
-        for &rb in &[8usize, 32, 256] {
-            let p1 = default_q_single(d);
-            let p2 = two_crt_30bit(d);
-            run_cell("1-CRT ", &p1, entries, rb, &mut failures);
-            run_cell("2-CRT ", &p2, entries, rb, &mut failures);
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "cells failed to round-trip: {failures:#?}"
-    );
-}
-
-#[test]
-fn bisection_medium_rings() {
-    println!("\n=== smoke bisection (medium rings) ===");
-    let mut failures: Vec<String> = Vec::new();
-    for &(d, ents_log2) in &[(1024usize, 10u32), (2048, 11)] {
-        let entries = 1u64 << ents_log2;
-        for &rb in &[8usize, 32, 256] {
-            let p1 = default_q_single(d);
-            let p2 = two_crt_30bit(d);
-            run_cell("1-CRT ", &p1, entries, rb, &mut failures);
-            run_cell("2-CRT ", &p2, entries, rb, &mut failures);
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "cells failed to round-trip: {failures:#?}"
-    );
-}
-
-#[test]
-fn bisection_large_ring_one_shard() {
-    println!("\n=== smoke bisection (d=2048, 1 shard) ===");
-    let mut failures: Vec<String> = Vec::new();
-    let d = 2048usize;
-    let entries = 1u64 << 11;
-    for &rb in &[8usize, 32, 128, 256] {
-        let p1 = default_q_single(d);
-        let p2 = two_crt_30bit(d);
-        run_cell("1-CRT ", &p1, entries, rb, &mut failures);
-        run_cell("2-CRT ", &p2, entries, rb, &mut failures);
-    }
-    assert!(
-        failures.is_empty(),
-        "cells failed to round-trip: {failures:#?}"
-    );
 }

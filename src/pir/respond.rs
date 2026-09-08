@@ -894,7 +894,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "tree-packed extract requires gcd(d, p) == 1; this fixture (d=256, p=65536) violates it, so ExtractError::DegreeNotInvertible is the correct outcome"]
+    #[ignore = "tree-packed extract requires gcd(d, p) == 1, which this fixture (d=256, p=65536) \
+                violates, so ExtractError::DegreeNotInvertible is the correct outcome and the test \
+                can never pass as written. Trigger: refit the fixture to a (d, p) pair with gcd(d, \
+                p) == 1, then un-ignore."]
     fn test_respond_one_packing_correctness() {
         use crate::params::InspireVariant;
         use crate::pir::extract_with_variant;
@@ -934,8 +937,6 @@ mod tests {
                 "NoPacking should work for index {target_index}"
             );
 
-            // Tree packing needs d * column_value < p, which 16-bit columns break at
-            // d=256, p=65536, so only the length is asserted below.
             let response_one_pack = respond_one_packing(&crs, &encoded_db, &client_query).unwrap();
             let extracted_one_pack = extract_with_variant(
                 &crs,
@@ -947,15 +948,18 @@ mod tests {
             .unwrap();
 
             assert_eq!(
-                extracted_one_pack.len(),
-                entry_size,
-                "OnePacking should produce correct size for index {target_index}"
+                extracted_one_pack.as_slice(),
+                expected,
+                "OnePacking should return the entry bytes for index {target_index}"
             );
         }
     }
 
     #[test]
-    #[ignore = "tree-packed extract requires gcd(d, p) == 1; this fixture (d=256, p=65536) violates it, so ExtractError::DegreeNotInvertible is the correct outcome"]
+    #[ignore = "tree-packed extract requires gcd(d, p) == 1, which this fixture (d=256, p=65536) \
+                violates, so ExtractError::DegreeNotInvertible is the correct outcome and the test \
+                can never pass as written. Trigger: refit the fixture to a (d, p) pair with gcd(d, \
+                p) == 1, then un-ignore."]
     fn test_respond_one_packing_small_values() {
         use crate::params::InspireVariant;
         use crate::pir::extract_with_variant;

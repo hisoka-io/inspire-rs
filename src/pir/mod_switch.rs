@@ -616,7 +616,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "production-cell mod-switch roundtrip is the bench's job; gated to keep unit-test wall time bounded"]
+    #[ignore = "compiles only under --features mod-switch-response, which gates the whole module, \
+                and is ignored on top, so it runs in no default configuration. Trigger: cargo test \
+                --release --features mod-switch-response -- --ignored, when changing the 45-bit \
+                mod-switch target or extract_inspiring_mod_switched. Setup alone is ~4 s at \
+                d=2048, essentially all PackParams::try_new."]
     fn production_45bit_mod_switch_roundtrip() {
         let params = production_params();
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0);

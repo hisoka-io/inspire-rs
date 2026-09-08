@@ -30,67 +30,57 @@ fn sample_db_poly(dim: usize, moduli: &[u64], seed: u64) -> Poly {
     Poly::from_coeffs_moduli(coeffs, moduli)
 }
 
-#[test]
-fn external_product_ntt_matches_classical_rgsw_zero() {
-    let p = params();
-    let ctx = p.ntt_context();
-    let mut sampler = GaussianSampler::with_seed(p.sigma, 0);
-    let delta = p.delta();
+// Two example tests (a fixed RGSW(0) case and a 64-seed random loop) were
+// converted into the differential property below (2026-09-06); the
+// dropped-gadget-digit mutant that killed both kills the property.
 
-    let sk = RlweSecretKey::generate(&p, &mut sampler);
-    let gadget = GadgetVector::new(p.gadget_base, p.gadget_len, p.q);
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: 6,
+        failure_persistence: None,
+        .. proptest::prelude::ProptestConfig::default()
+    })]
 
-    let msg_coeffs: Vec<u64> = (0..p.ring_dim).map(|i| (i as u64) % p.p).collect();
-    let msg = Poly::from_coeffs_moduli(msg_coeffs, p.moduli());
-    let a = Poly::random_moduli(p.ring_dim, p.moduli());
-    let e = Poly::sample_gaussian_moduli(p.ring_dim, p.moduli(), &mut sampler);
-    let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a, &e, &ctx);
+    /// The pre-NTT'd external product must be byte-identical to the classical
+    /// one for arbitrary RLWE bytes and every scalar arm; the RGSW(0) case
+    /// runs in every drawn case alongside the drawn scalar.
+    #[test]
+    fn external_product_ntt_matches_classical_property(
+        seed in proptest::prelude::any::<u64>(),
+        scalar in 1u64..=5,
+    ) {
+        let p = params();
+        let ctx = p.ntt_context();
+        let gadget = GadgetVector::new(p.gadget_base, p.gadget_len, p.q);
 
-    let rgsw = RgswCiphertext::encrypt_scalar(&sk, 0, &gadget, &mut sampler, &ctx);
-
-    let classical = external_product(&rlwe, &rgsw, &ctx);
-    let rgsw_ntt = rgsw_rows_to_ntt(&rgsw, &ctx);
-    let fast = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx);
-
-    assert_eq!(
-        classical.a, fast.a,
-        "RGSW(0): external_product_with_ntt_rgsw.a diverged from classical"
-    );
-    assert_eq!(
-        classical.b, fast.b,
-        "RGSW(0): external_product_with_ntt_rgsw.b diverged from classical"
-    );
-}
-
-#[test]
-fn external_product_ntt_matches_classical_random_rlwe() {
-    let p = params();
-    let ctx = p.ntt_context();
-    let gadget = GadgetVector::new(p.gadget_base, p.gadget_len, p.q);
-
-    for seed_idx in 0..64u64 {
-        let mut sampler = GaussianSampler::with_seed(p.sigma, 0);
+        let mut sampler = GaussianSampler::with_seed(p.sigma, seed);
         let sk = RlweSecretKey::generate(&p, &mut sampler);
 
-        let a_poly = sample_db_poly(p.ring_dim, p.moduli(), seed_idx * 17 + 1);
-        let b_poly = sample_db_poly(p.ring_dim, p.moduli(), seed_idx * 17 + 2);
+        let a_poly = sample_db_poly(p.ring_dim, p.moduli(), seed.wrapping_mul(17).wrapping_add(1));
+        let b_poly = sample_db_poly(p.ring_dim, p.moduli(), seed.wrapping_mul(17).wrapping_add(2));
         let rlwe = RlweCiphertext::from_parts(a_poly, b_poly);
 
-        let scalar = (seed_idx % 5) + 1;
-        let rgsw = RgswCiphertext::encrypt_scalar(&sk, scalar, &gadget, &mut sampler, &ctx);
+        for m in [0u64, scalar] {
+            let rgsw = RgswCiphertext::encrypt_scalar(&sk, m, &gadget, &mut sampler, &ctx);
+            let classical = external_product(&rlwe, &rgsw, &ctx);
+            let rgsw_ntt = rgsw_rows_to_ntt(&rgsw, &ctx);
+            let fast = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx);
 
-        let classical = external_product(&rlwe, &rgsw, &ctx);
-        let rgsw_ntt = rgsw_rows_to_ntt(&rgsw, &ctx);
-        let fast = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx);
-
-        assert_eq!(
-            classical.a, fast.a,
-            "seed {seed_idx}: .a components diverged"
-        );
-        assert_eq!(
-            classical.b, fast.b,
-            "seed {seed_idx}: .b components diverged"
-        );
+            proptest::prop_assert_eq!(
+                classical.a.coeffs(),
+                fast.a.coeffs(),
+                "RGSW({}): .a components diverged (seed {})",
+                m,
+                seed
+            );
+            proptest::prop_assert_eq!(
+                classical.b.coeffs(),
+                fast.b.coeffs(),
+                "RGSW({}): .b components diverged (seed {})",
+                m,
+                seed
+            );
+        }
     }
 }
 

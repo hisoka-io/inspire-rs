@@ -9,9 +9,10 @@
 
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::{InspireParams, SecurityLevel};
+use raven_inspire::rlwe::RlweSecretKey;
 use raven_inspire::{
-    extract_inspiring, query, query_seeded, respond, respond_seeded_inspiring, setup, PackingMode,
-    ServerResponse, ServerSessionHandle,
+    extract_inspiring, query, query_seeded, respond, respond_seeded_inspiring, setup,
+    EncodedDatabase, PackingMode, ServerCrs, ServerResponse, ServerSessionHandle,
 };
 
 fn small_params() -> InspireParams {
@@ -25,6 +26,19 @@ fn small_params() -> InspireParams {
         gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     }
+}
+
+/// Shared d=256 / 32-byte-entry cell; the sampler comes back positioned right
+/// after setup, exactly as each test built it inline before the merge.
+fn fixture_32b() -> (ServerCrs, EncodedDatabase, RlweSecretKey, GaussianSampler) {
+    let params = small_params();
+    let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
+    let entry_size = 32;
+    let n = params.ring_dim;
+    let db: Vec<u8> = (0..n * entry_size).map(|i| (i % 256) as u8).collect();
+    let (crs, encoded_db, sk) = setup(&params, &db, entry_size, &mut sampler)
+        .unwrap_or_else(|e| panic!("fixture setup failed: {e:?}"));
+    (crs, encoded_db, sk, sampler)
 }
 
 fn bincode_roundtrip_stable<T>(value: &T, label: &str)
@@ -45,29 +59,60 @@ where
 
 #[test]
 fn server_response_packing_mode_all_variants_bincode_stable() {
-    let params = small_params();
-    let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
-    let entry_size = 32;
-    let n = params.ring_dim;
-    let db: Vec<u8> = (0..n * entry_size).map(|i| (i % 256) as u8).collect();
-    let (crs, encoded_db, sk) = setup(&params, &db, entry_size, &mut sampler).unwrap();
+    let (crs, encoded_db, sk, mut sampler) = fixture_32b();
     let (_state, client_query) = query(&crs, 42, &encoded_db.config, &sk, &mut sampler).unwrap();
     let mut base = respond(&crs, &encoded_db, &client_query).unwrap();
 
     for mode in &[None, Some(PackingMode::Tree), Some(PackingMode::Inspiring)] {
         base.packing_mode = *mode;
         bincode_roundtrip_stable(&base, &format!("ServerResponse.packing_mode = {mode:?}"));
+
+        // Stability alone is blind to a lossy-but-idempotent codec (a
+        // serializer that zeroed every coefficient re-serializes byte-stably),
+        // so the decoded ciphertext content is compared against the in-memory
+        // original too.
+        let bytes = bincode::serialize(&base).unwrap_or_else(|e| panic!("serialize: {e:?}"));
+        let recovered: ServerResponse =
+            bincode::deserialize(&bytes).unwrap_or_else(|e| panic!("deserialize: {e:?}"));
+        assert_eq!(recovered.packing_mode, base.packing_mode, "mode = {mode:?}");
+        assert_eq!(
+            recovered.ciphertext.a.coeffs(),
+            base.ciphertext.a.coeffs(),
+            "ciphertext.a coefficients must survive the wire (mode = {mode:?})"
+        );
+        assert_eq!(
+            recovered.ciphertext.b.coeffs(),
+            base.ciphertext.b.coeffs(),
+            "ciphertext.b coefficients must survive the wire (mode = {mode:?})"
+        );
+        assert_eq!(
+            recovered.column_ciphertexts.len(),
+            base.column_ciphertexts.len(),
+            "column count must survive the wire (mode = {mode:?})"
+        );
+        for (i, (rec, orig)) in recovered
+            .column_ciphertexts
+            .iter()
+            .zip(base.column_ciphertexts.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                rec.a.coeffs(),
+                orig.a.coeffs(),
+                "column {i} a-coefficients must survive the wire (mode = {mode:?})"
+            );
+            assert_eq!(
+                rec.b.coeffs(),
+                orig.b.coeffs(),
+                "column {i} b-coefficients must survive the wire (mode = {mode:?})"
+            );
+        }
     }
 }
 
 #[test]
 fn client_query_session_handle_both_states_bincode_stable() {
-    let params = small_params();
-    let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
-    let entry_size = 32;
-    let n = params.ring_dim;
-    let db: Vec<u8> = (0..n * entry_size).map(|i| (i % 256) as u8).collect();
-    let (crs, encoded_db, sk) = setup(&params, &db, entry_size, &mut sampler).unwrap();
+    let (crs, encoded_db, sk, mut sampler) = fixture_32b();
     let (_state, mut cq) = query(&crs, 17, &encoded_db.config, &sk, &mut sampler).unwrap();
 
     cq.session_handle = None;
@@ -79,12 +124,7 @@ fn client_query_session_handle_both_states_bincode_stable() {
 
 #[test]
 fn seeded_client_query_session_handle_both_states_bincode_stable() {
-    let params = small_params();
-    let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
-    let entry_size = 32;
-    let n = params.ring_dim;
-    let db: Vec<u8> = (0..n * entry_size).map(|i| (i % 256) as u8).collect();
-    let (crs, encoded_db, sk) = setup(&params, &db, entry_size, &mut sampler).unwrap();
+    let (crs, encoded_db, sk, mut sampler) = fixture_32b();
     let (_state, mut sq) = query_seeded(&crs, 17, &encoded_db.config, &sk, &mut sampler).unwrap();
 
     sq.session_handle = None;
@@ -98,12 +138,7 @@ fn seeded_client_query_session_handle_both_states_bincode_stable() {
 fn inspiring_packing_keys_z_body_empty_and_nonempty_bincode_stable() {
     // partial-InspiRING leaves `ClientPackingKeys.z_body` empty, which is the
     // state that needs the length prefix emitted; reached via query_seeded.
-    let params = small_params();
-    let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
-    let entry_size = 32;
-    let n = params.ring_dim;
-    let db: Vec<u8> = (0..n * entry_size).map(|i| (i % 256) as u8).collect();
-    let (crs, encoded_db, sk) = setup(&params, &db, entry_size, &mut sampler).unwrap();
+    let (crs, encoded_db, sk, mut sampler) = fixture_32b();
     let (_state, sq) = query_seeded(&crs, 13, &encoded_db.config, &sk, &mut sampler).unwrap();
 
     let keys = sq

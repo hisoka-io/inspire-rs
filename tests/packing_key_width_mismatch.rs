@@ -39,38 +39,10 @@ fn keys_at(width: usize) -> (ClientPackingKeys, PackParams) {
     (keys, pack)
 }
 
-#[test]
-fn keys_matching_the_server_width_register() {
-    let (keys, pack) = keys_at(8);
-    let ctx = NttContext::new(RING_DIM, pack.q);
-    let store = ServerSessionStore::new();
-    store
-        .register_server_side(keys, &pack, &ctx)
-        .expect("matching gamma must register");
-}
-
-#[test]
-fn keys_from_a_different_width_are_refused() {
-    let (client_keys, _client_pack) = keys_at(4);
-    let (_unused, server_pack) = keys_at(8);
-    assert_eq!(client_keys.num_to_pack, 4);
-    assert_eq!(server_pack.num_to_pack, 8);
-
-    let ctx = NttContext::new(RING_DIM, server_pack.q);
-    let store = ServerSessionStore::new();
-    let err = store
-        .register_server_side(client_keys, &server_pack, &ctx)
-        .expect_err("gamma 4 keys must not register against a gamma 8 server");
-    let msg = format!("{err}");
-    assert!(
-        msg.contains("width mismatch"),
-        "the refusal must name the mismatch; got: {msg}"
-    );
-    assert!(
-        msg.contains('4') && msg.contains('8'),
-        "the refusal must name both widths; got: {msg}"
-    );
-}
+// Two single-cell tests lived here ((8,8) accept and (4,8) refuse); both are
+// cells of the 5x5 table below, which since 2026-09-06 also asserts the
+// refusal message on every mismatched pair (the reworded-message mutant that
+// killed the deleted (4,8) test kills the table now).
 
 /// Every legal width pairing must be screened, not just the one above.
 #[test]
@@ -88,6 +60,18 @@ fn every_mismatched_legal_width_pair_is_refused() {
                 "client gamma {client_width} against server gamma {server_width}: \
                  registration must succeed only when the widths agree"
             );
+            if let Err(err) = outcome {
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("width mismatch"),
+                    "the refusal must name the mismatch; got: {msg}"
+                );
+                assert!(
+                    msg.contains(&client_width.to_string())
+                        && msg.contains(&server_width.to_string()),
+                    "the refusal must name both widths; got: {msg}"
+                );
+            }
         }
     }
 }

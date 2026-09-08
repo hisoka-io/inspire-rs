@@ -64,6 +64,17 @@ fn for_scenario_bridges_to_inspire_params_byte_identical() {
     params
         .validate()
         .expect("derived params must self-validate");
+
+    // The derivation is invariant to record size and gamma choice at this N:
+    // the 32 B / paper-gamma scenario must land on the same cell (this
+    // absorbed the deleted for_scenario_at_32_byte_record_paper_gammas).
+    let params_32b = InspireParams::for_scenario(1 << 20, 32, [16, 1024, 16], 1)
+        .expect("32 B scenario must derive clean");
+    assert_eq!(params_32b.ring_dim, params.ring_dim);
+    assert_eq!(params_32b.crt_moduli, params.crt_moduli);
+    assert_eq!(params_32b.p, params.p);
+    assert_eq!(params_32b.gadget_base, params.gadget_base);
+    assert_eq!(params_32b.gadget_len, params.gadget_len);
 }
 
 #[test]
@@ -77,18 +88,6 @@ fn for_scenario_rejects_noise_budget_violation() {
         "for_scenario at huge N must return Err, got {:?}",
         result.map(|p| (p.ring_dim, p.q, p.p))
     );
-}
-
-#[test]
-fn for_scenario_at_32_byte_record_paper_gammas() {
-    let params = InspireParams::for_scenario(1 << 20, 32, [16, 1024, 16], 1)
-        .expect("32 B scenario must derive clean");
-
-    assert_eq!(params.ring_dim, 2048);
-    assert_eq!(params.crt_moduli, vec![67_043_329u64, 132_120_577u64]);
-    assert_eq!(params.p, 65537);
-    assert_eq!(params.gadget_base, 1u64 << 19);
-    assert_eq!(params.gadget_len, 3);
 }
 
 fn approx_eq(actual: f64, expected: f64, tol: f64, label: &str) {

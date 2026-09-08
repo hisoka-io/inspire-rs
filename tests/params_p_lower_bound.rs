@@ -2,15 +2,27 @@
 
 use raven_inspire::params::InspireParams;
 
+/// Both sides of the ceiling: with every other preset field legal, validate()
+/// must reject exactly p <= 65535, walked densely around the boundary and
+/// sparsely across the range (65536 clears the ceiling; coprimality with the
+/// ring stays opt-in, see the last test).
 #[test]
-fn validate_rejects_a_p_below_the_column_ceiling() {
-    for p in [2u64, 257, 4097, 32771, 65535] {
+fn validate_p_boundary_is_exact_on_both_sides() {
+    let pinned = [2u64, 257, 4097, 32771, 65534, 65535, 65536, 65537, 65538];
+    let swept = (1..=64u64).map(|i| i * 4096 + 1);
+    for p in pinned.into_iter().chain(swept) {
         let mut params = InspireParams::secure_128_d2048();
         params.p = p;
-        let err = params
-            .validate()
-            .expect_err("p below the column ceiling must be refused");
-        assert!(err.contains("p must be"), "error must name p, got: {err}");
+        let should_reject = p <= 65535;
+        let outcome = params.validate();
+        assert_eq!(
+            outcome.is_err(),
+            should_reject,
+            "p={p}: validate() disagreed with the column-ceiling predicate"
+        );
+        if let Err(err) = outcome {
+            assert!(err.contains("p must be"), "error must name p, got: {err}");
+        }
     }
 }
 

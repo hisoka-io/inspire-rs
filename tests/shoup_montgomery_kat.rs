@@ -5,135 +5,22 @@
 
 use raven_inspire::math::mod_q::DEFAULT_Q;
 use raven_inspire::math::ntt::NttContext;
-use raven_inspire::params::DEFAULT_Q_2CRT_30BIT;
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-fn naive_mul_mod(a: u64, b: u64, q: u64) -> u64 {
-    (((a as u128) * (b as u128)) % (q as u128)) as u64
-}
-
-fn random_std_coeffs(n: usize, moduli: &[u64], seed: u64) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(seed);
-    let mut out = Vec::with_capacity(n * moduli.len());
-    for &q in moduli {
-        for _ in 0..n {
-            out.push(rng.gen_range(0..q));
-        }
-    }
-    out
-}
-
-#[test]
-fn shoup_scalar_mul_matches_naive_default_q() {
-    let n = 2048usize;
-    let ctx = NttContext::with_default_q(n);
-    let q = DEFAULT_Q;
-
-    let mut rng = StdRng::seed_from_u64(0xA11CE_u64);
-    for _ in 0..10_000 {
-        let a = rng.gen_range(0..q);
-        let b = rng.gen_range(0..q);
-        let expected = naive_mul_mod(a, b, q);
-
-        // one non-zero position; shoup_mul_at(0, ..) = 0 leaves the rest inert
-        let total = n * ctx.crt_count();
-        let mut a_vec = vec![0u64; total];
-        let mut b_vec = vec![0u64; total];
-        a_vec[0] = a;
-        b_vec[0] = b;
-        let b_shoup = ctx.shoup_precompute_vec(&b_vec);
-        let mut result = vec![0u64; total];
-        ctx.pointwise_mul_shoup(&a_vec, &b_vec, &b_shoup, &mut result);
-
-        assert_eq!(
-            result[0], expected,
-            "shoup_mul at position 0 disagrees with naive: a={a} b={b} q={q} got={} expected={expected}",
-            result[0]
-        );
-    }
-}
-
-#[test]
-fn shoup_scalar_mul_matches_naive_2crt_30bit_limb0() {
-    let q = DEFAULT_Q_2CRT_30BIT[0];
-    let n = 2048usize;
-    let ctx = NttContext::new(n, q);
-
-    let mut rng = StdRng::seed_from_u64(0xB0B_u64);
-    for _ in 0..10_000 {
-        let a = rng.gen_range(0..q);
-        let b = rng.gen_range(0..q);
-        let expected = naive_mul_mod(a, b, q);
-
-        let total = n;
-        let mut a_vec = vec![0u64; total];
-        let mut b_vec = vec![0u64; total];
-        a_vec[0] = a;
-        b_vec[0] = b;
-        let b_shoup = ctx.shoup_precompute_vec(&b_vec);
-        let mut result = vec![0u64; total];
-        ctx.pointwise_mul_shoup(&a_vec, &b_vec, &b_shoup, &mut result);
-
-        assert_eq!(result[0], expected, "2-CRT limb-0 shoup mismatch");
-    }
-}
-
-#[test]
-fn shoup_scalar_mul_matches_naive_2crt_30bit_limb1() {
-    let q = DEFAULT_Q_2CRT_30BIT[1];
-    let n = 2048usize;
-    let ctx = NttContext::new(n, q);
-
-    let mut rng = StdRng::seed_from_u64(0xCAFE_u64);
-    for _ in 0..10_000 {
-        let a = rng.gen_range(0..q);
-        let b = rng.gen_range(0..q);
-        let expected = naive_mul_mod(a, b, q);
-
-        let total = n;
-        let mut a_vec = vec![0u64; total];
-        let mut b_vec = vec![0u64; total];
-        a_vec[0] = a;
-        b_vec[0] = b;
-        let b_shoup = ctx.shoup_precompute_vec(&b_vec);
-        let mut result = vec![0u64; total];
-        ctx.pointwise_mul_shoup(&a_vec, &b_vec, &b_shoup, &mut result);
-
-        assert_eq!(result[0], expected, "2-CRT limb-1 shoup mismatch");
-    }
-}
-
-#[test]
-fn shoup_forward_inverse_roundtrip_default_q_small() {
-    for &n in &[16usize, 64, 256, 1024, 2048] {
-        let ctx = NttContext::with_default_q(n);
-        let original = random_std_coeffs(n, ctx.moduli(), 0xDEAD_u64 + n as u64);
-        let mut coeffs = original.clone();
-        ctx.forward_shoup(&mut coeffs);
-        ctx.inverse_shoup(&mut coeffs);
-        assert_eq!(
-            coeffs, original,
-            "Shoup forward-inverse roundtrip failed at n={n}"
-        );
-    }
-}
-
-#[test]
-fn shoup_forward_inverse_roundtrip_2crt_30bit() {
-    for &n in &[256usize, 1024, 2048] {
-        let ctx = NttContext::with_moduli(n, &DEFAULT_Q_2CRT_30BIT);
-        let original = random_std_coeffs(n, ctx.moduli(), 0xBEEF_u64 + n as u64);
-        let mut coeffs = original.clone();
-        ctx.forward_shoup(&mut coeffs);
-        ctx.inverse_shoup(&mut coeffs);
-        assert_eq!(
-            coeffs, original,
-            "Shoup forward-inverse roundtrip 2-CRT failed at n={n}"
-        );
-    }
-}
+// Six examples lived here (scalar-vs-naive at DEFAULT_Q, the two "_2crt_"
+// tests - which despite their names built SINGLE-prime contexts, so
+// crt_count()==1 and the per-limb indexing in pointwise_mul_shoup /
+// shoup_precompute_vec was never exercised with two limbs - the two
+// forward+inverse round trips, and the edge grid). All six are retired into
+// simd_differential_properties.rs's pointwise_mul_shoup_matches_naive_over_
+// full_vectors (2026-09-06), which walks all four context shapes every case,
+// asserts the FULL vector on a genuine 2-CRT context, embeds the pairwise
+// edge grid, and round-trips forward_shoup+inverse_shoup. Kill matrix
+// (w4e evidence/w546-mc*.txt): the swapped-limb-moduli mutant left all six
+// GREEN and kills the property; the dropped-final-subtract, unscaled-coeff-0
+// and corrupted-twin mutants that killed them kill the property too.
 
 #[test]
 fn shoup_convolution_matches_montgomery_default_q() {
@@ -167,47 +54,5 @@ fn shoup_convolution_matches_montgomery_default_q() {
             result_mont, result_shoup,
             "Shoup convolution disagrees with Montgomery at trial={trial}"
         );
-    }
-}
-
-#[test]
-fn shoup_edge_cases_default_q() {
-    let n = 64usize;
-    let ctx = NttContext::with_default_q(n);
-    let q = DEFAULT_Q;
-
-    let edges = [
-        0u64,
-        1,
-        2,
-        q - 1,
-        q - 2,
-        (1u64 << 32),
-        (1u64 << 52) - 1,
-        (1u64 << 52),
-    ];
-    for &a in &edges {
-        if a >= q {
-            continue;
-        }
-        for &b in &edges {
-            if b >= q {
-                continue;
-            }
-            let expected = naive_mul_mod(a, b, q);
-            let total = n * ctx.crt_count();
-            let mut a_vec = vec![0u64; total];
-            let mut b_vec = vec![0u64; total];
-            a_vec[0] = a;
-            b_vec[0] = b;
-            let b_shoup = ctx.shoup_precompute_vec(&b_vec);
-            let mut result = vec![0u64; total];
-            ctx.pointwise_mul_shoup(&a_vec, &b_vec, &b_shoup, &mut result);
-            assert_eq!(
-                result[0], expected,
-                "edge case failed: a={a} b={b} q={q} got={} expected={expected}",
-                result[0]
-            );
-        }
     }
 }

@@ -71,18 +71,25 @@ fn a_dim_larger_than_its_coefficients_is_refused() {
 fn an_empty_modulus_vector_is_refused_unless_the_whole_value_is_default() {
     let p = Poly::constant(7, 2, DEFAULT_Q);
     let bytes = bincode::serialize(&p).expect("serialize");
-    // moduli is the second length-prefixed vec; a 1 -> 0 flip on its length leaves a
-    // trailing modulus that bincode then reads as the next field, so assert only that
-    // the value is refused, not the specific reason.
+    // moduli is the second length-prefixed vec; a 1 -> 0 flip on its length makes
+    // the trailing modulus reparse as the next field. The window search must hard-
+    // fail when the prefix moves: an if-let here silently skipped every assertion
+    // once the fixture stopped producing a 1u64 window (2026-09-06 mutation audit).
     let mut hostile = bytes.clone();
     let one_le = 1u64.to_le_bytes();
-    if let Some(at) = hostile.windows(8).rposition(|w| w == one_le) {
-        hostile[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
-        assert!(
-            bincode::deserialize::<Poly>(&hostile).is_err(),
-            "a Poly whose modulus vector was emptied on the wire must not decode"
-        );
-    }
+    let at = hostile
+        .windows(8)
+        .rposition(|w| w == one_le)
+        .expect("moduli len prefix must appear in the encoding");
+    hostile[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
+    let err = bincode::deserialize::<Poly>(&hostile)
+        .expect_err("a Poly whose modulus vector was emptied on the wire must not decode");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("Poly decode refused"),
+        "the refusal must come from the validating decode, not an incidental \
+         parse error; got: {msg}"
+    );
 }
 
 /// The count guard bounds how MANY moduli arrive, never their values. A modulus of 0

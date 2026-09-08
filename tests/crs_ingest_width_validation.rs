@@ -65,12 +65,36 @@ fn tree_packing_only_crs_still_deserializes() {
 }
 
 #[test]
-fn honest_crs_round_trips_through_ingest_validation() {
+fn honest_crs_round_trips_and_hostile_blobs_hit_the_magic_and_size_guards() {
     let (crs, _sk, _config) = honest_setup(32);
     let bytes = crs.to_versioned_bytes().expect("serialize");
+    assert_eq!(
+        &bytes[..16],
+        ServerCrs::MAGIC.as_slice(),
+        "the blob must carry the version magic prefix"
+    );
 
     let decoded = ServerCrs::from_versioned_bytes(&bytes).expect("an honest CRS must decode");
     assert_eq!(decoded.inspiring_num_columns, 16);
+
+    let raw = bincode::serialize(&crs).expect("raw serialize");
+    let err = ServerCrs::from_versioned_bytes(&raw)
+        .expect_err("an unversioned blob must fail the magic check");
+    assert!(
+        err.to_string().contains("magic mismatch"),
+        "expected a magic-mismatch error, got: {err}"
+    );
+    assert!(ServerCrs::check_magic(&[0u8; 4]).is_err());
+
+    // the length cap must reject before bincode allocates
+    let mut oversize = ServerCrs::MAGIC.to_vec();
+    oversize.resize(16 + ServerCrs::DECODE_LIMIT_BYTES + 1, 0);
+    let err = ServerCrs::from_versioned_bytes(&oversize)
+        .expect_err("a body over the decode cap must be rejected");
+    assert!(
+        err.to_string().contains("too large"),
+        "expected the decode-cap error, got: {err}"
+    );
 }
 
 #[test]

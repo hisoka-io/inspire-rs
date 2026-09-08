@@ -23,7 +23,9 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
 }
 
 #[test]
-#[ignore = "real-hardware latency baseline at d=2048; run explicitly under --release"]
+#[ignore = "real-hardware p50/p95/p99 baseline for respond_inspiring at the d=2048 production \
+            cell; run under --release. Trigger: changing the respond hot path, or comparing the \
+            parallel feature against the sequential build."]
 fn respond_latency_baseline() {
     let params = InspireParams::secure_128_d2048();
     let d = params.ring_dim;

@@ -119,6 +119,12 @@ fn drive_one_cell(label: &str, entries: usize, entry_bytes: usize, params: Inspi
     eprintln!();
 }
 
+/// Whether the bench body should run.
+///
+/// This used to be the whole story: unset the variable, the body early-returns, and libtest
+/// reports `ok` - a passing test that measured nothing and could not fail. The tests now announce
+/// the skip through the harness's own channel (`eprintln!` is invisible without `--nocapture`) and
+/// the callers assert that they either measured something or were explicitly told not to.
 fn should_run() -> bool {
     if std::env::var("RAVEN_PACKING_OFFLINE_SIMD_BENCH")
         .ok()
@@ -142,11 +148,19 @@ fn should_run() -> bool {
 
 /// Production cell: 65536 entries x 512 B.
 #[test]
-#[ignore = "production cell bench; gated by RAVEN_PACKING_OFFLINE_SIMD_BENCH=1"]
+#[ignore = "vacuous unless RAVEN_PACKING_OFFLINE_SIMD_BENCH=1: without it the body returns before \
+            it measures anything and the test still reports PASS, so --ignored alone proves \
+            nothing. Trigger: that variable plus --features simd-packing-offline --release on an \
+            AVX-512-IFMA52 host, when changing the packing-offline kernel. ~12 s of setup per seed \
+            x 3 seeds."]
 fn bench_prod_cell_65536x512() {
-    if !should_run() {
-        return;
-    }
+    assert!(
+        should_run(),
+        "this bench measured nothing and must not report PASS. It is #[ignore]d, so reaching it \
+         means someone asked for it explicitly; set RAVEN_PACKING_OFFLINE_SIMD_BENCH=1 (with \
+         --features simd-packing-offline --release) or do not select it. A silent early return \
+         here is a passing test that cannot fail."
+    );
 
     let mut params = InspireParams::secure_128_d2048();
     params.security_level = SecurityLevel::Bits128;
@@ -155,11 +169,19 @@ fn bench_prod_cell_65536x512() {
 
 /// Production cell: 131072 entries x 32 B.
 #[test]
-#[ignore = "production cell bench; gated by RAVEN_PACKING_OFFLINE_SIMD_BENCH=1"]
+#[ignore = "vacuous unless RAVEN_PACKING_OFFLINE_SIMD_BENCH=1: without it the body returns before \
+            it measures anything and the test still reports PASS, so --ignored alone proves \
+            nothing. Trigger: that variable plus --features simd-packing-offline --release on an \
+            AVX-512-IFMA52 host, when changing the packing-offline kernel. ~12 s of setup per seed \
+            x 3 seeds."]
 fn bench_prod_cell_131072x32() {
-    if !should_run() {
-        return;
-    }
+    assert!(
+        should_run(),
+        "this bench measured nothing and must not report PASS. It is #[ignore]d, so reaching it \
+         means someone asked for it explicitly; set RAVEN_PACKING_OFFLINE_SIMD_BENCH=1 (with \
+         --features simd-packing-offline --release) or do not select it. A silent early return \
+         here is a passing test that cannot fail."
+    );
 
     let mut params = InspireParams::secure_128_d2048();
     params.security_level = SecurityLevel::Bits128;

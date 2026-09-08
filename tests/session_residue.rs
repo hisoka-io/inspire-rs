@@ -7,9 +7,7 @@
 
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::{InspireParams, SecurityLevel};
-use raven_inspire::pir::{
-    extract_inspiring, respond_inspiring, ClientSession, ServerCrs, ServerSessionStore,
-};
+use raven_inspire::pir::{extract_inspiring, respond_inspiring, ClientSession, ServerSessionStore};
 use raven_inspire::setup;
 
 fn d256_params() -> InspireParams {
@@ -148,42 +146,10 @@ fn residue_drops_handshake_handle_and_rehydrated_session_decodes_inline() {
     assert_eq!(decoded.as_slice(), &db[7 * entry_size..8 * entry_size]);
 }
 
-#[test]
-fn crs_versioned_bytes_round_trip_and_magic_guard() {
-    let params = d256_params();
-    let entry_size = 32usize;
-    let db = vec![0u8; params.ring_dim * entry_size];
-    let mut sampler = GaussianSampler::with_seed(params.sigma, 17);
-    let (crs, _encoded_db, _sk) = setup(&params, &db, entry_size, &mut sampler).expect("setup");
-
-    let versioned = crs.to_versioned_bytes().expect("to_versioned_bytes");
-    assert_eq!(
-        &versioned[..16],
-        ServerCrs::MAGIC.as_slice(),
-        "the blob must carry the version magic prefix"
-    );
-    let decoded = ServerCrs::from_versioned_bytes(&versioned).expect("from_versioned_bytes");
-    assert_eq!(decoded.ring_dim(), crs.ring_dim());
-
-    let raw = bincode::serialize(&crs).expect("raw serialize");
-    let err = ServerCrs::from_versioned_bytes(&raw)
-        .expect_err("an unversioned blob must fail the magic check");
-    assert!(
-        err.to_string().contains("magic mismatch"),
-        "expected a magic-mismatch error, got: {err}"
-    );
-    assert!(ServerCrs::check_magic(&[0u8; 4]).is_err());
-
-    // the length cap must reject before bincode allocates
-    let mut oversize = ServerCrs::MAGIC.to_vec();
-    oversize.resize(16 + ServerCrs::DECODE_LIMIT_BYTES + 1, 0);
-    let err = ServerCrs::from_versioned_bytes(&oversize)
-        .expect_err("a body over the decode cap must be rejected");
-    assert!(
-        err.to_string().contains("too large"),
-        "expected the decode-cap error, got: {err}"
-    );
-}
+// A CRS versioned-bytes test lived here; its round-trip half duplicated
+// crs_ingest_width_validation.rs and its unique halves (the magic-mismatch
+// guard and the decode-size cap) moved there with the rest of the CRS ingest
+// surface (2026-09-06). This file is about the session residue.
 
 #[test]
 fn debug_redacts_secret_key_on_session_and_residue() {

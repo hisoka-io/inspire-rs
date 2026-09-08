@@ -126,7 +126,8 @@ fn commit_c_extract_with_variant_handles_inspiring_response() {
 ///
 /// `#[ignore]`d: 2^20 x 256 B allocates a 256 MiB database and runs ~10 s.
 #[test]
-#[ignore = "2^20 x 256 B cell; run explicitly under --release"]
+#[ignore = "2^20 x 256 B cell: allocates a 256 MiB database and runs ~10 s under --release. \
+            Trigger: changing the secure_128_d* presets, DEFAULT_Q, or the CRT form."]
 fn commit_d_preset_default_q_passes_smoke_at_2_20_x_256b() {
     let params = InspireParams::secure_128_d2048();
     assert_eq!(

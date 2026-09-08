@@ -13,7 +13,9 @@ mod setup;
 
 pub use error::Result;
 
-pub use encode_db::{encode_column, encode_database, encode_direct, inverse_monomial};
+pub use encode_db::{
+    encode_column, encode_database, encode_direct, inverse_monomial, reconstruct_entry,
+};
 pub use extract::{extract, extract_inspiring, extract_two_packing, extract_with_variant};
 pub use query::{
     query, query_seeded, ClientQuery, ClientState, PackingMode, SeededClientQuery,
