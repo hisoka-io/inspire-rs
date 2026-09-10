@@ -90,7 +90,7 @@ fn residue_round_trip_preserves_tree_only_none_packing() {
         .collect();
 
     let mut sampler = GaussianSampler::with_seed(params.sigma, 11);
-    let (mut crs, _encoded_db, rlwe_sk) =
+    let (mut crs, encoded_db, rlwe_sk) =
         setup(&params, &db, entry_size, &mut sampler).expect("setup");
     crs.inspiring_num_columns = 0;
 
@@ -108,6 +108,23 @@ fn residue_round_trip_preserves_tree_only_none_packing() {
         "the None packing-keys shape must survive the residue round-trip"
     );
     assert!(session2.pack_params().is_none());
+
+    for session in [&session, &session2] {
+        for message in [
+            session
+                .query(3, &encoded_db.config, &mut sampler)
+                .expect_err("unseeded session query must refuse absent packing material")
+                .to_string(),
+            session
+                .query_seeded(3, &encoded_db.config, &mut sampler)
+                .expect_err("seeded session query must refuse absent packing material")
+                .to_string(),
+        ] {
+            assert!(message.contains("zero InspiRING width"), "{message}");
+            assert!(message.contains("tree-packed"), "{message}");
+            assert!(message.contains("TwoPacking"), "{message}");
+        }
+    }
 }
 
 #[test]

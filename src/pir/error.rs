@@ -2,6 +2,8 @@
 
 use std::fmt;
 
+use super::query::PackingMode;
+
 /// PIR operation error.
 #[derive(Debug)]
 pub struct PirError(pub String);
@@ -43,6 +45,24 @@ pub enum ExtractError {
         /// Plaintext modulus.
         p: u64,
     },
+    /// An unpacked response carried a different number of ciphertexts than the record width needs.
+    ColumnCountMismatch {
+        /// Extractor that rejected the response.
+        operation: &'static str,
+        /// Ciphertexts received.
+        got: usize,
+        /// Ciphertexts required.
+        expected: usize,
+        /// Record width that determined `expected`.
+        entry_size: usize,
+    },
+    /// The TwoPacking extractor received a tree-packed or untagged response.
+    TwoPackingModeMismatch {
+        /// Decoded semantic mode.
+        mode: Option<PackingMode>,
+        /// Equivalent tag in the optional RIMS codec.
+        rims_tag_byte: u8,
+    },
 }
 
 impl fmt::Display for ExtractError {
@@ -52,6 +72,25 @@ impl fmt::Display for ExtractError {
                 f,
                 "extract_packed: d^{{-1}} mod p does not exist (d={d}, p={p}, gcd != 1); \
                  use parameters with gcd(ring_dim, p) == 1"
+            ),
+            Self::ColumnCountMismatch {
+                operation,
+                got,
+                expected,
+                entry_size,
+            } => write!(
+                f,
+                "{operation}: response column-count mismatch for entry_size {entry_size}: \
+                 got {got}, expected {expected}; refusing a partial or surplus response"
+            ),
+            Self::TwoPackingModeMismatch {
+                mode,
+                rims_tag_byte,
+            } => write!(
+                f,
+                "TwoPacking extractor refuses decoded packing_mode={mode:?}: response is \
+                 tree-packed (RIMS tag byte {rims_tag_byte}) while TwoPacking requires \
+                 PackingMode::Inspiring"
             ),
         }
     }

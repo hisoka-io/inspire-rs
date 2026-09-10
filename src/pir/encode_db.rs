@@ -3,6 +3,7 @@
 
 use crate::math::Poly;
 use crate::params::{InspireParams, ShardConfig};
+use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 
 use super::setup::ShardData;
 
@@ -29,18 +30,45 @@ pub fn encode_direct(values: &[u64], d: usize, q: u64, moduli: &[u64]) -> Poly {
     Poly::from_coeffs_moduli(coeffs, moduli)
 }
 
-/// X^(-k) mod (X^d + 1), i.e. -X^(d-k) for k > 0 and 1 for k = 0.
-pub fn inverse_monomial(k: usize, d: usize, q: u64, moduli: &[u64]) -> Poly {
-    let mut coeffs = vec![0u64; d];
+fn reduce_exponent_by_public_ring(exponent: u64, two_d: u64) -> u64 {
+    debug_assert_ne!(two_d, 0);
+    let reciprocal = u64::MAX / two_d;
+    let quotient = ((u128::from(exponent) * u128::from(reciprocal)) >> 64) as u64;
+    let remainder = exponent.wrapping_sub(quotient.wrapping_mul(two_d));
+    let correct = remainder.ct_gt(&two_d.wrapping_sub(1));
+    u64::conditional_select(&remainder, &remainder.wrapping_sub(two_d), correct)
+}
 
-    if k == 0 {
-        coeffs[0] = 1;
-    } else {
-        let pos = d - k;
-        coeffs[pos] = q - 1;
+/// X^(-k) mod (X^d + 1), with `d > 0` and exponents reduced modulo 2d.
+pub fn inverse_monomial(k: usize, d: usize, q: u64, moduli: &[u64]) -> Poly {
+    let d_u64 = d as u64;
+    let two_d = d_u64.wrapping_mul(2);
+    let reduced_k = reduce_exponent_by_public_ring(k as u64, two_d);
+    let is_zero = reduced_k.ct_eq(&0);
+    let upper_half = reduced_k.ct_gt(&d_u64);
+    let lower_target = d_u64.wrapping_sub(reduced_k);
+    let upper_target = two_d.wrapping_sub(reduced_k);
+    let target = u64::conditional_select(&lower_target, &upper_target, upper_half);
+    let negative = !is_zero & !upper_half;
+    let mut crt_coeffs = vec![0u64; d * moduli.len()];
+
+    for (limb, &modulus) in moduli.iter().enumerate() {
+        let negative_one = q.wrapping_sub(1) % modulus;
+        let start = limb * d;
+        let coeffs = &mut crt_coeffs[start..start + d];
+        for (position, coeff) in coeffs.iter_mut().enumerate() {
+            let zero_value = u64::conditional_select(&0, &1, is_zero & (position as u64).ct_eq(&0));
+            let monomial_value = u64::conditional_select(&1, &negative_one, negative);
+            let selected = u64::conditional_select(
+                &0,
+                &monomial_value,
+                !is_zero & (position as u64).ct_eq(&target),
+            );
+            *coeff = zero_value | selected;
+        }
     }
 
-    Poly::from_coeffs_moduli(coeffs, moduli)
+    Poly::from_crt_coeffs_reduced(crt_coeffs, moduli)
 }
 
 /// Split concatenated entries into shards of at most `ring_dim` entries and encode each.

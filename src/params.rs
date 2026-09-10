@@ -28,14 +28,14 @@
 
 use crate::math::NttContext;
 use serde::{Deserialize, Serialize};
+use subtle::{ConditionallySelectable, ConstantTimeGreater};
 
 /// Default CRT moduli from the InsPIRe reference implementation.
 pub const DEFAULT_CRT_MODULI: [u64; 2] = [268_369_921, 249_561_089];
 
-/// Security level for parameter selection.
+/// Advisory label for the caller's intended security target.
 ///
-/// Determines the cryptographic strength of the PIR protocol. Higher security
-/// levels require larger parameters, increasing communication and computation costs.
+/// This label neither selects nor validates parameters.
 ///
 /// # Variants
 ///
@@ -183,9 +183,7 @@ pub struct InspireParams {
     /// Typical value: 3 for q ≈ 2^60 and z = 2^20.
     pub gadget_len: usize,
 
-    /// Target security level.
-    ///
-    /// Validated via lattice-estimator to ensure cryptographic strength.
+    /// Advisory security target; serialized but not validated or dispatched on.
     pub security_level: SecurityLevel,
 }
 
@@ -586,24 +584,14 @@ pub struct AdaptiveDerivation {
 /// `get_variance` from `params.rs:105-107` in Google's reference.
 /// Returns variance in `log2` units.
 ///
-/// # Open crypto-safety item
+/// The `(q~/q)^2` factor of Theorem 7 (eprint 2025/1352) does not belong here:
+/// this is the pre-mod-switch variance, and `required_q_log2` sizes `q`, not
+/// `q~`. Absent instead is the theorem's additive `d*sigma_chi^2/4` rounding
+/// term, inert while nothing mod-switches and load-bearing once response
+/// modulus switching ships.
 ///
-/// External audit flagged a potentially missing `(q̃ / q)^2` factor
-/// (paper InsPIRe Theorem 7, lines 1250-1263). Our implementation
-/// mirrors Google's private-membership reference at
-/// `private-membership/research/InsPIRe/src/params.rs:105-107`
-/// verbatim; the factor — if authoritatively in the paper — may be
-/// absorbed upstream into the noise-budget slack. Verification
-/// requires direct paper read against Theorem 7 + noise-calibration
-/// measurement across PSE 3x3 grid cells. **Gated to cryptographer
-/// review** since a change here affects shipping noise-budget
-/// assumptions.
-///
-/// Current derivations at 2^20 × 256 B with paper γ=[64, 1024, 64]
-/// satisfy the noise budget with ~0.09-bit slack under the
-/// current formula (confirmed via Solinas integration). A missing
-/// factor would likely widen the margin, not narrow it — no known
-/// shipping cell is at risk under the current form.
+/// Derivations at 2^20 x 256 B with paper gamma=[64, 1024, 64] clear the noise
+/// budget with ~0.09-bit slack under this formula.
 #[inline]
 fn get_variance(
     dim: f64,
@@ -1014,6 +1002,19 @@ pub struct ShardConfig {
     pub total_entries: u64,
 }
 
+fn div_rem_by_public_divisor(dividend: u64, divisor: u64) -> (u64, u64) {
+    debug_assert_ne!(divisor, 0);
+    let reciprocal = u64::MAX / divisor;
+    let quotient = ((u128::from(dividend) * u128::from(reciprocal)) >> 64) as u64;
+    let remainder = dividend.wrapping_sub(quotient.wrapping_mul(divisor));
+    let correct = remainder.ct_gt(&divisor.wrapping_sub(1));
+    let quotient_correction = u64::conditional_select(&0, &1, correct);
+    (
+        quotient.wrapping_add(quotient_correction),
+        u64::conditional_select(&remainder, &remainder.wrapping_sub(divisor), correct),
+    )
+}
+
 impl ShardConfig {
     /// Creates the shard configuration for a flat, fixed-width database at a
     /// given ring dimension.
@@ -1215,10 +1216,11 @@ impl ShardConfig {
                  ring_dim * entry_size_bytes with a non-zero entry size",
             );
         }
-        let shard_id: u32 = (global_idx / entries_per_shard).try_into().map_err(|_| {
+        let (shard_id, local_index) = div_rem_by_public_divisor(global_idx, entries_per_shard);
+        let shard_id: u32 = shard_id.try_into().map_err(|_| {
             "ShardConfig: shard_id exceeds u32::MAX; raise shard_size_bytes or lower total_entries"
         })?;
-        Ok((shard_id, global_idx % entries_per_shard))
+        Ok((shard_id, local_index))
     }
 
     /// Validate the ShardConfig against invariants that downstream

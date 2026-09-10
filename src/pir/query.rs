@@ -33,6 +33,8 @@ fn seeded_query_with_gadget(
     sampler: &mut GaussianSampler,
     gadget: &GadgetVector,
 ) -> Result<(ClientState, SeededClientQuery)> {
+    ensure_inspiring_query_width(crs)?;
+    ensure_query_shard_geometry(crs, shard_config)?;
     let d = crs.ring_dim();
     let q = crs.modulus();
     let ctx = crs.params.ntt_context();
@@ -52,17 +54,12 @@ fn seeded_query_with_gadget(
         local_index,
     };
 
-    let inspiring_packing_keys = maybe_generate_packing_keys(crs, rlwe_sk, sampler)?;
-    let packing_mode = if inspiring_packing_keys.is_some() {
-        PackingMode::Inspiring
-    } else {
-        PackingMode::Tree
-    };
+    let inspiring_packing_keys = Some(generate_packing_keys(crs, rlwe_sk, sampler)?);
 
     let query = SeededClientQuery {
         shard_id,
         rgsw_ciphertext,
-        packing_mode,
+        packing_mode: PackingMode::Inspiring,
         inspiring_packing_keys,
         session_handle: None,
     };
@@ -149,23 +146,44 @@ impl SeededClientQuery {
     }
 }
 
-fn maybe_generate_packing_keys(
+fn generate_packing_keys(
     crs: &ServerCrs,
     rlwe_sk: &RlweSecretKey,
     sampler: &mut GaussianSampler,
-) -> Result<Option<ClientPackingKeys>> {
-    if crs.inspiring_num_columns == 0 {
-        return Ok(None);
-    }
-
+) -> Result<ClientPackingKeys> {
+    ensure_inspiring_query_width(crs)?;
     let pack_params = PackParams::try_new(&crs.params, crs.inspiring_num_columns)
         .map_err(|e| pir_err!("CRS carries an unusable InspiRING width: {e}"))?;
-    Ok(Some(ClientPackingKeys::generate(
+    Ok(ClientPackingKeys::generate(
         rlwe_sk,
         &pack_params,
         crs.inspiring_w_seed,
         sampler,
-    )))
+    ))
+}
+
+fn ensure_inspiring_query_width(crs: &ServerCrs) -> Result<()> {
+    if crs.inspiring_num_columns == 0 {
+        return Err(pir_err!(
+            "PIR query refused a zero InspiRING width: falling back to a tree-packed \
+             response would return wrong bytes under the TwoPacking extractor"
+        ));
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_query_shard_geometry(
+    crs: &ServerCrs,
+    shard_config: &ShardConfig,
+) -> Result<()> {
+    shard_config
+        .validate_for_params(&crs.params)
+        .map_err(|cause| {
+            pir_err!(
+                "PIR query shard geometry does not match ring_dim {}: {cause}",
+                crs.ring_dim()
+            )
+        })
 }
 
 /// Build a query for `global_index` plus the client state needed to extract it.
@@ -176,6 +194,8 @@ pub fn query(
     rlwe_sk: &RlweSecretKey,
     sampler: &mut GaussianSampler,
 ) -> Result<(ClientState, ClientQuery)> {
+    ensure_inspiring_query_width(crs)?;
+    ensure_query_shard_geometry(crs, shard_config)?;
     let d = crs.ring_dim();
     let q = crs.modulus();
     let ctx = crs.params.ntt_context();
@@ -196,17 +216,12 @@ pub fn query(
         local_index,
     };
 
-    let inspiring_packing_keys = maybe_generate_packing_keys(crs, rlwe_sk, sampler)?;
-    let packing_mode = if inspiring_packing_keys.is_some() {
-        PackingMode::Inspiring
-    } else {
-        PackingMode::Tree
-    };
+    let inspiring_packing_keys = Some(generate_packing_keys(crs, rlwe_sk, sampler)?);
 
     let query = ClientQuery {
         shard_id,
         rgsw_ciphertext,
-        packing_mode,
+        packing_mode: PackingMode::Inspiring,
         inspiring_packing_keys,
         session_handle: None,
     };

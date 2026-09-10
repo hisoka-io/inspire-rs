@@ -2,7 +2,7 @@
 
 use crate::math::{GaussianSampler, NttContext, Poly};
 use crate::rgsw::GadgetVector;
-use crate::rlwe::{RlweCiphertext, RlweSecretKey};
+use crate::rlwe::{apply_automorphism, RlweCiphertext, RlweSecretKey};
 use serde::{Deserialize, Serialize};
 
 fn sample_error_poly(dim: usize, moduli: &[u64], sampler: &mut GaussianSampler) -> Poly {
@@ -161,24 +161,7 @@ pub fn generate_automorphism_ks_matrix(
     sampler: &mut GaussianSampler,
     ctx: &NttContext,
 ) -> KeySwitchingMatrix {
-    let d = sk.ring_dim();
-    let q = sk.modulus();
-
-    let mut auto_s_coeffs = vec![0u64; d];
-    for i in 0..d {
-        let new_idx = (automorphism * i) % (2 * d);
-        let coeff = sk.poly.coeff(i);
-
-        if new_idx < d {
-            auto_s_coeffs[new_idx] = coeff;
-        } else {
-            // X^(d+k) = -X^k.
-            let reduced_idx = new_idx - d;
-            auto_s_coeffs[reduced_idx] = if coeff == 0 { 0 } else { q - coeff };
-        }
-    }
-    let auto_s =
-        RlweSecretKey::from_poly(Poly::from_coeffs_moduli(auto_s_coeffs, sk.poly.moduli()));
+    let auto_s = RlweSecretKey::from_poly(apply_automorphism(&sk.poly, automorphism));
 
     generate_ks_matrix(&auto_s, sk, gadget, sampler, ctx)
 }
@@ -262,5 +245,17 @@ mod tests {
         let ks_matrix = generate_automorphism_ks_matrix(&sk, auto_g, &gadget, &mut sampler, &ctx);
 
         assert_eq!(ks_matrix.rows.len(), params.gadget_len);
+        let transformed = apply_automorphism(&sk.poly, auto_g);
+        for (row, power) in ks_matrix.rows.iter().zip(gadget.powers()) {
+            let decrypted = &row.a.mul_ntt(&sk.poly, &ctx) + &row.b;
+            let expected = transformed.scalar_mul(power);
+            for coefficient in 0..params.ring_dim {
+                let difference = decrypted
+                    .coeff(coefficient)
+                    .abs_diff(expected.coeff(coefficient));
+                let centered = difference.min(params.q - difference);
+                assert!(centered < params.delta() / 10);
+            }
+        }
     }
 }

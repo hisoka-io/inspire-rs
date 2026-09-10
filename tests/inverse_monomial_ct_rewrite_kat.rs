@@ -9,10 +9,10 @@
 //! two rings and both CRT shapes.
 //!
 //! The expectation is derived, not observed. The ring is negacyclic
-//! (X^d = -1), so X^(-k) = -X^(d-k) for k > 0 and 1 for k = 0: exactly one
-//! nonzero coefficient, at d-k, carrying q-1, CRT-split when the modulus is a
-//! product. The sweep digests are measured, and stand as a second witness that
-//! nothing outside the derived positions moved.
+//! (X^d = -1), so exponents reduce modulo 2d. For 0 < k <= d,
+//! X^(-k) = -X^(d-k); the upper half wraps to a positive monomial. The sweep
+//! digests are measured, and stand as a second witness that nothing outside the
+//! derived positions moved.
 
 #![allow(
     clippy::expect_used,
@@ -39,10 +39,15 @@ fn fnv1a_u64s(values: &[u64]) -> u64 {
 }
 
 /// The backing array `inverse_monomial(k, ..)` must produce: residues
-/// concatenated by modulus, `dim * crt_count` long, zero except at `d-k`.
+/// concatenated by modulus, `dim * crt_count` long, with one selected residue.
 fn derived_backing(k: usize, d: usize, moduli: &[u64]) -> Vec<u64> {
     let q: u64 = moduli.iter().product();
-    let (pos, value) = if k == 0 { (0, 1u64) } else { (d - k, q - 1) };
+    let reduced_k = k % (2 * d);
+    let (pos, value) = match reduced_k {
+        0 => (0, 1u64),
+        value if value <= d => (d - value, q - 1),
+        value => (2 * d - value, 1u64),
+    };
     let mut want = vec![0u64; d * moduli.len()];
     for (limb, &m) in moduli.iter().enumerate() {
         want[limb * d + pos] = value % m;
@@ -158,6 +163,15 @@ fn pins_boundary_indices_two_crt_d256() {
         assert_pinned(k, 256, &moduli);
         assert_inverts_x_to_the_k(k, 256, &moduli);
         assert_rotates_value_k_to_zero(k, 256, &moduli);
+    }
+}
+
+#[test]
+fn pins_exponents_reduced_across_both_ring_halves() {
+    for moduli in [&[Q_SINGLE][..], &DEFAULT_Q_2CRT_30BIT[..]] {
+        for k in [256, 257, 511, 512, 513, usize::MAX] {
+            assert_pinned(k, 256, moduli);
+        }
     }
 }
 

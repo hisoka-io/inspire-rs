@@ -5,11 +5,18 @@
     clippy::maybe_infinite_iter,
     reason = "take_while over a doubling sequence terminates at usize overflow"
 )]
+#![allow(
+    clippy::expect_used,
+    reason = "test fixture and source-scan failures must abort at their boundary"
+)]
 
+use proptest::prelude::*;
+use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
 use raven_inspire::inspiring::inspiring2::{PackParams, PackParamsError};
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::{InspireParams, SecurityLevel, ShardConfig, DEFAULT_Q_2CRT_30BIT};
-use raven_inspire::pir::{extract_inspiring, query, respond_inspiring, setup};
+use raven_inspire::pir::{extract_inspiring, query, respond_inspiring, setup, setup_with_rng};
 
 fn params_at(ring_dim: usize) -> InspireParams {
     InspireParams {
@@ -277,4 +284,120 @@ fn degenerate_shard_config_reports_instead_of_dividing_by_zero() {
     };
     assert!(overflowing.validate().is_err());
     assert!(overflowing.try_index_to_shard(u32::MAX as u64 + 1).is_err());
+}
+
+fn assert_shard_mapping_matches_native(global_idx: u64, entries_per_shard: u64) {
+    let config = ShardConfig {
+        shard_size_bytes: entries_per_shard,
+        entry_size_bytes: 1,
+        total_entries: u64::MAX,
+    };
+    let expected_shard = global_idx / entries_per_shard;
+    let mapped = config.try_index_to_shard(global_idx);
+    if expected_shard > u64::from(u32::MAX) {
+        assert!(mapped.is_err());
+    } else {
+        assert_eq!(
+            mapped,
+            Ok((expected_shard as u32, global_idx % entries_per_shard))
+        );
+    }
+}
+
+#[test]
+fn shard_mapping_matches_native_at_divisor_boundaries() {
+    for entries_per_shard in [1, 2, 3, 7, 256, 2048, u32::MAX as u64, u64::MAX] {
+        for global_idx in [
+            0,
+            entries_per_shard.saturating_sub(1),
+            entries_per_shard,
+            entries_per_shard.saturating_add(1),
+            u64::MAX,
+        ] {
+            assert_shard_mapping_matches_native(global_idx, entries_per_shard);
+        }
+    }
+}
+
+#[test]
+fn security_level_is_an_advisory_serialized_label() {
+    let bits128 = InspireParams::secure_128_d2048();
+    let mut bits256 = bits128.clone();
+    bits256.security_level = SecurityLevel::Bits256;
+
+    assert!(bits128.validate().is_ok());
+    assert!(bits256.validate().is_ok());
+    assert_ne!(
+        bincode::serialize(&bits128).expect("serialize 128-bit declaration"),
+        bincode::serialize(&bits256).expect("serialize 256-bit declaration")
+    );
+}
+
+fn rust_sources_under(directory: &std::path::Path, sources: &mut Vec<std::path::PathBuf>) {
+    for entry in std::fs::read_dir(directory).expect("read source directory") {
+        let entry = entry.expect("source entry");
+        let source_path = entry.path();
+        if source_path.is_dir() {
+            rust_sources_under(&source_path, sources);
+        } else if source_path
+            .extension()
+            .is_some_and(|extension| extension == "rs")
+        {
+            sources.push(source_path);
+        }
+    }
+}
+
+#[test]
+fn security_level_has_no_production_read() {
+    let mut sources = Vec::new();
+    rust_sources_under(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+    assert!(!sources.is_empty(), "source scan matched nothing");
+    for source_path in sources {
+        let source = std::fs::read_to_string(&source_path).expect("read Rust source");
+        assert!(
+            !source.contains(".security_level"),
+            "SecurityLevel became behavior at {}",
+            source_path.display()
+        );
+    }
+}
+
+#[test]
+fn security_level_does_not_control_pir_correctness() {
+    let run = |security_level| {
+        let mut params = params_at(256);
+        params.security_level = security_level;
+        let database: Vec<u8> = (0..params.ring_dim * 32)
+            .map(|index| u8::try_from(index % 251).expect("bounded byte"))
+            .collect();
+        let mut setup_sampler = GaussianSampler::with_seed(params.sigma, 41);
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
+        let (crs, encoded, secret_key) =
+            setup_with_rng(&params, &database, 32, &mut setup_sampler, &mut rng)
+                .expect("advisory setup");
+        let mut query_sampler = GaussianSampler::with_seed(params.sigma, 43);
+        let (state, client_query) =
+            query(&crs, 7, &encoded.config, &secret_key, &mut query_sampler)
+                .expect("advisory query");
+        let response = respond_inspiring(&crs, &encoded, &client_query).expect("advisory respond");
+        extract_inspiring(&crs, &state, &response, 32).expect("advisory extract")
+    };
+
+    let bits128 = run(SecurityLevel::Bits128);
+    let bits256 = run(SecurityLevel::Bits256);
+    assert_eq!(bits128, bits256);
+}
+
+proptest! {
+    #[test]
+    fn shard_mapping_matches_native_division(
+        global_idx in any::<u64>(),
+        entries_per_shard in 1u64..=u64::MAX,
+    ) {
+        assert_shard_mapping_matches_native(global_idx, entries_per_shard);
+    }
 }

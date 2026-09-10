@@ -12,7 +12,7 @@ use crate::rlwe::RlweCiphertext;
 
 use super::error::{pir_err, Result};
 use super::query::{ClientQuery, PackingMode, SeededClientQuery};
-use super::setup::{EncodedDatabase, ServerCrs};
+use super::setup::{EncodedDatabase, ServerCrs, ShardData};
 
 /// Server response: the packed ciphertext, or one ciphertext per column.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +41,19 @@ impl ServerResponse {
     }
 }
 
+fn require_shard_width(operation: &'static str, crs: &ServerCrs, shard: &ShardData) -> Result<()> {
+    let got = shard.polynomials.len();
+    let expected = crs.inspiring_num_columns;
+    if expected == 0 || got != expected {
+        return Err(pir_err!(
+            "{operation}: shard {} column-count mismatch: got {got}, expected {expected} from \
+             the CRS; refusing malformed encoded state before it returns wrong plaintext",
+            shard.id,
+        ));
+    }
+    Ok(())
+}
+
 /// Respond with one RLWE ciphertext per column, in parallel.
 pub fn respond(
     crs: &ServerCrs,
@@ -55,15 +68,7 @@ pub fn respond(
         .iter()
         .find(|s| s.id == query.shard_id)
         .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
-
-    if shard.polynomials.is_empty() {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero.clone(),
-            column_ciphertexts: vec![zero],
-            packing_mode: None,
-        });
-    }
+    require_shard_width("respond", crs, shard)?;
 
     // RGSW is constant across a shard's columns, so its forward NTTs amortize.
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
@@ -102,17 +107,7 @@ pub fn respond_with_variant(
 ) -> Result<ServerResponse> {
     match variant {
         InspireVariant::NoPacking => respond(crs, encoded_db, query),
-        InspireVariant::OnePacking => match query.packing_mode {
-            PackingMode::Inspiring => {
-                if query.inspiring_packing_keys.is_none() {
-                    return Err(pir_err!(
-                            "InspiRING packing keys missing (set packing_mode=tree to use tree packing)"
-                        ));
-                }
-                respond_inspiring(crs, encoded_db, query)
-            }
-            PackingMode::Tree => respond_one_packing(crs, encoded_db, query),
-        },
+        InspireVariant::OnePacking => respond_one_packing(crs, encoded_db, query),
         // Refused rather than routed through OnePacking: the extractor would decode a
         // mismatched format and return wrong plaintext with no error.
         InspireVariant::TwoPacking => Err(pir_err!(
@@ -133,16 +128,18 @@ pub fn respond_seeded_with_variant(
 ) -> Result<ServerResponse> {
     match variant {
         InspireVariant::NoPacking => respond_seeded(crs, encoded_db, query),
-        InspireVariant::OnePacking | InspireVariant::TwoPacking => match query.packing_mode {
+        InspireVariant::OnePacking => respond_seeded_packed(crs, encoded_db, query),
+        InspireVariant::TwoPacking => match query.packing_mode {
             PackingMode::Inspiring => {
                 if query.inspiring_packing_keys.is_none() {
-                    return Err(pir_err!(
-                            "InspiRING packing keys missing (set packing_mode=tree to use tree packing)"
-                        ));
+                    return Err(pir_err!("TwoPacking requires InspiRING packing keys"));
                 }
                 respond_seeded_inspiring(crs, encoded_db, query)
             }
-            PackingMode::Tree => respond_seeded_packed(crs, encoded_db, query),
+            PackingMode::Tree => Err(pir_err!(
+                "respond_seeded_with_variant(TwoPacking) refuses PackingMode::Tree: \
+                 TwoPacking requires an InspiRING response"
+            )),
         },
     }
 }
@@ -168,15 +165,7 @@ pub fn respond_one_packing(
         .iter()
         .find(|s| s.id == query.shard_id)
         .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
-
-    if shard.polynomials.is_empty() {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero.clone(),
-            column_ciphertexts: vec![zero],
-            packing_mode: None,
-        });
-    }
+    require_shard_width("respond_one_packing", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
     let rgsw_gadget = &query.rgsw_ciphertext.gadget;
@@ -200,7 +189,7 @@ pub fn respond_one_packing(
     Ok(ServerResponse {
         ciphertext: packed,
         column_ciphertexts: vec![],
-        packing_mode: None,
+        packing_mode: Some(PackingMode::Tree),
     })
 }
 
@@ -230,15 +219,7 @@ pub fn respond_inspiring(
         .iter()
         .find(|s| s.id == query.shard_id)
         .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
-
-    if shard.polynomials.is_empty() {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero.clone(),
-            column_ciphertexts: vec![zero],
-            packing_mode: None,
-        });
-    }
+    require_shard_width("respond_inspiring", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
     let rgsw_gadget = &query.rgsw_ciphertext.gadget;
@@ -257,14 +238,6 @@ pub fn respond_inspiring(
         .collect();
 
     let num_columns = lwe_cts.len();
-    if num_columns == 0 {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero,
-            column_ciphertexts: vec![],
-            packing_mode: None,
-        });
-    }
 
     // InspiRING consumes the RLWE a-polynomials, not the LWE a-vectors: the latter are
     // negacyclic extractions with a different structure.
@@ -326,6 +299,54 @@ pub struct ServerInspiringCache {
     offline_keys: crate::inspiring::OfflinePackingKeys,
 }
 
+fn validate_cache_parts(
+    operation: &'static str,
+    crs: &ServerCrs,
+    encoded_db: &EncodedDatabase,
+    pack_params: &crate::inspiring::PackParams,
+    offline_keys: &crate::inspiring::OfflinePackingKeys,
+) -> Result<()> {
+    let expected_columns = crs.inspiring_num_columns;
+    if expected_columns == 0 {
+        return Err(pir_err!("{operation}: CRS has zero InspiRING columns"));
+    }
+    if encoded_db.shards.is_empty() {
+        return Err(pir_err!("{operation}: encoded database has no shards"));
+    }
+    for (shard_index, shard) in encoded_db.shards.iter().enumerate() {
+        let columns = shard.polynomials.len();
+        if columns != expected_columns {
+            return Err(pir_err!(
+                "{operation}: shard {shard_index} column count {columns} != CRS width \
+                 {expected_columns}"
+            ));
+        }
+    }
+    if pack_params.num_to_pack != expected_columns
+        || pack_params.ring_dim != crs.params.ring_dim
+        || pack_params.q != crs.params.q
+        || pack_params.moduli != crs.params.moduli()
+        || pack_params.gadget.base != crs.params.gadget_base
+        || pack_params.gadget.len != crs.params.gadget_len
+        || pack_params.gadget.q != crs.params.q
+    {
+        return Err(pir_err!(
+            "{operation}: cached pack params do not match CRS params at width {expected_columns}"
+        ));
+    }
+    if offline_keys.w_seed != crs.inspiring_w_seed
+        || offline_keys.full_key
+        || offline_keys.w_mask.len() != pack_params.gadget.len
+        || offline_keys.w_all.len() != expected_columns - 1
+        || offline_keys.w_all_ntt.len() != expected_columns - 1
+    {
+        return Err(pir_err!(
+            "{operation}: offline packing keys do not match CRS seed or width {expected_columns}"
+        ));
+    }
+    Ok(())
+}
+
 impl ServerInspiringCache {
     /// Build the cache, paying the one-time O(d^3) automorph-table search.
     pub fn new(crs: &ServerCrs, encoded_db: &EncodedDatabase) -> Result<Self> {
@@ -345,6 +366,39 @@ impl ServerInspiringCache {
         })
     }
 
+    /// Consume the cache parts produced by a fresh [`crate::pir::setup`] call.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable error before taking either field when the database width,
+    /// parameters, seed, or cached material does not match the CRS.
+    pub fn from_setup(crs: &mut ServerCrs, encoded_db: &EncodedDatabase) -> Result<Self> {
+        let pack_params = crs.inspiring_pack_params.as_ref().ok_or_else(|| {
+            pir_err!("ServerInspiringCache::from_setup: fresh CRS is missing pack params")
+        })?;
+        let offline_keys = crs.inspiring_packing_key.as_ref().ok_or_else(|| {
+            pir_err!("ServerInspiringCache::from_setup: fresh CRS is missing offline packing keys")
+        })?;
+        validate_cache_parts(
+            "ServerInspiringCache::from_setup",
+            crs,
+            encoded_db,
+            pack_params,
+            offline_keys,
+        )?;
+
+        let pack_params = crs.inspiring_pack_params.take().ok_or_else(|| {
+            pir_err!("ServerInspiringCache::from_setup: pack params disappeared before take")
+        })?;
+        let offline_keys = crs.inspiring_packing_key.take().ok_or_else(|| {
+            pir_err!("ServerInspiringCache::from_setup: offline keys disappeared before take")
+        })?;
+        Ok(Self {
+            pack_params,
+            offline_keys,
+        })
+    }
+
     /// Rebuild from serialised parts, skipping the work [`ServerInspiringCache::new`]
     /// performs. Validates nothing: the caller must confirm the parts match the
     /// current CRS and encoded database.
@@ -356,6 +410,21 @@ impl ServerInspiringCache {
             pack_params,
             offline_keys,
         }
+    }
+
+    /// Validate cached parts against the CRS, shard width, and public seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an actionable mismatch instead of allowing cached data to produce wrong responses.
+    pub fn validate_for(&self, crs: &ServerCrs, encoded_db: &EncodedDatabase) -> Result<()> {
+        validate_cache_parts(
+            "ServerInspiringCache::validate_for",
+            crs,
+            encoded_db,
+            &self.pack_params,
+            &self.offline_keys,
+        )
     }
 
     /// Borrow the cached pack params.
@@ -393,15 +462,7 @@ pub fn respond_inspiring_cached(
         .iter()
         .find(|s| s.id == query.shard_id)
         .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
-
-    if shard.polynomials.is_empty() {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero.clone(),
-            column_ciphertexts: vec![zero],
-            packing_mode: None,
-        });
-    }
+    require_shard_width("respond_inspiring_cached", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
     let rgsw_gadget = &query.rgsw_ciphertext.gadget;
@@ -418,16 +479,6 @@ pub fn respond_inspiring_cached(
         .iter()
         .map(crate::rlwe::RlweCiphertext::sample_extract_coeff0)
         .collect();
-
-    let num_columns = lwe_cts.len();
-    if num_columns == 0 {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero,
-            column_ciphertexts: vec![],
-            packing_mode: None,
-        });
-    }
 
     let a_ct_tilde: Vec<Poly> = column_ciphertexts
         .iter()
@@ -538,15 +589,7 @@ pub fn respond_inspiring_cached_with_session(
         .iter()
         .find(|s| s.id == query.shard_id)
         .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
-
-    if shard.polynomials.is_empty() {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero.clone(),
-            column_ciphertexts: vec![zero],
-            packing_mode: None,
-        });
-    }
+    require_shard_width("respond_inspiring_cached_with_session", crs, shard)?;
 
     // Set RAVEN_PROFILE_RESPOND to any value for a per-region stderr breakdown.
     let profile = std::env::var_os("RAVEN_PROFILE_RESPOND").is_some();
@@ -581,14 +624,6 @@ pub fn respond_inspiring_cached_with_session(
     let t_extract_end = t_extract_start.map(|s| s.elapsed());
 
     let num_columns = lwe_cts.len();
-    if num_columns == 0 {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero,
-            column_ciphertexts: vec![],
-            packing_mode: None,
-        });
-    }
 
     let t_bpoly_start = t_extract_end.map(|_| std::time::Instant::now());
 
@@ -754,15 +789,7 @@ pub fn respond_sequential(
         .iter()
         .find(|s| s.id == query.shard_id)
         .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
-
-    if shard.polynomials.is_empty() {
-        let zero = RlweCiphertext::zero(&crs.params);
-        return Ok(ServerResponse {
-            ciphertext: zero.clone(),
-            column_ciphertexts: vec![zero],
-            packing_mode: None,
-        });
-    }
+    require_shard_width("respond_sequential", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
     let rgsw_gadget = &query.rgsw_ciphertext.gadget;

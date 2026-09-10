@@ -127,6 +127,26 @@ fn dividend_is_constant(body: &[String], div: usize) -> bool {
     last_writer_is_constant(&RAX) && last_writer_is_constant(&RDX)
 }
 
+#[test]
+fn divider_classifier_accepts_a_constant_dividend() {
+    let body = [
+        "mov $0xffffffffffffffff,%rax".to_owned(),
+        "xor %edx,%edx".to_owned(),
+        "div %rdi".to_owned(),
+    ];
+    assert!(dividend_is_constant(&body, 2));
+}
+
+#[test]
+fn divider_classifier_rejects_an_argument_dividend() {
+    let body = [
+        "mov %rsi,%rax".to_owned(),
+        "xor %edx,%edx".to_owned(),
+        "div %rdi".to_owned(),
+    ];
+    assert!(!dividend_is_constant(&body, 2));
+}
+
 /// A hardware divide is variable-latency on most x86-64 parts, so the secret
 /// magnitude must never reach one's dividend.
 #[test]

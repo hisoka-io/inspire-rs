@@ -16,7 +16,10 @@ use crate::rlwe::RlweSecretKey;
 
 use super::encode_db::inverse_monomial;
 use super::error::{pir_err, Result};
-use super::query::{ClientQuery, ClientState, PackingMode, SeededClientQuery, ServerSessionHandle};
+use super::query::{
+    ensure_query_shard_geometry, ClientQuery, ClientState, PackingMode, SeededClientQuery,
+    ServerSessionHandle,
+};
 use super::setup::ServerCrs;
 
 /// Everything a client needs to emit many queries against one server-session CRS.
@@ -145,6 +148,8 @@ impl ClientSession {
         shard_config: &ShardConfig,
         sampler: &mut GaussianSampler,
     ) -> Result<(ClientState, ClientQuery)> {
+        self.ensure_inspiring_query_material()?;
+        ensure_query_shard_geometry(&self.crs, shard_config)?;
         let d = self.crs.ring_dim();
         let q = self.crs.modulus();
         let ctx = self.crs.params.ntt_context();
@@ -172,18 +177,12 @@ impl ClientSession {
             Some(h) => (None, Some(h)),
             None => (self.packing_keys.clone(), None),
         };
-        let packing_mode = if self.packing_keys.is_some() {
-            PackingMode::Inspiring
-        } else {
-            PackingMode::Tree
-        };
-
         Ok((
             state,
             ClientQuery {
                 shard_id,
                 rgsw_ciphertext,
-                packing_mode,
+                packing_mode: PackingMode::Inspiring,
                 inspiring_packing_keys,
                 session_handle,
             },
@@ -197,6 +196,8 @@ impl ClientSession {
         shard_config: &ShardConfig,
         sampler: &mut GaussianSampler,
     ) -> Result<(ClientState, SeededClientQuery)> {
+        self.ensure_inspiring_query_material()?;
+        ensure_query_shard_geometry(&self.crs, shard_config)?;
         let d = self.crs.ring_dim();
         let q = self.crs.modulus();
         let ctx = self.crs.params.ntt_context();
@@ -224,18 +225,12 @@ impl ClientSession {
             Some(h) => (None, Some(h)),
             None => (self.packing_keys.clone(), None),
         };
-        let packing_mode = if self.packing_keys.is_some() {
-            PackingMode::Inspiring
-        } else {
-            PackingMode::Tree
-        };
-
         Ok((
             state,
             SeededClientQuery {
                 shard_id,
                 rgsw_ciphertext,
-                packing_mode,
+                packing_mode: PackingMode::Inspiring,
                 inspiring_packing_keys,
                 session_handle,
             },
@@ -245,6 +240,17 @@ impl ClientSession {
     /// Whether InspiRING packing machinery is cached.
     pub fn has_inspiring_packing(&self) -> bool {
         self.packing_keys.is_some()
+    }
+
+    fn ensure_inspiring_query_material(&self) -> Result<()> {
+        if self.packing_keys.is_none() {
+            return Err(pir_err!(
+                "PIR query refused a zero InspiRING width: no packing material exists, and \
+                 falling back to a tree-packed response would return wrong bytes under the \
+                 TwoPacking extractor"
+            ));
+        }
+        Ok(())
     }
 
     /// Borrow the cached `PackParams`.

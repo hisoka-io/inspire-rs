@@ -60,6 +60,7 @@ fn mul_poly_by_monomial(poly: &Poly, k: usize, q: u64) -> Poly {
 
     for i in 0..d {
         let coeff = poly.coeff(i);
+        // Ciphertext coefficients are public to the server.
         if coeff == 0 {
             continue;
         }

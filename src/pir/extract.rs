@@ -16,27 +16,16 @@ pub fn extract(
     response: &ServerResponse,
     entry_size: usize,
 ) -> Result<Vec<u8>> {
+    let num_columns = validate_unpacked_response_columns("extract", response, entry_size)?;
     let p = crs.params.p;
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
-
-    let num_columns = (entry_size * 8).div_ceil(16);
     let mut column_values = Vec::with_capacity(num_columns);
 
-    if response.column_ciphertexts.is_empty() {
-        let decrypted = response
-            .ciphertext
-            .decrypt(&state.rlwe_secret_key, delta, p, &ctx);
+    for col_ct in &response.column_ciphertexts {
+        let decrypted = col_ct.decrypt(&state.rlwe_secret_key, delta, p, &ctx);
         let value = decrypted.coeff(0);
-        for _ in 0..num_columns {
-            column_values.push(value);
-        }
-    } else {
-        for col_ct in response.column_ciphertexts.iter().take(num_columns) {
-            let decrypted = col_ct.decrypt(&state.rlwe_secret_key, delta, p, &ctx);
-            let value = decrypted.coeff(0);
-            column_values.push(value);
-        }
+        column_values.push(value);
     }
 
     let entry = reconstruct_entry(&column_values, entry_size);
@@ -59,9 +48,7 @@ pub fn extract_with_variant(
     }
 }
 
-/// Extract a TwoPacking response, dispatching on the server's `packing_mode` tag.
-/// An untagged (`None`) response is treated as tree-packed, which is what
-/// serializers predating the tag emit.
+/// Extract a TwoPacking response, refusing any server-selected mode but InspiRING.
 pub fn extract_two_packing(
     crs: &InspireCrs,
     state: &ClientState,
@@ -71,8 +58,36 @@ pub fn extract_two_packing(
     use crate::pir::query::PackingMode;
     match response.packing_mode {
         Some(PackingMode::Inspiring) => extract_inspiring(crs, state, response, entry_size),
-        Some(PackingMode::Tree) | None => extract_packed(crs, state, response, entry_size),
+        Some(PackingMode::Tree) => Err(ExtractError::TwoPackingModeMismatch {
+            mode: Some(PackingMode::Tree),
+            rims_tag_byte: 2,
+        }
+        .into()),
+        None => Err(ExtractError::TwoPackingModeMismatch {
+            mode: None,
+            rims_tag_byte: 0,
+        }
+        .into()),
     }
+}
+
+fn validate_unpacked_response_columns(
+    operation: &'static str,
+    response: &ServerResponse,
+    entry_size: usize,
+) -> Result<usize> {
+    let expected = entry_size.div_ceil(2);
+    let got = response.column_ciphertexts.len();
+    if got != expected {
+        return Err(ExtractError::ColumnCountMismatch {
+            operation,
+            got,
+            expected,
+            entry_size,
+        }
+        .into());
+    }
+    Ok(expected)
 }
 
 /// Extract a tree-packed response: columns sit at coefficients 0.. scaled by d.
@@ -158,10 +173,6 @@ fn extended_gcd(a: i64, b: i64) -> (i64, i64, i64) {
 
 /// Extract, rounding coefficients that sit within `tolerance` of a wrap boundary.
 #[allow(dead_code)]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "uniform Result shape across the extract family; the sibling entry points are genuinely fallible"
-)]
 pub fn extract_with_tolerance(
     crs: &InspireCrs,
     state: &ClientState,
@@ -169,11 +180,11 @@ pub fn extract_with_tolerance(
     entry_size: usize,
     tolerance: u64,
 ) -> Result<Vec<u8>> {
+    let num_columns =
+        validate_unpacked_response_columns("extract_with_tolerance", response, entry_size)?;
     let p = crs.params.p;
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
-
-    let num_columns = (entry_size * 8).div_ceil(16);
     let mut column_values = Vec::with_capacity(num_columns);
 
     let apply_tolerance = |mut value: u64| -> u64 {
@@ -185,20 +196,10 @@ pub fn extract_with_tolerance(
         value
     };
 
-    if response.column_ciphertexts.is_empty() {
-        let decrypted = response
-            .ciphertext
-            .decrypt(&state.rlwe_secret_key, delta, p, &ctx);
+    for col_ct in &response.column_ciphertexts {
+        let decrypted = col_ct.decrypt(&state.rlwe_secret_key, delta, p, &ctx);
         let value = apply_tolerance(decrypted.coeff(0));
-        for _ in 0..num_columns {
-            column_values.push(value);
-        }
-    } else {
-        for col_ct in response.column_ciphertexts.iter().take(num_columns) {
-            let decrypted = col_ct.decrypt(&state.rlwe_secret_key, delta, p, &ctx);
-            let value = apply_tolerance(decrypted.coeff(0));
-            column_values.push(value);
-        }
+        column_values.push(value);
     }
 
     let entry = reconstruct_entry(&column_values, entry_size);
@@ -494,5 +495,40 @@ mod tests {
 
         let entry = result.unwrap();
         assert_eq!(entry.len(), entry_size);
+    }
+
+    #[test]
+    fn extract_with_tolerance_refuses_every_wrong_column_count() {
+        let params = test_params();
+        let mut sampler = GaussianSampler::with_seed(params.sigma, 13);
+        let entry_size = 32;
+        let database: Vec<u8> = (0..(params.ring_dim * entry_size))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let (crs, encoded_db, rlwe_sk) =
+            setup(&params, &database, entry_size, &mut sampler).unwrap();
+        let (state, client_query) =
+            query(&crs, 15, &encoded_db.config, &rlwe_sk, &mut sampler).unwrap();
+        let response = respond(&crs, &encoded_db, &client_query).unwrap();
+        let expected = entry_size.div_ceil(2);
+
+        for got in [0, expected - 1, expected + 1] {
+            let mut malformed = response.clone();
+            if got <= expected {
+                malformed.column_ciphertexts.truncate(got);
+            } else {
+                malformed
+                    .column_ciphertexts
+                    .push(response.column_ciphertexts[0].clone());
+            }
+            let err = extract_with_tolerance(&crs, &state, &malformed, entry_size, 10)
+                .expect_err("wrong column count must be refused");
+            let message = err.to_string();
+            assert!(message.contains(&format!("got {got}")), "{message}");
+            assert!(
+                message.contains(&format!("expected {expected}")),
+                "{message}"
+            );
+        }
     }
 }

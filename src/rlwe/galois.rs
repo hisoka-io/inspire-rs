@@ -1,6 +1,7 @@
 //! Galois automorphisms `tau_g(X) = X^g` for g in `(Z/2dZ)^*`.
 
-use crate::math::Poly;
+use crate::math::{NttContext, Poly};
+use subtle::{Choice, ConditionallySelectable, ConstantTimeGreater};
 
 use super::types::RlweCiphertext;
 
@@ -10,33 +11,37 @@ use super::types::RlweCiphertext;
 #[inline]
 pub fn apply_automorphism(poly: &Poly, g: usize) -> Poly {
     let d = poly.dimension();
-    let q = poly.modulus();
+    let moduli = poly.moduli();
+    if poly.is_ntt() {
+        let ctx = NttContext::with_moduli(d, moduli);
+        let mut coefficients = poly.clone();
+        coefficients.from_ntt(&ctx);
+        let mut transformed = apply_automorphism(&coefficients, g);
+        transformed.to_ntt(&ctx);
+        return transformed;
+    }
+
     let two_d = 2 * d;
+    let mut result_coeffs = vec![0u64; d * moduli.len()];
 
-    let mut result_coeffs = vec![0u64; d];
-
-    for i in 0..d {
-        let coeff = poly.coeff(i);
-        if coeff == 0 {
-            continue;
-        }
-
-        let new_idx = (g * i) % two_d;
-
-        let (actual_idx, negate) = if new_idx < d {
-            (new_idx, false)
-        } else {
-            (new_idx - d, true)
-        };
-
-        if negate {
-            result_coeffs[actual_idx] = mod_sub(result_coeffs[actual_idx], coeff, q);
-        } else {
-            result_coeffs[actual_idx] = mod_add(result_coeffs[actual_idx], coeff, q);
+    for (limb, &modulus) in moduli.iter().enumerate() {
+        let offset = limb * d;
+        for (i, &coeff) in poly.coeffs_modulus(limb).iter().enumerate() {
+            let new_idx = (g * i) % two_d;
+            let (actual_idx, negate) = if new_idx < d {
+                (new_idx, false)
+            } else {
+                (new_idx - d, true)
+            };
+            let destination = &mut result_coeffs[offset + actual_idx];
+            let added = ct_mod_add(*destination, coeff, modulus);
+            let subtracted = ct_mod_sub(*destination, coeff, modulus);
+            *destination =
+                u64::conditional_select(&added, &subtracted, Choice::from(u8::from(negate)));
         }
     }
 
-    Poly::from_coeffs_moduli(result_coeffs, poly.moduli())
+    Poly::from_crt_coeffs_reduced(result_coeffs, moduli)
 }
 
 /// `(tau_g(a), tau_g(b))`. The result decrypts under `tau_g(s)`, so callers MUST
@@ -91,18 +96,20 @@ fn gcd(mut a: usize, mut b: usize) -> usize {
 }
 
 #[inline]
-fn mod_add(a: u64, b: u64, q: u64) -> u64 {
-    let sum = a as u128 + b as u128;
-    (sum % q as u128) as u64
+fn ct_mod_add(a: u64, b: u64, modulus: u64) -> u64 {
+    let (sum, overflow) = a.overflowing_add(b);
+    let reduce = Choice::from(u8::from(overflow)) | sum.ct_gt(&modulus.wrapping_sub(1));
+    u64::conditional_select(&sum, &sum.wrapping_sub(modulus), reduce)
 }
 
 #[inline]
-fn mod_sub(a: u64, b: u64, q: u64) -> u64 {
-    if a >= b {
-        a - b
-    } else {
-        q - b + a
-    }
+fn ct_mod_sub(a: u64, b: u64, modulus: u64) -> u64 {
+    let (difference, underflow) = a.overflowing_sub(b);
+    u64::conditional_select(
+        &difference,
+        &difference.wrapping_add(modulus),
+        Choice::from(u8::from(underflow)),
+    )
 }
 
 /// `tau_g1 . tau_g2 = tau_{g1*g2 mod 2d}`.
@@ -152,6 +159,7 @@ fn extended_gcd(a: i64, b: i64) -> (i64, i64, i64) {
 mod tests {
     use super::*;
     use crate::params::InspireParams;
+    use proptest::prelude::*;
 
     fn test_params() -> InspireParams {
         InspireParams::secure_128_d2048()
@@ -212,6 +220,95 @@ mod tests {
 
         for (i, expected) in coeffs.iter().enumerate().take(d) {
             assert_eq!(back.coeff(i), *expected, "Inverse failed at {i}");
+        }
+    }
+
+    #[test]
+    fn ntt_input_preserves_domain_and_matches_the_coefficient_transform() {
+        let modulus_sets = [
+            vec![1_152_921_504_606_830_593],
+            vec![268_369_921, 249_561_089],
+        ];
+        for moduli in modulus_sets {
+            let dimension = 256;
+            let q = moduli.iter().product::<u64>();
+            let ctx = NttContext::with_moduli(dimension, &moduli);
+            let coefficients: Vec<u64> = (0..dimension)
+                .map(|index| ((index * 19 + 7) as u64) % q)
+                .collect();
+            let coefficient_poly = Poly::from_coeffs_moduli(coefficients, &moduli);
+            let mut ntt_poly = coefficient_poly.clone();
+            ntt_poly.to_ntt(&ctx);
+
+            let mut expected = apply_automorphism(&coefficient_poly, 3);
+            expected.to_ntt(&ctx);
+            let actual = apply_automorphism(&ntt_poly, 3);
+
+            assert!(actual.is_ntt());
+            let mismatches: Vec<_> = actual
+                .coeffs()
+                .iter()
+                .zip(expected.coeffs())
+                .enumerate()
+                .filter(|(_, (actual, expected))| actual != expected)
+                .map(|(index, (actual, expected))| (index, *actual, *expected))
+                .take(8)
+                .collect();
+            assert!(mismatches.is_empty(), "moduli={moduli:?}: {mismatches:?}");
+        }
+    }
+
+    fn reference_automorphism(poly: &Poly, g: usize) -> Vec<u64> {
+        let d = poly.dimension();
+        let mut expected = vec![0u64; poly.coeffs().len()];
+        for (limb, &modulus) in poly.moduli().iter().enumerate() {
+            let offset = limb * d;
+            for i in 0..d {
+                let mapped = (g * i) % (2 * d);
+                let coeff = poly.coeffs_modulus(limb)[i];
+                if mapped < d {
+                    expected[offset + mapped] = coeff;
+                } else {
+                    expected[offset + mapped - d] = if coeff == 0 { 0 } else { modulus - coeff };
+                }
+            }
+        }
+        expected
+    }
+
+    proptest! {
+        #[test]
+        fn constant_time_modular_steps_match_u128(
+            left in any::<u64>(),
+            right in any::<u64>(),
+            modulus in 1u64..=u64::MAX,
+        ) {
+            let a = left % modulus;
+            let b = right % modulus;
+            let expected_add = ((u128::from(a) + u128::from(b)) % u128::from(modulus)) as u64;
+            let expected_sub = ((u128::from(a) + u128::from(modulus) - u128::from(b))
+                % u128::from(modulus)) as u64;
+            prop_assert_eq!(ct_mod_add(a, b, modulus), expected_add);
+            prop_assert_eq!(ct_mod_sub(a, b, modulus), expected_sub);
+        }
+
+        #[test]
+        fn automorphism_matches_the_negacyclic_permutation(
+            coefficients in proptest::collection::vec(any::<u64>(), 16),
+            generator in prop::sample::select(vec![1usize, 3, 5, 15, 17, 31]),
+            two_crt in any::<bool>(),
+        ) {
+            let moduli = if two_crt {
+                vec![268_369_921, 249_561_089]
+            } else {
+                vec![1_152_921_504_606_830_593]
+            };
+            let q = moduli.iter().product::<u64>();
+            let reduced: Vec<u64> = coefficients.into_iter().map(|value| value % q).collect();
+            let poly = Poly::from_coeffs_moduli(reduced, &moduli);
+            let expected = reference_automorphism(&poly, generator);
+            let actual = apply_automorphism(&poly, generator);
+            prop_assert_eq!(actual.coeffs(), expected.as_slice());
         }
     }
 

@@ -8,8 +8,8 @@
 )]
 
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel};
-use raven_inspire::pir::{query, setup, ClientSession, ServerCrs};
+use raven_inspire::params::{InspireParams, SecurityLevel, ShardConfig};
+use raven_inspire::pir::{query, query_seeded, setup, ClientSession, ServerCrs};
 use raven_inspire::rlwe::RlweSecretKey;
 
 const ILLEGAL_WIDTH: usize = 24;
@@ -62,6 +62,66 @@ fn tree_packing_only_crs_still_deserializes() {
     let decoded = ServerCrs::from_versioned_bytes(&bytes)
         .expect("width 0 means tree packing only and must stay accepted");
     assert_eq!(decoded.inspiring_num_columns, 0);
+}
+
+#[test]
+fn zero_width_crs_is_refused_by_both_free_query_builders() {
+    let (mut crs, sk, config) = honest_setup(32);
+    crs.inspiring_num_columns = 0;
+    let mut sampler = GaussianSampler::with_seed(crs.params.sigma, 91);
+
+    for message in [
+        query(&crs, 3, &config, &sk, &mut sampler)
+            .expect_err("unseeded query must refuse zero width")
+            .to_string(),
+        query_seeded(&crs, 3, &config, &sk, &mut sampler)
+            .expect_err("seeded query must refuse zero width")
+            .to_string(),
+    ] {
+        assert!(message.contains("zero InspiRING width"), "{message}");
+        assert!(message.contains("tree-packed"), "{message}");
+        assert!(message.contains("TwoPacking"), "{message}");
+    }
+}
+
+#[test]
+fn every_query_builder_refuses_mismatched_shard_geometry() {
+    let (crs, sk, _) = honest_setup(32);
+    for entries_per_shard in [crs.ring_dim() - 1, crs.ring_dim() + 1] {
+        let config = ShardConfig {
+            shard_size_bytes: (entries_per_shard * 32) as u64,
+            entry_size_bytes: 32,
+            total_entries: crs.ring_dim() as u64,
+        };
+        let mut session_sampler = GaussianSampler::with_seed(crs.params.sigma, 90);
+        let session = ClientSession::new(crs.clone(), sk.clone(), &mut session_sampler)
+            .expect("the CRS itself is valid");
+        let mut sampler = GaussianSampler::with_seed(crs.params.sigma, 91);
+        let messages = [
+            query(&crs, 256, &config, &sk, &mut sampler)
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+            query_seeded(&crs, 256, &config, &sk, &mut sampler)
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+            session
+                .query(256, &config, &mut sampler)
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+            session
+                .query_seeded(256, &config, &mut sampler)
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default(),
+        ];
+        for message in messages {
+            assert!(message.contains("shard geometry"), "{message}");
+            assert!(message.contains("ring_dim"), "{message}");
+        }
+    }
 }
 
 #[test]

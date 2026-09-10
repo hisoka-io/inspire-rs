@@ -94,10 +94,6 @@ fn untampered_response_decodes_byte_exact_and_carries_one_ciphertext_per_column(
 }
 
 #[test]
-#[ignore = "pins a live defect: extract derives num_columns from entry_size and never checks \
-            response.column_ciphertexts.len(), so a short response decodes to a zero-tail record \
-            with Ok. RED until extract rejects a column count below num_columns. Trigger: \
-            un-ignore the moment that length check lands in pir/extract.rs."]
 fn a_truncated_response_must_not_decode_to_a_zero_tail_record() {
     let f = fixture();
 
@@ -105,65 +101,35 @@ fn a_truncated_response_must_not_decode_to_a_zero_tail_record() {
         let mut truncated = f.response.clone();
         truncated.column_ciphertexts.truncate(kept);
 
-        let outcome = extract(&f.crs, &f.state, &truncated, ENTRY_SIZE);
-
-        let Ok(decoded) = outcome else {
-            continue;
-        };
-
-        let tail_is_zero = decoded[kept * 2..].iter().all(|&b| b == 0);
-        let head_matches = decoded[..kept * 2] == f.truth[..kept * 2];
-        panic!(
-            "extract accepted {kept} of {NUM_COLUMNS} columns and returned Ok with a \
-             {len}-byte record instead of rejecting the short response.\n  \
-             returned: {decoded:?}\n  \
-             expected: an error naming the column-count mismatch\n  \
-             the record is indistinguishable from a real one by length alone \
-             (head_matches_truth={head_matches}, tail_all_zero={tail_is_zero}); \
-             the caller's entry is {truth:?}",
-            len = decoded.len(),
-            truth = f.truth,
+        let err = extract(&f.crs, &f.state, &truncated, ENTRY_SIZE)
+            .expect_err("a short response must be refused");
+        let message = err.to_string();
+        assert!(message.contains(&format!("got {kept}")), "{message}");
+        assert!(
+            message.contains(&format!("expected {NUM_COLUMNS}")),
+            "{message}"
         );
     }
 }
 
 #[test]
-#[ignore = "pins a live defect: with column_ciphertexts empty, extract decrypts the summed \
-            ciphertext once and repeats that one 16-bit value across every column, returning Ok. \
-            The record is non-zero, so a zero-check does not catch it. RED until extract rejects \
-            an empty column list on the unpacked path. Trigger: un-ignore the moment that length \
-            check lands in pir/extract.rs."]
 fn an_empty_column_list_must_not_decode_to_a_repeated_column_record() {
     let f = fixture();
 
     let mut emptied = f.response.clone();
     emptied.column_ciphertexts.clear();
 
-    let Ok(decoded) = extract(&f.crs, &f.state, &emptied, ENTRY_SIZE) else {
-        return;
-    };
-
-    let first_column = &decoded[..2];
-    let every_column_identical = decoded.chunks_exact(2).all(|c| c == first_column);
-    panic!(
-        "extract accepted an empty column list and returned Ok with a {len}-byte record \
-         instead of rejecting it.\n  \
-         returned: {decoded:?}\n  \
-         expected: an error naming the empty column list\n  \
-         every 16-bit column holds the same value (all_columns_identical={every_column_identical}), \
-         and the bytes are non-zero, so length and emptiness checks both pass; \
-         the caller's entry is {truth:?}",
-        len = decoded.len(),
-        truth = f.truth,
+    let err = extract(&f.crs, &f.state, &emptied, ENTRY_SIZE)
+        .expect_err("an empty column list must be refused");
+    let message = err.to_string();
+    assert!(message.contains("got 0"), "{message}");
+    assert!(
+        message.contains(&format!("expected {NUM_COLUMNS}")),
+        "{message}"
     );
 }
 
 #[test]
-#[ignore = "pins a live defect: extract's `.take(num_columns)` discards surplus columns without \
-            comment, so an over-length response is accepted as valid. It decodes correctly today, \
-            which is why nothing catches it - the missing check is on the count, not the bytes. \
-            RED until extract rejects a column count above num_columns. Trigger: un-ignore the \
-            moment that length check lands in pir/extract.rs."]
 fn an_over_length_response_must_not_be_silently_accepted() {
     let f = fixture();
 
@@ -171,18 +137,12 @@ fn an_over_length_response_must_not_be_silently_accepted() {
     let surplus = padded.column_ciphertexts[0].clone();
     padded.column_ciphertexts.push(surplus);
 
-    let Ok(decoded) = extract(&f.crs, &f.state, &padded, ENTRY_SIZE) else {
-        return;
-    };
-
-    panic!(
-        "extract accepted {got} columns where entry_size implies {NUM_COLUMNS} and returned Ok \
-         with a {len}-byte record instead of rejecting the over-length response.\n  \
-         returned: {decoded:?}\n  \
-         expected: an error naming the column-count mismatch\n  \
-         the surplus column was dropped by `.take(num_columns)`, so a server may append \
-         arbitrary ciphertexts and still be believed",
-        got = padded.column_ciphertexts.len(),
-        len = decoded.len(),
+    let err = extract(&f.crs, &f.state, &padded, ENTRY_SIZE)
+        .expect_err("an over-length column list must be refused");
+    let message = err.to_string();
+    assert!(message.contains("got 17"), "{message}");
+    assert!(
+        message.contains(&format!("expected {NUM_COLUMNS}")),
+        "{message}"
     );
 }

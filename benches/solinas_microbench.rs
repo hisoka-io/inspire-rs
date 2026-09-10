@@ -31,6 +31,7 @@ fn build_input(ctx: &NttContext, seed: u64) -> Vec<u64> {
 }
 
 #[test]
+#[ignore = "microbench; run with RAVEN_MICROBENCH=1 --release --ignored"]
 fn microbench_solinas_pointwise_all_variants() {
     if std::env::var("RAVEN_MICROBENCH").ok().as_deref() != Some("1") {
         eprintln!("SKIP: set RAVEN_MICROBENCH=1 to run");
@@ -152,6 +153,7 @@ fn microbench_solinas_pointwise_all_variants() {
 }
 
 #[test]
+#[ignore = "microbench; run with RAVEN_MICROBENCH=1 --release --ignored"]
 fn microbench_solinas_forward_inverse_ntt() {
     if std::env::var("RAVEN_MICROBENCH").ok().as_deref() != Some("1") {
         eprintln!("SKIP: set RAVEN_MICROBENCH=1 to run");

@@ -815,7 +815,6 @@ fn generate_ksk_body(
 ) -> Vec<Poly> {
     let s = &sk.poly;
     let n = s.dimension();
-    let q = s.modulus();
     let moduli = s.moduli();
 
     let tau_s = apply_automorphism(s, gen_pow);
@@ -841,16 +840,7 @@ fn generate_ksk_body(
         };
         let neg_s_times_mask = s_times_mask.negate();
 
-        let mut error_coeffs = vec![0u64; n];
-        for coeff in &mut error_coeffs {
-            let sample = sampler.sample();
-            *coeff = if sample >= 0 {
-                sample as u64 % q
-            } else {
-                (q as i64 + (sample % q as i64)) as u64
-            };
-        }
-        let error = Poly::from_coeffs_moduli(error_coeffs, moduli);
+        let error = Poly::sample_gaussian_moduli(n, moduli, sampler);
 
         let result_k = &(&tau_s_times_g + &neg_s_times_mask) + &error;
         result.push(result_k);
@@ -1642,6 +1632,41 @@ mod tests {
             gadget_base: 1 << 20,
             gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
+        }
+    }
+
+    fn legacy_error_poly(
+        dim: usize,
+        q: u64,
+        moduli: &[u64],
+        sampler: &mut GaussianSampler,
+    ) -> Poly {
+        let mut error_coeffs = vec![0u64; dim];
+        for coeff in &mut error_coeffs {
+            let sample = sampler.sample();
+            *coeff = if sample >= 0 {
+                sample as u64 % q
+            } else {
+                (q as i64 + (sample % q as i64)) as u64
+            };
+        }
+        Poly::from_coeffs_moduli(error_coeffs, moduli)
+    }
+
+    #[test]
+    fn shared_gaussian_poly_is_byte_identical_to_the_legacy_ksk_lift() {
+        let modulus_sets = [
+            vec![1_152_921_504_606_830_593],
+            vec![268_369_921, 249_561_089],
+        ];
+        for moduli in modulus_sets {
+            let q = moduli.iter().product();
+            let mut legacy_sampler = GaussianSampler::with_seed(6.4, 0x6374_2d6b_736b);
+            let mut shared_sampler = legacy_sampler.clone();
+            let legacy = legacy_error_poly(256, q, &moduli, &mut legacy_sampler);
+            let shared = Poly::sample_gaussian_moduli(256, &moduli, &mut shared_sampler);
+            assert_eq!(shared.coeffs(), legacy.coeffs(), "moduli={moduli:?}");
+            assert_eq!(shared_sampler.sample(), legacy_sampler.sample());
         }
     }
 

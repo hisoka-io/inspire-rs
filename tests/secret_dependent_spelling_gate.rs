@@ -27,7 +27,11 @@
 
 const GAUSSIAN_SRC: &str = include_str!("../src/math/gaussian.rs");
 const MODULAR_SRC: &str = include_str!("../src/math/modular.rs");
+const POLY_SRC: &str = include_str!("../src/math/poly.rs");
 const ENCODE_DB_SRC: &str = include_str!("../src/pir/encode_db.rs");
+const INSPIRING_SRC: &str = include_str!("../src/inspiring/inspiring2.rs");
+const GALOIS_SRC: &str = include_str!("../src/rlwe/galois.rs");
+const KS_SETUP_SRC: &str = include_str!("../src/ks/setup.rs");
 const QUERY_SRC: &str = include_str!("../src/pir/query.rs");
 const SESSION_SRC: &str = include_str!("../src/pir/session.rs");
 const PARAMS_SRC: &str = include_str!("../src/params.rs");
@@ -224,47 +228,175 @@ fn the_query_path_neither_branches_on_nor_indexes_by_the_local_index() {
     }
 }
 
-// ------------------------------------------------------------- ledger
-//
-// Sites that are still secret-dependent. Each assertion pins the recorded
-// shape; a fix reddens it and must be moved into the pins above.
-
 #[test]
-fn ledger_inverse_monomial_still_branches_on_the_query_index() {
+fn inverse_monomial_scans_every_crt_residue() {
     let body = item_source(ENCODE_DB_SRC, "pub fn inverse_monomial");
-    let recorded = ["if k == 0", "let pos = d - k;", "coeffs[pos]"];
-    for pattern in recorded {
-        assert!(
-            body.contains(pattern),
-            "inverse_monomial no longer matches its recorded shape (`{pattern}` is gone). \
-             If it was made branch-free: prove byte-identity with \
-             tests/inverse_monomial_ct_rewrite_kat.rs, then move this site into the pins \
-             above. If it changed some other way, the channel may have moved with it:\n{body}"
-        );
-    }
-    assert!(
-        !ENCODE_DB_SRC.contains("use subtle"),
-        "src/pir/encode_db.rs now imports subtle; if inverse_monomial was made \
-         constant-time, move it into the pins above and delete this ledger entry"
+    deny(
+        body,
+        "inverse_monomial",
+        &["if k", "coeffs[pos]", "Poly::from_coeffs_moduli"],
+        "the query index must not select control flow, a write address, or a secret reduction",
+    );
+    require(
+        body,
+        "inverse_monomial",
+        &[
+            "moduli.iter().enumerate()",
+            "coeffs.iter_mut().enumerate()",
+            "u64::conditional_select",
+            ".ct_eq(&",
+            "Poly::from_crt_coeffs_reduced",
+        ],
+        "every CRT residue must be selected through a full scan",
+    );
+
+    let reducer = item_source(ENCODE_DB_SRC, "fn reduce_exponent_by_public_ring");
+    deny(
+        reducer,
+        "reduce_exponent_by_public_ring",
+        &["exponent / two_d", "exponent % two_d", "if remainder"],
+        "the secret exponent must not reach a divider",
+    );
+    require(
+        reducer,
+        "reduce_exponent_by_public_ring",
+        &[
+            "u64::MAX / two_d",
+            "u128::from(exponent) * u128::from(reciprocal)",
+            ".ct_gt(&two_d.wrapping_sub(1))",
+            "u64::conditional_select",
+        ],
+        "only the public reciprocal calculation may divide",
     );
 }
 
-/// Lower reach than the monomial: `shard_id` is published with the query, so
-/// only the residue is secret. The divide still takes it in the dividend.
 #[test]
-fn ledger_shard_mapping_still_divides_by_a_runtime_divisor() {
+fn shard_mapping_divides_only_public_values() {
     let body = item_source(PARAMS_SRC, "pub fn try_index_to_shard");
-    let recorded = [
-        "global_idx / entries_per_shard",
-        "global_idx % entries_per_shard",
-    ];
-    for pattern in recorded {
-        assert!(
-            body.contains(pattern),
-            "try_index_to_shard no longer matches its recorded shape (`{pattern}` is gone). \
-             If the divide was removed, move this site into the pins above:\n{body}"
+    deny(
+        body,
+        "try_index_to_shard",
+        &[
+            "global_idx / entries_per_shard",
+            "global_idx % entries_per_shard",
+        ],
+        "the secret global index must not reach a divider",
+    );
+    require(
+        body,
+        "try_index_to_shard",
+        &["div_rem_by_public_divisor(global_idx, entries_per_shard)"],
+        "the quotient and secret residue must come from the reciprocal mapping",
+    );
+
+    let helper = item_source(PARAMS_SRC, "fn div_rem_by_public_divisor");
+    deny(
+        helper,
+        "div_rem_by_public_divisor",
+        &["dividend / divisor", "dividend % divisor", "if remainder"],
+        "the secret dividend must reach only multiplication and constant-time selection",
+    );
+    require(
+        helper,
+        "div_rem_by_public_divisor",
+        &[
+            "u64::MAX / divisor",
+            "u128::from(dividend) * u128::from(reciprocal)",
+            ".ct_gt(&divisor.wrapping_sub(1))",
+            "u64::conditional_select",
+        ],
+        "only the public reciprocal calculation may divide",
+    );
+}
+
+#[test]
+fn ksk_error_uses_the_shared_constant_time_sampler() {
+    let body = item_source(INSPIRING_SRC, "fn generate_ksk_body");
+    deny(
+        body,
+        "generate_ksk_body",
+        &["if sample", "sample %", "error_coeffs"],
+        "Gaussian signs and magnitudes must not steer control flow or division",
+    );
+    require(
+        body,
+        "generate_ksk_body",
+        &["Poly::sample_gaussian_moduli(n, moduli, sampler)"],
+        "the established CRT-aware Gaussian lift must own the conversion",
+    );
+
+    let helper = item_source(POLY_SRC, "pub fn sample_gaussian_moduli");
+    deny(
+        helper,
+        "sample_gaussian_moduli",
+        &["if samples", "samples[i] %", "if sample"],
+        "Gaussian samples must not steer branching or division",
+    );
+    require(
+        helper,
+        "sample_gaussian_moduli",
+        &["ModQ::from_signed(samples[i], modulus)"],
+        "each CRT limb must use the hardened signed lift",
+    );
+}
+
+#[test]
+fn secret_key_automorphism_visits_every_crt_residue() {
+    let body = item_source(GALOIS_SRC, "pub fn apply_automorphism");
+    deny(
+        body,
+        "apply_automorphism",
+        &[
+            "if coeff == 0",
+            "continue;",
+            "poly.coeff(i)",
+            "Poly::from_coeffs_moduli",
+        ],
+        "a raw secret key reaches this function",
+    );
+    require(
+        body,
+        "apply_automorphism",
+        &[
+            "poly.coeffs_modulus(limb)",
+            "u64::conditional_select",
+            "Poly::from_crt_coeffs_reduced",
+        ],
+        "every secret residue must take the same arithmetic path",
+    );
+
+    for header in ["fn ct_mod_add", "fn ct_mod_sub"] {
+        let helper = item_source(GALOIS_SRC, header);
+        deny(
+            helper,
+            header,
+            &["if ", "% modulus"],
+            "secret residues must not steer modular arithmetic",
+        );
+        require(
+            helper,
+            header,
+            &["overflowing_", "u64::conditional_select"],
+            "modular correction must use fixed-path selection",
         );
     }
+}
+
+#[test]
+fn automorphism_key_setup_reuses_the_hardened_transform() {
+    let body = item_source(KS_SETUP_SRC, "pub fn generate_automorphism_ks_matrix");
+    deny(
+        body,
+        "generate_automorphism_ks_matrix",
+        &["auto_s_coeffs", "if coeff == 0"],
+        "the secret-key automorphism must not be hand-copied",
+    );
+    require(
+        body,
+        "generate_automorphism_ks_matrix",
+        &["apply_automorphism(&sk.poly, automorphism)"],
+        "the shared constant-time automorphism is the single implementation",
+    );
 }
 
 // --------------------------------------------------------- extractor
@@ -281,7 +413,15 @@ fn the_extractor_returns_whole_item_bodies() {
         (MODULAR_SRC, "pub fn from_signed"),
         (MODULAR_SRC, "fn ct_sub_if_ge"),
         (MODULAR_SRC, "fn reduce_by_public_modulus"),
+        (POLY_SRC, "pub fn sample_gaussian_moduli"),
+        (ENCODE_DB_SRC, "fn reduce_exponent_by_public_ring"),
         (ENCODE_DB_SRC, "pub fn inverse_monomial"),
+        (INSPIRING_SRC, "fn generate_ksk_body"),
+        (GALOIS_SRC, "pub fn apply_automorphism"),
+        (KS_SETUP_SRC, "pub fn generate_automorphism_ks_matrix"),
+        (GALOIS_SRC, "fn ct_mod_add"),
+        (GALOIS_SRC, "fn ct_mod_sub"),
+        (PARAMS_SRC, "fn div_rem_by_public_divisor"),
         (PARAMS_SRC, "pub fn try_index_to_shard"),
     ];
     for (src, header) in cases {

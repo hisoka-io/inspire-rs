@@ -27,6 +27,7 @@ fn build_input(ctx: &NttContext, seed: u64) -> Vec<u64> {
 }
 
 #[test]
+#[ignore = "microbench; run with RAVEN_MICROBENCH=1 --release --ignored"]
 fn microbench_shoup_vs_montgomery_forward() {
     if std::env::var("RAVEN_MICROBENCH").ok().as_deref() != Some("1") {
         eprintln!("SKIP: set RAVEN_MICROBENCH=1 to run");
@@ -71,6 +72,7 @@ fn microbench_shoup_vs_montgomery_forward() {
 }
 
 #[test]
+#[ignore = "microbench; run with RAVEN_MICROBENCH=1 --release --ignored"]
 fn microbench_shoup_vs_montgomery_inverse() {
     if std::env::var("RAVEN_MICROBENCH").ok().as_deref() != Some("1") {
         eprintln!("SKIP: set RAVEN_MICROBENCH=1 to run");
@@ -129,6 +131,7 @@ fn microbench_shoup_vs_montgomery_inverse() {
 }
 
 #[test]
+#[ignore = "microbench; run with RAVEN_MICROBENCH=1 --release --ignored"]
 fn microbench_shoup_pointwise_vs_montgomery() {
     if std::env::var("RAVEN_MICROBENCH").ok().as_deref() != Some("1") {
         eprintln!("SKIP: set RAVEN_MICROBENCH=1 to run");

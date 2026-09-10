@@ -11,6 +11,7 @@ use std::arch::x86_64::*;
 use std::time::Instant;
 
 #[test]
+#[ignore = "microbench; run with RAVEN_MICROBENCH=1 --release --ignored"]
 fn ifma52_madd_throughput_probe() {
     if std::env::var("RAVEN_MICROBENCH").ok().as_deref() != Some("1") {
         eprintln!("SKIP: set RAVEN_MICROBENCH=1 to run");
@@ -86,6 +87,7 @@ unsafe fn probe_madd52_throughput() {
 }
 
 #[test]
+#[ignore = "microbench; run with RAVEN_MICROBENCH=1 --release --ignored"]
 fn scalar_mulx_throughput_probe() {
     if std::env::var("RAVEN_MICROBENCH").ok().as_deref() != Some("1") {
         eprintln!("SKIP: set RAVEN_MICROBENCH=1 to run");
