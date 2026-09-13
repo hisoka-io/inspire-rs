@@ -2,12 +2,12 @@
 //! into coefficient 0.
 
 use crate::par_prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::inspiring::{packing_online, packing_online_fully_ntt};
 use crate::math::Poly;
 use crate::params::InspireVariant;
-use crate::rgsw::{external_product_with_ntt_rgsw, rgsw_rows_to_ntt};
+use crate::rgsw::{external_product_trivial_with_ntt_rgsw, rgsw_rows_to_ntt};
 use crate::rlwe::RlweCiphertext;
 
 use super::error::{pir_err, Result};
@@ -15,7 +15,7 @@ use super::query::{ClientQuery, PackingMode, SeededClientQuery};
 use super::setup::{EncodedDatabase, ServerCrs, ShardData};
 
 /// Server response: the packed ciphertext, or one ciphertext per column.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub struct ServerResponse {
     /// Packed result, or the sum of the column ciphertexts when unpacked.
     pub ciphertext: RlweCiphertext,
@@ -25,8 +25,192 @@ pub struct ServerResponse {
     ///
     /// Never `skip_serializing_if`: bincode is positional, so an omitted field
     /// shifts every later read.
-    #[serde(default)]
     pub packing_mode: Option<PackingMode>,
+    /// Number of leading packed plaintext coefficients whose `b` terms cross the wire.
+    /// The full `a` remains; eprint 2025/1352 section 3.3, p.12. `None` keeps the
+    /// full ciphertext for unpacked responses.
+    pub packed_coefficients: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct ServerResponseWire {
+    ciphertext: ResponseCiphertextWire,
+    column_ciphertexts: Vec<RlweCiphertext>,
+    packing_mode: Option<PackingMode>,
+}
+
+#[derive(Deserialize)]
+enum ResponseCiphertextWire {
+    Full(RlweCiphertext),
+    Packed {
+        a: Poly,
+        b_prefix: Vec<u64>,
+        retained: u32,
+    },
+}
+
+#[derive(Serialize)]
+struct ServerResponseWireRef<'a> {
+    ciphertext: ResponseCiphertextWireRef<'a>,
+    column_ciphertexts: &'a [RlweCiphertext],
+    packing_mode: Option<PackingMode>,
+}
+
+#[derive(Serialize)]
+enum ResponseCiphertextWireRef<'a> {
+    Full(&'a RlweCiphertext),
+    Packed {
+        a: &'a Poly,
+        b_prefix: Vec<u64>,
+        retained: u32,
+    },
+}
+
+impl Serialize for ServerResponse {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::Error;
+
+        let ciphertext = match self.packed_coefficients {
+            None => {
+                if self.packing_mode.is_some() {
+                    return Err(S::Error::custom(
+                        "packed response requires an exact coefficient prefix",
+                    ));
+                }
+                ResponseCiphertextWireRef::Full(&self.ciphertext)
+            }
+            Some(retained) => {
+                if !self.column_ciphertexts.is_empty() || self.packing_mode.is_none() {
+                    return Err(S::Error::custom(
+                        "packed response prefix requires a packed mode and no column ciphertexts",
+                    ));
+                }
+                let retained = usize::try_from(retained)
+                    .map_err(|_| S::Error::custom("packed coefficient count does not fit usize"))?;
+                let dim = self.ciphertext.ring_dim();
+                if retained == 0 || retained > dim {
+                    return Err(S::Error::custom(format!(
+                        "packed coefficient count {retained} outside 1..={dim}"
+                    )));
+                }
+                let crt_count = self.ciphertext.b.crt_count();
+                let prefix_len = retained
+                    .checked_mul(crt_count)
+                    .ok_or_else(|| S::Error::custom("packed coefficient count overflow"))?;
+                let mut b_prefix = Vec::with_capacity(prefix_len);
+                for limb in 0..crt_count {
+                    let start = limb
+                        .checked_mul(dim)
+                        .ok_or_else(|| S::Error::custom("packed coefficient offset overflow"))?;
+                    let end = start
+                        .checked_add(retained)
+                        .ok_or_else(|| S::Error::custom("packed coefficient end overflow"))?;
+                    let limb_prefix =
+                        self.ciphertext.b.coeffs().get(start..end).ok_or_else(|| {
+                            S::Error::custom("packed b polynomial shape mismatch")
+                        })?;
+                    b_prefix.extend_from_slice(limb_prefix);
+                }
+                ResponseCiphertextWireRef::Packed {
+                    a: &self.ciphertext.a,
+                    b_prefix,
+                    retained: u32::try_from(retained)
+                        .map_err(|_| S::Error::custom("packed coefficient count exceeds u32"))?,
+                }
+            }
+        };
+        ServerResponseWireRef {
+            ciphertext,
+            column_ciphertexts: &self.column_ciphertexts,
+            packing_mode: self.packing_mode,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ServerResponse {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+
+        let wire = ServerResponseWire::deserialize(deserializer)?;
+        let (ciphertext, packed_coefficients) = match wire.ciphertext {
+            ResponseCiphertextWire::Full(ciphertext) => {
+                if wire.packing_mode.is_some() {
+                    return Err(D::Error::custom(
+                        "packed response requires an exact coefficient prefix",
+                    ));
+                }
+                (ciphertext, None)
+            }
+            ResponseCiphertextWire::Packed {
+                a,
+                b_prefix,
+                retained,
+            } => {
+                if !wire.column_ciphertexts.is_empty() || wire.packing_mode.is_none() {
+                    return Err(D::Error::custom(
+                        "packed response prefix requires a packed mode and no column ciphertexts",
+                    ));
+                }
+                if a.is_ntt() {
+                    return Err(D::Error::custom(
+                        "packed response prefix requires coefficient-domain ciphertext",
+                    ));
+                }
+                let retained_usize = usize::try_from(retained)
+                    .map_err(|_| D::Error::custom("packed coefficient count does not fit usize"))?;
+                let dim = a.dimension();
+                if retained_usize == 0 || retained_usize > dim {
+                    return Err(D::Error::custom(format!(
+                        "packed coefficient count {retained_usize} outside 1..={dim}"
+                    )));
+                }
+                let crt_count = a.crt_count();
+                let expected_prefix = retained_usize
+                    .checked_mul(crt_count)
+                    .ok_or_else(|| D::Error::custom("packed coefficient count overflow"))?;
+                if b_prefix.len() != expected_prefix {
+                    return Err(D::Error::custom(format!(
+                        "packed b prefix has {} coefficients, expected {expected_prefix}",
+                        b_prefix.len()
+                    )));
+                }
+                let full_len = dim
+                    .checked_mul(crt_count)
+                    .ok_or_else(|| D::Error::custom("packed b polynomial size overflow"))?;
+                let mut b_coeffs = vec![0u64; full_len];
+                for limb in 0..crt_count {
+                    let prefix_start = limb
+                        .checked_mul(retained_usize)
+                        .ok_or_else(|| D::Error::custom("packed b prefix offset overflow"))?;
+                    let prefix_end = prefix_start
+                        .checked_add(retained_usize)
+                        .ok_or_else(|| D::Error::custom("packed b prefix end overflow"))?;
+                    let output_start = limb
+                        .checked_mul(dim)
+                        .ok_or_else(|| D::Error::custom("packed b output offset overflow"))?;
+                    let output_end = output_start
+                        .checked_add(retained_usize)
+                        .ok_or_else(|| D::Error::custom("packed b output end overflow"))?;
+                    let prefix = b_prefix
+                        .get(prefix_start..prefix_end)
+                        .ok_or_else(|| D::Error::custom("packed b prefix shape mismatch"))?;
+                    let output = b_coeffs
+                        .get_mut(output_start..output_end)
+                        .ok_or_else(|| D::Error::custom("packed b output shape mismatch"))?;
+                    output.copy_from_slice(prefix);
+                }
+                let b = Poly::from_crt_coeffs_reduced(b_coeffs, a.moduli());
+                (RlweCiphertext::from_parts(a, b), Some(retained))
+            }
+        };
+        Ok(Self {
+            ciphertext,
+            column_ciphertexts: wire.column_ciphertexts,
+            packing_mode: wire.packing_mode,
+            packed_coefficients,
+        })
+    }
 }
 
 impl ServerResponse {
@@ -37,8 +221,20 @@ impl ServerResponse {
 
     /// Deserialize from bincode.
     pub fn from_binary(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(|e| pir_err!("bincode deserialize failed: {}", e))
+        use bincode::Options;
+
+        bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .reject_trailing_bytes()
+            .deserialize(bytes)
+            .map_err(|e| pir_err!("bincode deserialize failed: {}", e))
     }
+}
+
+fn packed_coefficient_count(count: usize) -> Result<Option<u32>> {
+    let count = u32::try_from(count)
+        .map_err(|_| pir_err!("packed response coefficient count {count} exceeds u32"))?;
+    Ok(Some(count))
 }
 
 fn require_shard_width(operation: &'static str, crs: &ServerCrs, shard: &ShardData) -> Result<()> {
@@ -54,20 +250,94 @@ fn require_shard_width(operation: &'static str, crs: &ServerCrs, shard: &ShardDa
     Ok(())
 }
 
+fn require_dense_shard<'a>(
+    operation: &'static str,
+    encoded_db: &'a EncodedDatabase,
+    shard_id: u32,
+) -> Result<&'a ShardData> {
+    let position = usize::try_from(shard_id)
+        .map_err(|_| pir_err!("{operation}: shard id {shard_id} does not fit a vector index"))?;
+    let shard = encoded_db.shards.get(position).ok_or_else(|| {
+        pir_err!(
+            "{operation}: shard {shard_id} not found at dense position {position}; encoded database has {} shards",
+            encoded_db.shards.len(),
+        )
+    })?;
+    if shard.id != shard_id {
+        return Err(pir_err!(
+            "{operation}: shard vector position {position} holds shard id {}, expected {shard_id}; refusing non-dense encoded state",
+            shard.id,
+        ));
+    }
+    Ok(shard)
+}
+
+fn require_crs_rgsw_gadget(
+    operation: &'static str,
+    crs: &ServerCrs,
+    query: &ClientQuery,
+) -> Result<()> {
+    require_rgsw_shape(
+        operation,
+        crs,
+        &query.rgsw_ciphertext.gadget,
+        query.rgsw_ciphertext.rows.len(),
+    )
+}
+
+fn require_seeded_crs_rgsw_gadget(
+    operation: &'static str,
+    crs: &ServerCrs,
+    query: &SeededClientQuery,
+) -> Result<()> {
+    require_rgsw_shape(
+        operation,
+        crs,
+        &query.rgsw_ciphertext.gadget,
+        query.rgsw_ciphertext.rows.len(),
+    )
+}
+
+fn require_rgsw_shape(
+    operation: &'static str,
+    crs: &ServerCrs,
+    got: &crate::rgsw::GadgetVector,
+    got_rows: usize,
+) -> Result<()> {
+    let expected = &crs.params;
+    if got.len != expected.gadget_len || got.base != expected.gadget_base || got.q != expected.q {
+        return Err(pir_err!(
+            "{operation}: RGSW gadget mismatch: got len={} base={} q={}, expected len={} base={} \
+             q={} from the CRS; refusing client-supplied decomposition parameters",
+            got.len,
+            got.base,
+            got.q,
+            expected.gadget_len,
+            expected.gadget_base,
+            expected.q,
+        ));
+    }
+    if got_rows != expected.gadget_len {
+        return Err(pir_err!(
+            "{operation}: one-sided RGSW row-count mismatch: got {got_rows}, expected {} from \
+             the CRS gadget length; refusing malformed query rows before external product",
+            expected.gadget_len
+        ));
+    }
+    Ok(())
+}
+
 /// Respond with one RLWE ciphertext per column, in parallel.
 pub fn respond(
     crs: &ServerCrs,
     encoded_db: &EncodedDatabase,
     query: &ClientQuery,
 ) -> Result<ServerResponse> {
+    require_crs_rgsw_gadget("respond", crs, query)?;
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
 
-    let shard = encoded_db
-        .shards
-        .iter()
-        .find(|s| s.id == query.shard_id)
-        .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
+    let shard = require_dense_shard("respond", encoded_db, query.shard_id)?;
     require_shard_width("respond", crs, shard)?;
 
     // RGSW is constant across a shard's columns, so its forward NTTs amortize.
@@ -78,7 +348,7 @@ pub fn respond(
         .par_iter()
         .map(|db_poly| {
             let rlwe_db = RlweCiphertext::trivial_encrypt(db_poly, delta, &crs.params);
-            external_product_with_ntt_rgsw(&rlwe_db, &rgsw_ntt_rows, rgsw_gadget, &ctx)
+            external_product_trivial_with_ntt_rgsw(&rlwe_db.b, &rgsw_ntt_rows, rgsw_gadget, &ctx)
         })
         .collect();
 
@@ -95,6 +365,7 @@ pub fn respond(
         ciphertext: combined,
         column_ciphertexts,
         packing_mode: None,
+        packed_coefficients: None,
     })
 }
 
@@ -126,6 +397,7 @@ pub fn respond_seeded_with_variant(
     query: &SeededClientQuery,
     variant: InspireVariant,
 ) -> Result<ServerResponse> {
+    require_seeded_crs_rgsw_gadget("respond_seeded_with_variant", crs, query)?;
     match variant {
         InspireVariant::NoPacking => respond_seeded(crs, encoded_db, query),
         InspireVariant::OnePacking => respond_seeded_packed(crs, encoded_db, query),
@@ -155,16 +427,13 @@ pub fn respond_one_packing(
 ) -> Result<ServerResponse> {
     use crate::inspiring::automorph_pack::pack_lwes;
 
+    require_crs_rgsw_gadget("respond_one_packing", crs, query)?;
     let _d = crs.ring_dim();
     let _q = crs.modulus();
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
 
-    let shard = encoded_db
-        .shards
-        .iter()
-        .find(|s| s.id == query.shard_id)
-        .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
+    let shard = require_dense_shard("respond_one_packing", encoded_db, query.shard_id)?;
     require_shard_width("respond_one_packing", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
@@ -174,7 +443,7 @@ pub fn respond_one_packing(
         .par_iter()
         .map(|db_poly| {
             let rlwe_db = RlweCiphertext::trivial_encrypt(db_poly, delta, &crs.params);
-            external_product_with_ntt_rgsw(&rlwe_db, &rgsw_ntt_rows, rgsw_gadget, &ctx)
+            external_product_trivial_with_ntt_rgsw(&rlwe_db.b, &rgsw_ntt_rows, rgsw_gadget, &ctx)
         })
         .collect();
 
@@ -190,6 +459,7 @@ pub fn respond_one_packing(
         ciphertext: packed,
         column_ciphertexts: vec![],
         packing_mode: Some(PackingMode::Tree),
+        packed_coefficients: packed_coefficient_count(lwe_cts.len())?,
     })
 }
 
@@ -205,6 +475,7 @@ pub fn respond_inspiring(
 ) -> Result<ServerResponse> {
     use crate::inspiring::{generate_rotations, packing_offline, OfflinePackingKeys, PackParams};
 
+    require_crs_rgsw_gadget("respond_inspiring", crs, query)?;
     let d = crs.ring_dim();
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
@@ -214,11 +485,7 @@ pub fn respond_inspiring(
         .as_ref()
         .ok_or_else(|| pir_err!("InspiRING client packing keys missing from query"))?;
 
-    let shard = encoded_db
-        .shards
-        .iter()
-        .find(|s| s.id == query.shard_id)
-        .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
+    let shard = require_dense_shard("respond_inspiring", encoded_db, query.shard_id)?;
     require_shard_width("respond_inspiring", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
@@ -228,7 +495,7 @@ pub fn respond_inspiring(
         .par_iter()
         .map(|db_poly| {
             let rlwe_db = RlweCiphertext::trivial_encrypt(db_poly, delta, &crs.params);
-            external_product_with_ntt_rgsw(&rlwe_db, &rgsw_ntt_rows, rgsw_gadget, &ctx)
+            external_product_trivial_with_ntt_rgsw(&rlwe_db.b, &rgsw_ntt_rows, rgsw_gadget, &ctx)
         })
         .collect();
 
@@ -286,6 +553,7 @@ pub fn respond_inspiring(
         ciphertext: packed,
         column_ciphertexts: vec![],
         packing_mode: Some(PackingMode::Inspiring),
+        packed_coefficients: packed_coefficient_count(num_columns)?,
     })
 }
 
@@ -448,6 +716,7 @@ pub fn respond_inspiring_cached(
 ) -> Result<ServerResponse> {
     use crate::inspiring::{generate_rotations, packing_offline};
 
+    require_crs_rgsw_gadget("respond_inspiring_cached", crs, query)?;
     let d = crs.ring_dim();
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
@@ -457,11 +726,7 @@ pub fn respond_inspiring_cached(
         .as_ref()
         .ok_or_else(|| pir_err!("InspiRING client packing keys missing from query"))?;
 
-    let shard = encoded_db
-        .shards
-        .iter()
-        .find(|s| s.id == query.shard_id)
-        .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
+    let shard = require_dense_shard("respond_inspiring_cached", encoded_db, query.shard_id)?;
     require_shard_width("respond_inspiring_cached", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
@@ -471,7 +736,7 @@ pub fn respond_inspiring_cached(
         .par_iter()
         .map(|db_poly| {
             let rlwe_db = RlweCiphertext::trivial_encrypt(db_poly, delta, &crs.params);
-            external_product_with_ntt_rgsw(&rlwe_db, &rgsw_ntt_rows, rgsw_gadget, &ctx)
+            external_product_trivial_with_ntt_rgsw(&rlwe_db.b, &rgsw_ntt_rows, rgsw_gadget, &ctx)
         })
         .collect();
 
@@ -521,6 +786,7 @@ pub fn respond_inspiring_cached(
         ciphertext: packed,
         column_ciphertexts: vec![],
         packing_mode: Some(PackingMode::Inspiring),
+        packed_coefficients: packed_coefficient_count(cache.pack_params.num_to_pack)?,
     })
 }
 
@@ -531,6 +797,7 @@ pub fn respond_seeded_inspiring_cached(
     query: &SeededClientQuery,
     cache: &ServerInspiringCache,
 ) -> Result<ServerResponse> {
+    require_seeded_crs_rgsw_gadget("respond_seeded_inspiring_cached", crs, query)?;
     let expanded = query.expand();
     respond_inspiring_cached(crs, encoded_db, &expanded, cache)
 }
@@ -546,6 +813,7 @@ pub fn respond_inspiring_cached_with_session(
 ) -> Result<ServerResponse> {
     use crate::inspiring::{generate_rotations, packing_offline};
 
+    require_crs_rgsw_gadget("respond_inspiring_cached_with_session", crs, query)?;
     let d = crs.ring_dim();
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
@@ -584,11 +852,11 @@ pub fn respond_inspiring_cached_with_session(
     };
     let client_packing_keys = resolved_keys.as_ref();
 
-    let shard = encoded_db
-        .shards
-        .iter()
-        .find(|s| s.id == query.shard_id)
-        .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
+    let shard = require_dense_shard(
+        "respond_inspiring_cached_with_session",
+        encoded_db,
+        query.shard_id,
+    )?;
     require_shard_width("respond_inspiring_cached_with_session", crs, shard)?;
 
     // Set RAVEN_PROFILE_RESPOND to any value for a per-region stderr breakdown.
@@ -608,7 +876,7 @@ pub fn respond_inspiring_cached_with_session(
         .par_iter()
         .map(|db_poly| {
             let rlwe_db = RlweCiphertext::trivial_encrypt(db_poly, delta, &crs.params);
-            external_product_with_ntt_rgsw(&rlwe_db, &rgsw_ntt, gadget, &ctx)
+            external_product_trivial_with_ntt_rgsw(&rlwe_db.b, &rgsw_ntt, gadget, &ctx)
         })
         .collect();
 
@@ -711,6 +979,7 @@ pub fn respond_inspiring_cached_with_session(
         ciphertext: packed,
         column_ciphertexts: vec![],
         packing_mode: Some(PackingMode::Inspiring),
+        packed_coefficients: packed_coefficient_count(num_columns)?,
     })
 }
 
@@ -738,6 +1007,7 @@ pub fn respond_seeded_inspiring_cached_with_session(
     cache: &ServerInspiringCache,
     session_store: Option<&super::session::ServerSessionStore>,
 ) -> Result<ServerResponse> {
+    require_seeded_crs_rgsw_gadget("respond_seeded_inspiring_cached_with_session", crs, query)?;
     let expanded = query.expand();
     respond_inspiring_cached_with_session(crs, encoded_db, &expanded, cache, session_store)
 }
@@ -748,6 +1018,7 @@ pub fn respond_seeded_inspiring(
     encoded_db: &EncodedDatabase,
     query: &SeededClientQuery,
 ) -> Result<ServerResponse> {
+    require_seeded_crs_rgsw_gadget("respond_seeded_inspiring", crs, query)?;
     let expanded = query.expand();
     respond_inspiring(crs, encoded_db, &expanded)
 }
@@ -758,6 +1029,7 @@ pub fn respond_seeded(
     encoded_db: &EncodedDatabase,
     query: &SeededClientQuery,
 ) -> Result<ServerResponse> {
+    require_seeded_crs_rgsw_gadget("respond_seeded", crs, query)?;
     let expanded = query.expand();
     respond(crs, encoded_db, &expanded)
 }
@@ -769,6 +1041,7 @@ pub fn respond_seeded_packed(
     encoded_db: &EncodedDatabase,
     query: &SeededClientQuery,
 ) -> Result<ServerResponse> {
+    require_seeded_crs_rgsw_gadget("respond_seeded_packed", crs, query)?;
     let expanded = query.expand();
     respond_one_packing(crs, encoded_db, &expanded)
 }
@@ -779,16 +1052,13 @@ pub fn respond_sequential(
     encoded_db: &EncodedDatabase,
     query: &ClientQuery,
 ) -> Result<ServerResponse> {
+    require_crs_rgsw_gadget("respond_sequential", crs, query)?;
     let _d = crs.ring_dim();
     let _q = crs.modulus();
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
 
-    let shard = encoded_db
-        .shards
-        .iter()
-        .find(|s| s.id == query.shard_id)
-        .ok_or_else(|| pir_err!("Shard {} not found", query.shard_id))?;
+    let shard = require_dense_shard("respond_sequential", encoded_db, query.shard_id)?;
     require_shard_width("respond_sequential", crs, shard)?;
 
     let rgsw_ntt_rows = rgsw_rows_to_ntt(&query.rgsw_ciphertext, &ctx);
@@ -796,7 +1066,8 @@ pub fn respond_sequential(
     let mut column_ciphertexts = Vec::with_capacity(shard.polynomials.len());
     for db_poly in &shard.polynomials {
         let rlwe_db = RlweCiphertext::trivial_encrypt(db_poly, delta, &crs.params);
-        let rotated = external_product_with_ntt_rgsw(&rlwe_db, &rgsw_ntt_rows, rgsw_gadget, &ctx);
+        let rotated =
+            external_product_trivial_with_ntt_rgsw(&rlwe_db.b, &rgsw_ntt_rows, rgsw_gadget, &ctx);
         column_ciphertexts.push(rotated);
     }
 
@@ -813,6 +1084,7 @@ pub fn respond_sequential(
         ciphertext: combined,
         column_ciphertexts,
         packing_mode: None,
+        packed_coefficients: None,
     })
 }
 

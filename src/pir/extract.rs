@@ -76,7 +76,7 @@ fn validate_unpacked_response_columns(
     response: &ServerResponse,
     entry_size: usize,
 ) -> Result<usize> {
-    let expected = entry_size.div_ceil(2);
+    let expected = crate::num_columns(entry_size);
     let got = response.column_ciphertexts.len();
     if got != expected {
         return Err(ExtractError::ColumnCountMismatch {
@@ -88,6 +88,30 @@ fn validate_unpacked_response_columns(
         .into());
     }
     Ok(expected)
+}
+
+pub(crate) fn validate_packed_response_coefficients(
+    operation: &'static str,
+    response: &ServerResponse,
+    required: usize,
+) -> Result<()> {
+    let Some(retained) = response.packed_coefficients else {
+        return Ok(());
+    };
+    let retained = usize::try_from(retained).map_err(|_| ExtractError::PackedCoefficientCount {
+        operation,
+        got: usize::MAX,
+        required,
+    })?;
+    if retained != required {
+        return Err(ExtractError::PackedCoefficientCount {
+            operation,
+            got: retained,
+            required,
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Extract a tree-packed response: columns sit at coefficients 0.. scaled by d.
@@ -102,7 +126,8 @@ fn extract_packed(
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
 
-    let num_columns = (entry_size * 8).div_ceil(16);
+    let num_columns = crate::num_columns(entry_size);
+    validate_packed_response_coefficients("extract_packed", response, num_columns)?;
 
     let decrypted = response
         .ciphertext
@@ -136,7 +161,8 @@ pub fn extract_inspiring(
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
 
-    let num_columns = (entry_size * 8).div_ceil(16);
+    let num_columns = crate::num_columns(entry_size);
+    validate_packed_response_coefficients("extract_inspiring", response, num_columns)?;
 
     let decrypted = response
         .ciphertext
@@ -510,7 +536,7 @@ mod tests {
         let (state, client_query) =
             query(&crs, 15, &encoded_db.config, &rlwe_sk, &mut sampler).unwrap();
         let response = respond(&crs, &encoded_db, &client_query).unwrap();
-        let expected = entry_size.div_ceil(2);
+        let expected = crate::num_columns(entry_size);
 
         for got in [0, expected - 1, expected + 1] {
             let mut malformed = response.clone();

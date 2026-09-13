@@ -3,6 +3,7 @@
 //! automorph-table build they hide is O(d^3).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -59,7 +60,7 @@ impl ClientSession {
         sampler: &mut GaussianSampler,
     ) -> Result<Self> {
         crs.validate()?;
-        let lwe_sk = rlwe_to_lwe_key(&rlwe_sk);
+        let lwe_sk = LweSecretKey::from_rlwe(&rlwe_sk);
 
         let (pack_params, packing_keys) = if crs.inspiring_num_columns > 0 {
             let pp = PackParams::try_new(&crs.params, crs.inspiring_num_columns)
@@ -99,6 +100,43 @@ impl ClientSession {
     /// Current handle, or `None` if nothing was registered.
     pub fn session_handle(&self) -> Option<ServerSessionHandle> {
         self.session_handle
+    }
+
+    /// Install a handle returned by this session's remote server handshake.
+    ///
+    /// The bare handle carries no CRS or instance identity. The caller must install only a
+    /// handle returned after uploading this session's packing keys to the server holding
+    /// [`Self::crs`]; the server remains responsible for rejecting stale or foreign handles.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when this session has no InspiRING packing material to bind.
+    ///
+    /// ```
+    /// use raven_inspire::math::GaussianSampler;
+    /// use raven_inspire::params::InspireParams;
+    /// use raven_inspire::{setup, ClientSession, ServerSessionHandle};
+    ///
+    /// let params = InspireParams::secure_128_d2048();
+    /// let database = vec![0u8; params.ring_dim * 32];
+    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
+    /// let (crs, _, secret_key) = setup(&params, &database, 32, &mut sampler)?;
+    /// let mut session = ClientSession::new(crs, secret_key, &mut sampler)?;
+    /// let issued = ServerSessionHandle(42);
+    /// session.install_server_session_handle(issued)?;
+    /// assert_eq!(session.session_handle(), Some(issued));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn install_server_session_handle(&mut self, handle: ServerSessionHandle) -> Result<()> {
+        if self.packing_keys.is_none() {
+            return Err(pir_err!(
+                "cannot install server session handle {}: this ClientSession has no InspiRING \
+                 packing keys, so subsequent queries could not use the handle path",
+                handle.0
+            ));
+        }
+        self.session_handle = Some(handle);
+        Ok(())
     }
 
     /// Register with the derived `y_all*` fields stripped, mimicking what survives a
@@ -289,7 +327,7 @@ impl ClientSession {
                 residue.rlwe_sk.modulus()
             ));
         }
-        let lwe_sk = rlwe_to_lwe_key(&residue.rlwe_sk);
+        let lwe_sk = LweSecretKey::from_rlwe(&residue.rlwe_sk);
         Ok(Self {
             crs: residue.crs,
             rlwe_sk: residue.rlwe_sk,
@@ -319,20 +357,12 @@ impl std::fmt::Debug for SessionResidue {
     }
 }
 
-fn rlwe_to_lwe_key(rlwe_sk: &RlweSecretKey) -> LweSecretKey {
-    let d = rlwe_sk.ring_dim();
-    let mut coeffs = Vec::with_capacity(d);
-    for i in 0..d {
-        coeffs.push(rlwe_sk.poly.coeff(i));
-    }
-    let q = rlwe_sk.modulus();
-    LweSecretKey::from_coeffs(coeffs, q)
-}
-
 /// Server-side map from [`ServerSessionHandle`] to registered packing keys.
 ///
 /// `RwLock` because every query reads and registration happens once per session.
-/// The store never evicts; wrap it if memory pressure matters.
+/// The store removes explicit handles but has no automatic eviction policy.
+/// Allocation is process-global, so replacing a flushed store cannot reissue a handle
+/// during that process lifetime. Restart-safe allocation belongs to the server adapter.
 ///
 /// The handle is an unauthenticated u64. Guessing another client's handle yields a
 /// response encrypted under that client's keys, so it is a denial of useful response
@@ -347,8 +377,38 @@ pub struct ServerSessionStore {
 #[derive(Debug, Default)]
 struct Inner {
     by_handle: HashMap<u64, Arc<ClientPackingKeys>>,
-    next_handle: u64,
 }
+
+#[derive(Debug)]
+struct HandleAllocator {
+    next: AtomicU64,
+}
+
+impl HandleAllocator {
+    const fn new(next: u64) -> Self {
+        Self {
+            next: AtomicU64::new(next),
+        }
+    }
+
+    fn allocate(&self) -> Result<ServerSessionHandle> {
+        // The atomic reserves values across independent stores; it orders no session data.
+        self.next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            })
+            .map(ServerSessionHandle)
+            .map_err(|exhausted| {
+                pir_err!(
+                    "ServerSessionStore handle space exhausted at {exhausted}; refusing the \
+                     session handshake because handle reuse could resolve stale clients to \
+                     another client's packing keys"
+                )
+            })
+    }
+}
+
+static SESSION_HANDLE_ALLOCATOR: HandleAllocator = HandleAllocator::new(0);
 
 /// Refuse client packing keys whose gamma differs from the server's.
 ///
@@ -409,10 +469,9 @@ impl ServerSessionStore {
             .inner
             .write()
             .map_err(|_| pir_err!("ServerSessionStore: lock poisoned on register"))?;
-        let h = inner.next_handle;
-        inner.next_handle = inner.next_handle.checked_add(1).unwrap_or(0);
-        inner.by_handle.insert(h, Arc::new(keys));
-        Ok(ServerSessionHandle(h))
+        let handle = SESSION_HANDLE_ALLOCATOR.allocate()?;
+        inner.by_handle.insert(handle.0, Arc::new(keys));
+        Ok(handle)
     }
 
     /// Register wire-delivered keys, deriving the `y_all*` rotations that
@@ -440,6 +499,27 @@ impl ServerSessionStore {
             .read()
             .map_err(|_| pir_err!("ServerSessionStore: lock poisoned on get"))?;
         Ok(inner.by_handle.get(&handle.0).cloned())
+    }
+
+    /// Remove `handle`, returning whether it was registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if another thread poisoned the session-store lock.
+    ///
+    /// ```
+    /// use raven_inspire::{ServerSessionHandle, ServerSessionStore};
+    ///
+    /// let store = ServerSessionStore::new();
+    /// assert!(!store.remove(ServerSessionHandle(7))?);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn remove(&self, handle: ServerSessionHandle) -> Result<bool> {
+        let mut inner = self
+            .inner
+            .write()
+            .map_err(|_| pir_err!("ServerSessionStore: lock poisoned on remove"))?;
+        Ok(inner.by_handle.remove(&handle.0).is_some())
     }
 
     /// Registered session count.
@@ -499,6 +579,50 @@ mod from_residue_failfast_tests {
         assert!(
             err.to_string().contains("inconsistent SessionResidue"),
             "got: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod session_store_internal_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn handle_allocator_refuses_exhaustion_without_wrapping() {
+        let allocator = HandleAllocator::new(u64::MAX - 1);
+        assert_eq!(
+            allocator.allocate().expect("last available handle"),
+            ServerSessionHandle(u64::MAX - 1)
+        );
+        for _ in 0..2 {
+            let error = allocator
+                .allocate()
+                .expect_err("exhausted allocator must stay exhausted");
+            let message = error.to_string();
+            assert!(message.contains("exhausted"), "{message}");
+            assert!(message.contains("handle reuse"), "{message}");
+        }
+    }
+
+    #[test]
+    fn remove_reports_a_poisoned_store_lock() {
+        let store = Arc::new(ServerSessionStore::new());
+        let poisoner = Arc::clone(&store);
+        let joined = std::thread::spawn(move || {
+            let _guard = poisoner.inner.write().expect("unpoisoned premise");
+            panic!("poison session store for error-path coverage");
+        })
+        .join();
+        assert!(joined.is_err(), "poisoning thread must panic");
+
+        let error = store
+            .remove(ServerSessionHandle(0))
+            .expect_err("remove must report lock poisoning");
+        assert_eq!(
+            error.to_string(),
+            "ServerSessionStore: lock poisoned on remove"
         );
     }
 }

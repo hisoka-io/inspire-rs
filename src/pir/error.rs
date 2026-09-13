@@ -56,6 +56,15 @@ pub enum ExtractError {
         /// Record width that determined `expected`.
         entry_size: usize,
     },
+    /// A packed response carried a different prefix length than the record width requires.
+    PackedCoefficientCount {
+        /// Extractor that rejected the response.
+        operation: &'static str,
+        /// Leading coefficients received.
+        got: usize,
+        /// Leading coefficients required.
+        required: usize,
+    },
     /// The TwoPacking extractor received a tree-packed or untagged response.
     TwoPackingModeMismatch {
         /// Decoded semantic mode.
@@ -82,6 +91,15 @@ impl fmt::Display for ExtractError {
                 f,
                 "{operation}: response column-count mismatch for entry_size {entry_size}: \
                  got {got}, expected {expected}; refusing a partial or surplus response"
+            ),
+            Self::PackedCoefficientCount {
+                operation,
+                got,
+                required,
+            } => write!(
+                f,
+                "{operation}: packed coefficient prefix has {got}, requires exactly {required}; \
+                 refusing a partial or surplus response"
             ),
             Self::TwoPackingModeMismatch {
                 mode,

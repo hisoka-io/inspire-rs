@@ -48,6 +48,9 @@ fn smoke_cell(params: &InspireParams, entries: u64, record_bytes: usize, label: 
             query_seeded(&crs, idx, &encoded_db.config, &sk, &mut sampler).unwrap();
         seeded_query.packing_mode = PackingMode::Inspiring;
         let response = respond_seeded_inspiring(&crs, &encoded_db, &seeded_query).unwrap();
+        let response_wire = response.to_binary().expect("serialize response prefix");
+        let response = raven_inspire::ServerResponse::from_binary(&response_wire)
+            .expect("deserialize response prefix");
         let recovered = extract_inspiring(&crs, &state, &response, record_bytes).unwrap();
         let expected: Vec<u8> = (0..record_bytes)
             .map(|j| (((idx as usize) + j) % 251) as u8)

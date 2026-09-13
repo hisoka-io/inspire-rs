@@ -7,10 +7,14 @@ experiments and scoping alignment work.
 
 ## Parameter Mapping (High-Level)
 
+> **CORRECTED 2026-09-12:** Google retains the two-modulus reference shape. The older inspire-rs
+> column and defaults below also showed that pair; current Raven secure presets instead use one
+> `DEFAULT_Q = 2^60 - 2^14 + 1` limb and `p = 65537`.
+
 | Concept | Google InsPIRe (research/InsPIRe) | inspire-rs |
 |--------|----------------------------------|-----------|
 | Ring dimension | `d` / `poly_len` | `ring_dim` |
-| Ciphertext modulus | CRT moduli list | CRT moduli list (default), single-modulus optional |
+| Ciphertext modulus | CRT moduli list | single `DEFAULT_Q` limb by default; explicit two-CRT optional |
 | Plaintext modulus | `p` | `p` |
 | Gadget base | `B` | `gadget_base` |
 | Gadget length | `l_gsw` | `gadget_len` |
@@ -32,9 +36,9 @@ experiments and scoping alignment work.
 ## Current inspire-rs defaults (reference)
 
 - ring_dim: 2048
-- crt_moduli: [268369921, 249561089]
-- q: 268369921 * 249561089 (≈ 2^56 composite)
-- p: 65536
+- crt_moduli: [`DEFAULT_Q`]
+- q: `2^60 - 2^14 + 1`
+- p: 65537
 - sigma: 6.4
 - gadget_base: 2^20
 - gadget_len: 3

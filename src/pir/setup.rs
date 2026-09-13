@@ -80,15 +80,18 @@ impl ServerCrs {
     }
 
     /// 16-byte version magic prefixing a serialized CRS, mirroring the storage
-    /// snapshot magic. Bumps on any CRS layout change so a stale blob fails loud
-    /// on decode instead of bincode silently mis-parsing a new layout.
+    /// snapshot magic. A CRS is a persistent cryptographic artifact that can be
+    /// decoded without HTTP metadata, so its prefix identifies both the artifact
+    /// kind and the layout that requires re-bootstrap when changed.
     pub const MAGIC: [u8; 16] = *b"RAVEN_CRS_v01\0\0\0";
 
     /// Reject a CRS body larger than this before decoding, so a malicious or stale
     /// (e.g. the pre-shrink ~35 MiB) blob cannot drive an unbounded bincode allocation.
     /// A length pre-check is the only effective bound: bincode 1.3 forces an Infinite
     /// limit on the slice path, so `with_limit` is a no-op there. ~6x the largest
-    /// legitimate CRS (d=4096 is ~2.5 MiB).
+    /// legitimate CRS (d=4096 is ~2.5 MiB). This type-specific cap is deliberately
+    /// narrower than a client's general untrusted-input cap; it is a nested
+    /// artifact boundary rather than a general transport envelope.
     pub const DECODE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
     /// Serialize with the [`MAGIC`](Self::MAGIC) version prefix for wire / on-disk transport.
@@ -229,11 +232,8 @@ pub fn setup_with_rng<R: rand::RngCore + rand::CryptoRng>(
     let ctx = params.ntt_context();
 
     let total_entries = database.len() / entry_size;
-    let shard_config = ShardConfig {
-        shard_size_bytes: (d as u64) * (entry_size as u64),
-        entry_size_bytes: entry_size,
-        total_entries: total_entries as u64,
-    };
+    let shard_config = ShardConfig::for_ring_dim(d, entry_size, total_entries as u64)
+        .map_err(|cause| pir_err!("setup: {cause}"))?;
 
     let rlwe_sk = RlweSecretKey::generate(params, sampler);
 
@@ -252,7 +252,7 @@ pub fn setup_with_rng<R: rand::RngCore + rand::CryptoRng>(
 
     // a column carries 16 bits of the entry, so the packing width is ceil(entry_size / 2)
     let bytes_per_column = 2usize;
-    let num_columns = entry_size.div_ceil(bytes_per_column).max(1);
+    let num_columns = crate::num_columns(entry_size);
 
     if !PackParams::is_legal_width(d, num_columns) {
         let legal_entry_sizes: Vec<usize> = PackParams::legal_widths(d)

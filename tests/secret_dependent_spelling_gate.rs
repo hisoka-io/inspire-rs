@@ -32,6 +32,7 @@ const ENCODE_DB_SRC: &str = include_str!("../src/pir/encode_db.rs");
 const INSPIRING_SRC: &str = include_str!("../src/inspiring/inspiring2.rs");
 const GALOIS_SRC: &str = include_str!("../src/rlwe/galois.rs");
 const KS_SETUP_SRC: &str = include_str!("../src/ks/setup.rs");
+const LWE_ENC_SRC: &str = include_str!("../src/lwe/enc.rs");
 const QUERY_SRC: &str = include_str!("../src/pir/query.rs");
 const SESSION_SRC: &str = include_str!("../src/pir/session.rs");
 const PARAMS_SRC: &str = include_str!("../src/params.rs");
@@ -191,6 +192,23 @@ fn reduction_divides_only_by_the_public_modulus() {
         "reduce_by_public_modulus",
         &["u64::MAX / q"],
         "Barrett's only divide takes a constant over the public modulus",
+    );
+}
+
+#[test]
+fn sample_extraction_key_negation_is_selected_not_branched() {
+    let body = item_source(LWE_ENC_SRC, "pub fn from_rlwe");
+    deny(
+        body,
+        "LweSecretKey::from_rlwe",
+        &["if s_i == 0", "if s_i != 0"],
+        "the RLWE coefficient is secret; modular negation must be selected",
+    );
+    require(
+        body,
+        "LweSecretKey::from_rlwe",
+        &["u64::conditional_select", "s_i.ct_eq(&0)"],
+        "zero must be selected through subtle's barrier",
     );
 }
 

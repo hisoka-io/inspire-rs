@@ -71,19 +71,16 @@ impl GadgetVector {
     }
 }
 
-/// RGSW ciphertext: rows `0..ell` decrypt to `m*z^i*s`, rows `ell..2*ell` to `m*z^i`.
-///
-/// That split is what lets the external product absorb both halves of an RLWE pair.
+/// One-sided RGSW ciphertext: row `i` decrypts to `m*z^i`.
 ///
 /// # Example
 ///
 /// ```text
-/// [ Row 0..ℓ-1:   RLWE encryptions that decrypt to m·z^i·s  (message × secret key)
-///   Row ℓ..2ℓ-1: RLWE encryptions that decrypt to m·z^i    (plain message) ]
+/// [ Row 0..ell-1: RLWE encryptions that decrypt to m*z^i ]
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RgswCiphertext {
-    /// `2 * ell` RLWE rows.
+    /// One RLWE row per gadget digit.
     pub rows: Vec<RlweCiphertext>,
     /// Decomposition base and length.
     pub gadget: GadgetVector,
@@ -94,8 +91,8 @@ impl RgswCiphertext {
     pub fn from_rows(rows: Vec<RlweCiphertext>, gadget: GadgetVector) -> Self {
         debug_assert_eq!(
             rows.len(),
-            2 * gadget.len,
-            "RGSW must have 2 * gadget.len rows"
+            gadget.len,
+            "one-sided RGSW must have gadget.len rows"
         );
         Self { rows, gadget }
     }
@@ -140,7 +137,7 @@ impl RgswCiphertext {
         let moduli = sk.poly.moduli();
         let ell = gadget.len;
 
-        let mut rows = Vec::with_capacity(2 * ell);
+        let mut rows = Vec::with_capacity(ell);
         let powers = gadget.powers();
         assert!(
             powers.len() >= ell,
@@ -148,19 +145,6 @@ impl RgswCiphertext {
             ell,
             powers.len()
         );
-
-        for &power in &powers[..ell] {
-            let a_rand = Poly::random_with_rng_moduli(d, moduli, rng);
-            let error = sample_error_poly(d, moduli, sampler);
-
-            let a_s = a_rand.mul_ntt(&sk.poly, ctx);
-            let b = &(-a_s) + &error;
-
-            let scaled_msg = message.scalar_mul(power);
-            let a = &a_rand + &scaled_msg;
-
-            rows.push(RlweCiphertext::from_parts(a, b));
-        }
 
         for &power in &powers[..ell] {
             let a = Poly::random_with_rng_moduli(d, moduli, rng);
@@ -209,10 +193,10 @@ impl RgswCiphertext {
     }
 }
 
-/// [`RgswCiphertext`] carrying each row's `a` as a 32-byte seed, halving the wire size.
+/// [`RgswCiphertext`] carrying each row's `a` as a 32-byte seed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SeededRgswCiphertext {
-    /// `2 * ell` seeded RLWE rows.
+    /// One seeded RLWE row per gadget digit.
     pub rows: Vec<SeededRlweCiphertext>,
     /// Decomposition base and length.
     pub gadget: GadgetVector,
@@ -263,7 +247,7 @@ impl SeededRgswCiphertext {
         let moduli = sk.poly.moduli();
         let ell = gadget.len;
 
-        let mut rows = Vec::with_capacity(2 * ell);
+        let mut rows = Vec::with_capacity(ell);
         let powers = gadget.powers();
         assert!(
             powers.len() >= ell,
@@ -271,25 +255,6 @@ impl SeededRgswCiphertext {
             ell,
             powers.len()
         );
-
-        // Seeding pins `a`, so the m*z^i term moves into b as b + m*z^i*s to
-        // keep decryption identical to the unseeded row.
-        for &power in &powers[..ell] {
-            let mut seed = [0u8; 32];
-            rng.fill_bytes(&mut seed);
-
-            let a_rand = Poly::from_seed_moduli(&seed, d, moduli);
-            let error = sample_error_poly(d, moduli, sampler);
-
-            let a_s = a_rand.mul_ntt(&sk.poly, ctx);
-            let b = &(-a_s) + &error;
-
-            let scaled_msg = message.scalar_mul(power);
-            let msg_s = scaled_msg.mul_ntt(&sk.poly, ctx);
-            let b_adjusted = &b + &msg_s;
-
-            rows.push(SeededRlweCiphertext::new(seed, b_adjusted));
-        }
 
         for &power in &powers[..ell] {
             let mut seed = [0u8; 32];
@@ -332,7 +297,10 @@ impl SeededRgswCiphertext {
             .iter()
             .map(crate::rlwe::SeededRlweCiphertext::expand)
             .collect();
-        RgswCiphertext::from_rows(rows, self.gadget.clone())
+        RgswCiphertext {
+            rows,
+            gadget: self.gadget.clone(),
+        }
     }
 
     /// Ring dimension d.
@@ -409,7 +377,7 @@ mod tests {
 
         let rgsw = RgswCiphertext::encrypt_scalar(&sk, 1, &gadget, &mut sampler, &ctx);
 
-        assert_eq!(rgsw.rows.len(), 2 * params.gadget_len);
+        assert_eq!(rgsw.rows.len(), params.gadget_len);
         assert_eq!(rgsw.ring_dim(), params.ring_dim);
         assert_eq!(rgsw.modulus(), params.q);
     }
@@ -425,7 +393,7 @@ mod tests {
 
         let rgsw = RgswCiphertext::encrypt_scalar(&sk, 0, &gadget, &mut sampler, &ctx);
 
-        assert_eq!(rgsw.rows.len(), 6);
+        assert_eq!(rgsw.rows.len(), 3);
     }
 
     #[test]

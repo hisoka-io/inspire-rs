@@ -10,16 +10,22 @@ This document outlines the implementation of InsPIRe PIR protocol in Rust for pr
 
 Based on the InsPIRe paper's validated parameters:
 
+> **CORRECTED 2026-09-12:** this document previously presented the two-CRT pair
+> `[268369921, 249561089]`, `p = 2^16`, and "Default secure_128_* params use CRT" as current.
+> Current secure presets use one `DEFAULT_Q = 2^60 - 2^14 + 1` limb and `p = 65537`.
+
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | Ring dimension d | 2048 | Power of two, balances security/performance |
-| Ciphertext modulus q | CRT moduli [268369921, 249561089] (q ≈ 2^56) | NTT-friendly per-modulus |
-| Plaintext modulus p | 2^16 | Packs 32-byte entries across coefficients |
+| Ciphertext modulus q | `DEFAULT_Q = 2^60 - 2^14 + 1` (one limb) | NTT-friendly prime |
+| Plaintext modulus p | 65537 | Packs 16-bit columns without reduction |
 | Error σ | 6.4 | Discrete Gaussian parameter |
 | Gadget base z | 2^20 | For key-switching decomposition |
 | Key-switching matrices | 2 | K_g, K_h (vs logarithmic in prior work) |
 
-**Note**: Single-modulus params remain available for compatibility testing, but the experimental modulus-switching query path has been removed. Default `secure_128_*` params use CRT.
+**Note**: The experimental modulus-switching query path has been removed. Current
+`secure_128_*` params are single-prime; explicit two-CRT construction remains available through
+`for_scenario_with_crt`.
 
 ### 2. Database Sharding
 
@@ -123,6 +129,11 @@ Transforms d LWE ciphertexts into a single RLWE ciphertext using only 2 key-swit
 
 ## Performance Estimates
 
+> **CORRECTED 2026-09-12:** the historical estimates below include the removed
+> `crs_a_vectors` field and retain their original accounting as an audit trail. The current
+> client-shipped CRS is ~1.1 MiB, not ~40-50 MB. The full preprocessing/storage totals have not
+> been remeasured in this documentation pass.
+
 ### Server Preprocessing (One-time per snapshot)
 
 | Component | Time | Storage |
@@ -131,7 +142,9 @@ Transforms d LWE ciphertexts into a single RLWE ciphertext using only 2 key-swit
 | DB encoding (73 GB) | 1-2 hours | ~73 GB |
 | Total | ~2 hours | ~120 GB |
 
-Note: CRS size is dominated by `crs_a_vectors` (d×d coefficients ≈ 33 MB for d=2048) and InspiRING offline precomputation.
+Historical note: the former CRS size was dominated by `crs_a_vectors` (d×d coefficients
+approximately 33 MB for d=2048) and InspiRING offline precomputation; that field is no longer in
+`ServerCrs`.
 
 ### Online Query
 

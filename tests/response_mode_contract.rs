@@ -7,9 +7,11 @@ use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel};
 use raven_inspire::pir::{
     extract_with_variant, query, query_seeded, respond, respond_inspiring,
     respond_inspiring_cached, respond_inspiring_cached_with_session, respond_one_packing,
-    respond_seeded, respond_seeded_packed, respond_seeded_with_variant, respond_sequential,
-    respond_with_variant, setup, ClientQuery, EncodedDatabase, PackingMode, SeededClientQuery,
-    ServerCrs, ServerInspiringCache, ServerResponse,
+    respond_seeded, respond_seeded_inspiring, respond_seeded_inspiring_cached,
+    respond_seeded_inspiring_cached_with_session, respond_seeded_packed,
+    respond_seeded_with_variant, respond_sequential, respond_with_variant, setup, ClientQuery,
+    EncodedDatabase, PackingMode, SeededClientQuery, ServerCrs, ServerInspiringCache,
+    ServerResponse,
 };
 
 #[derive(Clone)]
@@ -61,6 +63,91 @@ fn fixture() -> Fixture {
         database,
         entry_size,
         target,
+    }
+}
+
+fn dense_two_shards(fixture: &Fixture) -> EncodedDatabase {
+    let mut encoded_db = fixture.encoded_db.clone();
+    let mut second = encoded_db.shards[0].clone();
+    second.id = 1;
+    encoded_db.shards.push(second);
+    encoded_db
+}
+
+fn responder_outcomes(
+    fixture: &Fixture,
+    encoded_db: &EncodedDatabase,
+    query: &ClientQuery,
+    cache: &ServerInspiringCache,
+) -> [(&'static str, raven_inspire::pir::Result<ServerResponse>); 6] {
+    [
+        ("respond", respond(&fixture.crs, encoded_db, query)),
+        (
+            "respond_one_packing",
+            respond_one_packing(&fixture.crs, encoded_db, query),
+        ),
+        (
+            "respond_inspiring",
+            respond_inspiring(&fixture.crs, encoded_db, query),
+        ),
+        (
+            "respond_inspiring_cached",
+            respond_inspiring_cached(&fixture.crs, encoded_db, query, cache),
+        ),
+        (
+            "respond_inspiring_cached_with_session",
+            respond_inspiring_cached_with_session(&fixture.crs, encoded_db, query, cache, None),
+        ),
+        (
+            "respond_sequential",
+            respond_sequential(&fixture.crs, encoded_db, query),
+        ),
+    ]
+}
+
+#[test]
+fn every_responder_serves_dense_first_and_last_shards_byte_identically() {
+    let fixture = fixture();
+    let encoded_db = dense_two_shards(&fixture);
+    let cache = ServerInspiringCache::new(&fixture.crs, &encoded_db).expect("cache");
+    let mut first_query = fixture.query.clone();
+    first_query.shard_id = 0;
+    let mut last_query = fixture.query.clone();
+    last_query.shard_id = 1;
+
+    let first = responder_outcomes(&fixture, &encoded_db, &first_query, &cache);
+    let last = responder_outcomes(&fixture, &encoded_db, &last_query, &cache);
+    for ((operation, first), (last_operation, last)) in first.into_iter().zip(last) {
+        assert_eq!(operation, last_operation);
+        let first_wire = first
+            .expect("dense first shard")
+            .to_binary()
+            .expect("serialize first response");
+        let last_wire = last
+            .expect("dense last shard")
+            .to_binary()
+            .expect("serialize last response");
+        assert_eq!(first_wire, last_wire, "{operation}");
+    }
+}
+
+#[test]
+fn every_responder_refuses_a_shard_vector_position_id_mismatch() {
+    let fixture = fixture();
+    let mut encoded_db = dense_two_shards(&fixture);
+    encoded_db.shards.swap(0, 1);
+    let cache = ServerInspiringCache::new(&fixture.crs, &encoded_db).expect("cache");
+    let mut query = fixture.query.clone();
+    query.shard_id = 1;
+
+    for (operation, outcome) in responder_outcomes(&fixture, &encoded_db, &query, &cache) {
+        let Err(error) = outcome else {
+            panic!("{operation}: a non-dense shard vector must be refused");
+        };
+        let message = error.to_string();
+        assert!(message.contains(operation), "{message}");
+        assert!(message.contains("position 1"), "{message}");
+        assert!(message.contains("shard id 0"), "{message}");
     }
 }
 
@@ -116,6 +203,50 @@ fn explicit_one_packing_dispatch_round_trips_an_unmodified_query() {
     assert_eq!(decoded, expected);
 }
 
+#[test]
+fn every_extractor_rounds_an_odd_entry_width_up_to_two_columns() {
+    let params = InspireParams {
+        ring_dim: 256,
+        q: 1_152_921_504_606_830_593,
+        crt_moduli: vec![1_152_921_504_606_830_593],
+        p: 65_537,
+        sigma: 6.4,
+        gadget_base: 1 << 20,
+        gadget_len: 3,
+        security_level: SecurityLevel::Bits128,
+    };
+    let entry_size = 3usize;
+    let database: Vec<u8> = (0..params.ring_dim)
+        .flat_map(|i| [u8::try_from(i % 251).unwrap(), 0, 1])
+        .collect();
+    let mut sampler = GaussianSampler::with_seed(params.sigma, 42);
+    let (crs, encoded_db, sk) =
+        setup(&params, &database, entry_size, &mut sampler).expect("odd-width setup");
+    let target = 42usize;
+    let (state, query) =
+        query(&crs, target as u64, &encoded_db.config, &sk, &mut sampler).expect("odd-width query");
+    let expected = &database[target * entry_size..(target + 1) * entry_size];
+
+    for (variant, response) in [
+        (
+            InspireVariant::NoPacking,
+            respond(&crs, &encoded_db, &query).expect("unpacked response"),
+        ),
+        (
+            InspireVariant::OnePacking,
+            respond_one_packing(&crs, &encoded_db, &query).expect("tree response"),
+        ),
+        (
+            InspireVariant::TwoPacking,
+            respond_inspiring(&crs, &encoded_db, &query).expect("InspiRING response"),
+        ),
+    ] {
+        let decoded = extract_with_variant(&crs, &state, &response, entry_size, variant)
+            .expect("odd-width extraction");
+        assert_eq!(decoded, expected, "{variant:?}");
+    }
+}
+
 fn with_shard_width(f: &Fixture, got: usize) -> EncodedDatabase {
     let mut encoded_db = f.encoded_db.clone();
     let polynomials = &mut encoded_db.shards[0].polynomials;
@@ -136,6 +267,159 @@ fn assert_shard_width_error(message: &str, operation: &str, got: usize, expected
         message.contains(&format!("expected {expected}")),
         "{message}"
     );
+}
+
+fn assert_all_responders_refuse_forged_gadget(f: &Fixture, query: &ClientQuery) {
+    let got = &query.rgsw_ciphertext.gadget;
+    let expected = &f.crs.params;
+    let got_fields = format!("got len={} base={} q={}", got.len, got.base, got.q);
+    let expected_fields = format!(
+        "expected len={} base={} q={}",
+        expected.gadget_len, expected.gadget_base, expected.q
+    );
+    for (operation, outcome) in [
+        ("respond", respond(&f.crs, &f.encoded_db, query)),
+        (
+            "respond_one_packing",
+            respond_one_packing(&f.crs, &f.encoded_db, query),
+        ),
+        (
+            "respond_inspiring",
+            respond_inspiring(&f.crs, &f.encoded_db, query),
+        ),
+        (
+            "respond_inspiring_cached",
+            respond_inspiring_cached(&f.crs, &f.encoded_db, query, &f.cache),
+        ),
+        (
+            "respond_inspiring_cached_with_session",
+            respond_inspiring_cached_with_session(&f.crs, &f.encoded_db, query, &f.cache, None),
+        ),
+        (
+            "respond_sequential",
+            respond_sequential(&f.crs, &f.encoded_db, query),
+        ),
+    ] {
+        let error = outcome.expect_err("a forged RGSW gadget must be refused");
+        let message = error.to_string();
+        assert!(message.contains(operation), "{message}");
+        assert!(message.contains("RGSW gadget mismatch"), "{message}");
+        assert!(message.contains(&got_fields), "{message}");
+        assert!(message.contains(&expected_fields), "{message}");
+    }
+}
+
+#[test]
+fn every_responder_refuses_each_forged_rgsw_gadget_field() {
+    let f = fixture();
+
+    let mut wrong_len = f.query.clone();
+    wrong_len.rgsw_ciphertext.gadget.len -= 1;
+    wrong_len
+        .rgsw_ciphertext
+        .rows
+        .truncate(2 * wrong_len.rgsw_ciphertext.gadget.len);
+
+    let mut wrong_base = f.query.clone();
+    wrong_base.rgsw_ciphertext.gadget.base += 1;
+
+    let mut wrong_q = f.query.clone();
+    wrong_q.rgsw_ciphertext.gadget.q -= 1;
+
+    for forged_query in [wrong_len, wrong_base, wrong_q] {
+        assert_all_responders_refuse_forged_gadget(&f, &forged_query);
+    }
+}
+
+#[test]
+fn every_responder_refuses_a_wrong_one_sided_rgsw_row_count() {
+    let f = fixture();
+    let mut query = f.query.clone();
+    query
+        .rgsw_ciphertext
+        .rows
+        .truncate(query.rgsw_ciphertext.gadget.len - 1);
+
+    for (operation, outcome) in [
+        ("respond", respond(&f.crs, &f.encoded_db, &query)),
+        (
+            "respond_one_packing",
+            respond_one_packing(&f.crs, &f.encoded_db, &query),
+        ),
+        (
+            "respond_inspiring",
+            respond_inspiring(&f.crs, &f.encoded_db, &query),
+        ),
+        (
+            "respond_inspiring_cached",
+            respond_inspiring_cached(&f.crs, &f.encoded_db, &query, &f.cache),
+        ),
+        (
+            "respond_inspiring_cached_with_session",
+            respond_inspiring_cached_with_session(&f.crs, &f.encoded_db, &query, &f.cache, None),
+        ),
+        (
+            "respond_sequential",
+            respond_sequential(&f.crs, &f.encoded_db, &query),
+        ),
+    ] {
+        let error = outcome.expect_err("wrong one-sided RGSW row count must be refused");
+        let message = error.to_string();
+        assert!(message.contains(operation), "{message}");
+        assert!(message.contains("row-count mismatch"), "{message}");
+        assert!(message.contains("got 2"), "{message}");
+        assert!(message.contains("expected 3"), "{message}");
+    }
+}
+
+#[test]
+fn every_seeded_responder_refuses_row_count_before_expansion() {
+    let f = fixture();
+    let mut query = f.seeded_query.clone();
+    query
+        .rgsw_ciphertext
+        .rows
+        .truncate(query.rgsw_ciphertext.gadget.len - 1);
+
+    for (operation, outcome) in [
+        (
+            "respond_seeded",
+            respond_seeded(&f.crs, &f.encoded_db, &query),
+        ),
+        (
+            "respond_seeded_packed",
+            respond_seeded_packed(&f.crs, &f.encoded_db, &query),
+        ),
+        (
+            "respond_seeded_inspiring",
+            respond_seeded_inspiring(&f.crs, &f.encoded_db, &query),
+        ),
+        (
+            "respond_seeded_inspiring_cached",
+            respond_seeded_inspiring_cached(&f.crs, &f.encoded_db, &query, &f.cache),
+        ),
+        (
+            "respond_seeded_inspiring_cached_with_session",
+            respond_seeded_inspiring_cached_with_session(
+                &f.crs,
+                &f.encoded_db,
+                &query,
+                &f.cache,
+                None,
+            ),
+        ),
+        (
+            "respond_seeded_with_variant",
+            respond_seeded_with_variant(&f.crs, &f.encoded_db, &query, InspireVariant::TwoPacking),
+        ),
+    ] {
+        let error = outcome.expect_err("seeded row mismatch must fail before expansion");
+        let message = error.to_string();
+        assert!(message.contains(operation), "{message}");
+        assert!(message.contains("row-count mismatch"), "{message}");
+        assert!(message.contains("got 2"), "{message}");
+        assert!(message.contains("expected 3"), "{message}");
+    }
 }
 
 #[test]

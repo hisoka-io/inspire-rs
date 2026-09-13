@@ -182,6 +182,7 @@ fn mod_switch_response_inner(
         ciphertext: new_main,
         column_ciphertexts: new_columns,
         packing_mode: response.packing_mode,
+        packed_coefficients: response.packed_coefficients,
     })
 }
 
@@ -389,6 +390,7 @@ pub fn decode_response_packed(bytes: &[u8]) -> Result<ServerResponse> {
         ciphertext: main_ct,
         column_ciphertexts,
         packing_mode,
+        packed_coefficients: None,
     })
 }
 
@@ -437,7 +439,12 @@ pub fn extract_inspiring_mod_switched(
     let target_ctx = NttContext::with_moduli(crs.params.ring_dim, &[target_modulus]);
     let switched_sk = mod_switch_secret_key(&state.rlwe_secret_key, target_modulus, crs.params.q)?;
 
-    let num_columns = (entry_size * 8).div_ceil(16);
+    let num_columns = crate::num_columns(entry_size);
+    super::extract::validate_packed_response_coefficients(
+        "extract_inspiring_mod_switched",
+        response,
+        num_columns,
+    )?;
     let decrypted = response
         .ciphertext
         .decrypt(&switched_sk, delta_prime, p, &target_ctx);
@@ -531,7 +538,7 @@ mod tests {
         let params = small_inspiring_params();
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 
-        let entry_size = 32;
+        let entry_size = 3;
         let num_entries = params.ring_dim;
         let database: Vec<u8> = (0..(num_entries * entry_size))
             .map(|i| (i % 256) as u8)
@@ -579,6 +586,7 @@ mod tests {
             ciphertext: ct,
             column_ciphertexts: vec![],
             packing_mode: Some(PackingMode::Inspiring),
+            packed_coefficients: None,
         };
         let encoded = encode_response_packed(&response).unwrap();
         let decoded = decode_response_packed(&encoded).unwrap();
@@ -600,6 +608,7 @@ mod tests {
             ciphertext: ct,
             column_ciphertexts: vec![],
             packing_mode: None,
+            packed_coefficients: None,
         };
         let result = encode_response_packed(&response);
         assert!(
@@ -696,6 +705,7 @@ mod tests {
             ciphertext: ct,
             column_ciphertexts: vec![],
             packing_mode: Some(PackingMode::Inspiring),
+            packed_coefficients: None,
         };
         let out = mod_switch_response_inner(&response, params.q).unwrap();
         assert_eq!(out.packing_mode, Some(PackingMode::Inspiring));

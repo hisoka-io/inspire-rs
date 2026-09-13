@@ -2,6 +2,7 @@
 
 use super::types::{LweCiphertext, LweSecretKey};
 use crate::math::{GaussianSampler, ModQ};
+use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 impl LweSecretKey {
     /// Samples a secret key from the error distribution.
@@ -33,7 +34,8 @@ impl LweSecretKey {
         coeffs[0] = rlwe_sk.poly.coeff(0);
         for (i, coeff) in coeffs.iter_mut().enumerate().take(d).skip(1) {
             let s_i = rlwe_sk.poly.coeff(i);
-            *coeff = if s_i == 0 { 0 } else { q - s_i };
+            let negated = q - s_i;
+            *coeff = u64::conditional_select(&negated, &0, s_i.ct_eq(&0));
         }
 
         Self { coeffs, dim: d, q }

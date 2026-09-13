@@ -41,7 +41,7 @@ fn seeded_query_with_gadget(
 
     let (shard_id, local_index) = shard_config.index_to_shard(global_index);
 
-    let lwe_sk = rlwe_to_lwe_key(rlwe_sk);
+    let lwe_sk = LweSecretKey::from_rlwe(rlwe_sk);
 
     let inv_mono = inverse_monomial(local_index as usize, d, q, crs.params.moduli());
     let rgsw_ciphertext = SeededRgswCiphertext::encrypt(rlwe_sk, &inv_mono, gadget, sampler, &ctx);
@@ -89,7 +89,8 @@ pub struct ClientState {
 
 /// Reference to packing keys already uploaded via
 /// [`crate::pir::ServerSessionStore::register`], so queries need not inline ~48 KiB
-/// of keys. Monotonically allocated, carries no secret, and MAY be logged.
+/// of keys. Opaque to clients, carries no secret, and MAY be logged. Servers that
+/// persist state must prevent reuse across restart.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ServerSessionHandle(pub u64);
 
@@ -202,7 +203,7 @@ pub fn query(
 
     let (shard_id, local_index) = shard_config.index_to_shard(global_index);
 
-    let lwe_sk = rlwe_to_lwe_key(rlwe_sk);
+    let lwe_sk = LweSecretKey::from_rlwe(rlwe_sk);
 
     let inv_mono = inverse_monomial(local_index as usize, d, q, crs.params.moduli());
     let rgsw_ciphertext =
@@ -245,17 +246,6 @@ pub fn query_seeded(
         sampler,
         &crs.rgsw_gadget,
     )
-}
-
-/// The LWE key is the coefficient vector of the RLWE key polynomial.
-fn rlwe_to_lwe_key(rlwe_sk: &RlweSecretKey) -> LweSecretKey {
-    let d = rlwe_sk.ring_dim();
-    let mut coeffs = Vec::with_capacity(d);
-    for i in 0..d {
-        coeffs.push(rlwe_sk.poly.coeff(i));
-    }
-    let q = rlwe_sk.modulus();
-    LweSecretKey::from_coeffs(coeffs, q)
 }
 
 #[cfg(test)]
@@ -331,19 +321,6 @@ mod tests {
         assert_eq!(state.shard_id, 1);
         assert_eq!(state.local_index, 10);
         assert_eq!(client_query.shard_id, 1);
-    }
-
-    #[test]
-    fn test_rlwe_to_lwe_key_conversion() {
-        let params = test_params();
-        let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
-
-        let rlwe_sk = RlweSecretKey::generate(&params, &mut sampler);
-        let lwe_sk = rlwe_to_lwe_key(&rlwe_sk);
-
-        assert_eq!(lwe_sk.dim, params.ring_dim);
-        assert_eq!(lwe_sk.q, params.q);
-        assert_eq!(lwe_sk.coeffs.len(), params.ring_dim);
     }
 
     #[test]

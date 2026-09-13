@@ -221,16 +221,14 @@ fn two_crt_external_product_identity() {
         msg.set_coeff(i, (i as u64 * 3 + 7) % 100);
     }
 
-    let a_random2 = Poly::random_moduli(256, params.moduli());
-    let error2 = Poly::sample_gaussian_moduli(256, params.moduli(), &mut sampler);
-    let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a_random2, &error2, &ctx);
+    let rlwe = RlweCiphertext::trivial_encrypt(&msg, delta, &params);
 
     // RGSW(1) must leave the RLWE plaintext unchanged up to noise
     let mut one = Poly::zero_moduli(256, params.moduli());
     one.set_coeff(0, 1);
     let rgsw = RgswCiphertext::encrypt(&sk, &one, &gadget, &mut sampler, &ctx);
 
-    let product = external_product(&rlwe, &rgsw, &ctx);
+    let product = external_product(&rlwe, &rgsw, &ctx).expect("trivial RLWE input");
     let recovered = product.decrypt(&sk, delta, params.p, &ctx);
 
     for i in 0..256 {
@@ -271,9 +269,7 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
         msg.set_coeff(i, (i as u64 * 3 + 7) % 100);
     }
 
-    let a_random = Poly::random_moduli(256, params.moduli());
-    let error = Poly::sample_gaussian_moduli(256, params.moduli(), &mut sampler);
-    let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a_random, &error, &ctx);
+    let rlwe = RlweCiphertext::trivial_encrypt(&msg, delta, &params);
 
     // seeded encrypt -> expand, the path `query_seeded` takes
     let mut one = Poly::zero_moduli(256, params.moduli());
@@ -281,7 +277,7 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
     let seeded_rgsw = SeededRgswCiphertext::encrypt(&sk, &one, &gadget, &mut sampler, &ctx);
     let expanded_rgsw = seeded_rgsw.expand();
 
-    let product = external_product(&rlwe, &expanded_rgsw, &ctx);
+    let product = external_product(&rlwe, &expanded_rgsw, &ctx).expect("trivial RLWE input");
     let recovered = product.decrypt(&sk, delta, params.p, &ctx);
 
     for i in 0..256 {

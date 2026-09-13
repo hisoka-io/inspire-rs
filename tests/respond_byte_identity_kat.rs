@@ -47,7 +47,7 @@ fn fixture_path() -> PathBuf {
 }
 
 // order-preservation is d-independent, so a d=256 fixture suffices
-const GOLDEN_FNV1A: u64 = 0x2205_050f_4bc4_b12c;
+const GOLDEN_FNV1A: u64 = 0xa69d_9650_9aae_d59c;
 
 #[test]
 fn respond_byte_identical_par_vs_seq_on_fixed_input() {

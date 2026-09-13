@@ -214,3 +214,17 @@ fn setup_accepts_every_entry_size_whose_derived_width_is_legal() {
         );
     }
 }
+
+#[test]
+fn setup_and_encoder_round_an_odd_entry_width_to_the_same_column_count() {
+    let params = params_at(256);
+    let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
+    let entry_size = 3usize;
+    let database = vec![7u8; params.ring_dim * entry_size];
+
+    let (crs, encoded_db, _) =
+        setup(&params, &database, entry_size, &mut sampler).expect("entry_size 3 is legal");
+
+    assert_eq!(crs.inspiring_num_columns, 2);
+    assert_eq!(encoded_db.shards[0].polynomials.len(), 2);
+}

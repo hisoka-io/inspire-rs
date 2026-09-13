@@ -46,7 +46,11 @@ The CRS is shared once and reused across queries.
 | InspiRING | 2 (seeds only) | 64 bytes |
 | **Reduction** | **5.5x** | **16,000x** |
 
-### Actual ServerCrs Size (This Implementation)
+### Historical ServerCrs Size (pre-shrink)
+
+> **SUPERSEDED 2026-09-12:** the table and note below describe the former CRS layout and are
+> retained as history. `crs_a_vectors` and four other unread fields were removed; the current
+> client-shipped CRS is ~1.1 MiB. Do not use the ~40-50 MB total as a current estimate.
 
 | Component | Size (d=2048) | Purpose |
 |-----------|---------------|---------|
@@ -57,7 +61,9 @@ The CRS is shared once and reused across queries.
 | Metadata + seeds | <1 KB | Parameters, seeds |
 | **Total ServerCrs** | **~40-50 MB** | Full CRS for d=2048 |
 
-**Note**: The current implementation stores `crs_a_vectors` (d random a-vectors, d coefficients each) in the CRS, which dominates storage. The 64-byte figure refers only to the conceptual InspiRING packing-key seeds.
+**Historical note**: The former implementation stored `crs_a_vectors` (d random a-vectors, d
+coefficients each) in the CRS, which dominated storage. The 64-byte figure refers only to the
+conceptual InspiRING packing-key seeds.
 
 ### Packing Approach in HTTP Server
 

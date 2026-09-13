@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   entry below records the original claim and is left as written. `validate()`
   runs no lattice estimate and nothing reads `security_level`, so that field is
   a declared target rather than a verified property. See PRIVACY.md limitation 6.
+- Corrected current-facing parameter documentation to the shipped single-prime
+  `DEFAULT_Q = 2^60 - 2^14 + 1` and `p = 65537`. The 0.1.2 two-CRT entry below is
+  retained as release history, not as the current default.
 
 ## [0.2.0] - 2026-02-13
 

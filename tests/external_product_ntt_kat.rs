@@ -42,7 +42,7 @@ proptest::proptest! {
     })]
 
     /// The pre-NTT'd external product must be byte-identical to the classical
-    /// one for arbitrary RLWE bytes and every scalar arm; the RGSW(0) case
+    /// one for arbitrary trivial-RLWE b bytes and every scalar arm; the RGSW(0) case
     /// runs in every drawn case alongside the drawn scalar.
     #[test]
     fn external_product_ntt_matches_classical_property(
@@ -56,15 +56,19 @@ proptest::proptest! {
         let mut sampler = GaussianSampler::with_seed(p.sigma, seed);
         let sk = RlweSecretKey::generate(&p, &mut sampler);
 
-        let a_poly = sample_db_poly(p.ring_dim, p.moduli(), seed.wrapping_mul(17).wrapping_add(1));
         let b_poly = sample_db_poly(p.ring_dim, p.moduli(), seed.wrapping_mul(17).wrapping_add(2));
-        let rlwe = RlweCiphertext::from_parts(a_poly, b_poly);
+        let rlwe = RlweCiphertext::from_parts(
+            Poly::zero_moduli(p.ring_dim, p.moduli()),
+            b_poly,
+        );
 
         for m in [0u64, scalar] {
             let rgsw = RgswCiphertext::encrypt_scalar(&sk, m, &gadget, &mut sampler, &ctx);
-            let classical = external_product(&rlwe, &rgsw, &ctx);
+            let classical = external_product(&rlwe, &rgsw, &ctx)
+                .expect("trivial RLWE is accepted by classical external product");
             let rgsw_ntt = rgsw_rows_to_ntt(&rgsw, &ctx);
-            let fast = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx);
+            let fast = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx)
+                .expect("trivial RLWE is accepted by NTT external product");
 
             proptest::prop_assert_eq!(
                 classical.a.coeffs(),
@@ -96,19 +100,41 @@ fn external_product_ntt_preserves_correctness_rgsw_scalar() {
 
     let msg_coeffs: Vec<u64> = (0..p.ring_dim).map(|i| (i as u64) % 10).collect();
     let msg = Poly::from_coeffs_moduli(msg_coeffs.clone(), p.moduli());
-    let a = Poly::random_moduli(p.ring_dim, p.moduli());
-    let e = Poly::sample_gaussian_moduli(p.ring_dim, p.moduli(), &mut sampler);
-    let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a, &e, &ctx);
+    let rlwe = RlweCiphertext::trivial_encrypt(&msg, delta, &p);
 
     let scalar = 3u64;
     let rgsw = RgswCiphertext::encrypt_scalar(&sk, scalar, &gadget, &mut sampler, &ctx);
     let rgsw_ntt = rgsw_rows_to_ntt(&rgsw, &ctx);
 
-    let result = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx);
+    let result = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx)
+        .expect("trivial RLWE is accepted");
     let decrypted = result.decrypt(&sk, delta, p.p, &ctx);
 
     for (i, msg_coeff) in msg_coeffs.iter().enumerate().take(p.ring_dim) {
         let expected = (*msg_coeff * scalar) % p.p;
         assert_eq!(decrypted.coeff(i), expected, "Mismatch at coefficient {i}");
+    }
+}
+
+#[test]
+fn one_sided_external_products_refuse_a_nontrivial_rlwe_input() {
+    let p = params();
+    let ctx = p.ntt_context();
+    let mut sampler = GaussianSampler::with_seed(p.sigma, 0x1206);
+    let sk = RlweSecretKey::generate(&p, &mut sampler);
+    let gadget = GadgetVector::new(p.gadget_base, p.gadget_len, p.q);
+    let message = Poly::constant_moduli(1, p.ring_dim, p.moduli());
+    let rgsw = RgswCiphertext::encrypt_scalar(&sk, 1, &gadget, &mut sampler, &ctx);
+    let rgsw_ntt = rgsw_rows_to_ntt(&rgsw, &ctx);
+    let rlwe =
+        RlweCiphertext::from_parts(Poly::constant_moduli(1, p.ring_dim, p.moduli()), message);
+
+    let classical = external_product(&rlwe, &rgsw, &ctx)
+        .expect_err("one-sided classical product must reject nonzero a");
+    let fast = external_product_with_ntt_rgsw(&rlwe, &rgsw_ntt, &gadget, &ctx)
+        .expect_err("one-sided NTT product must reject nonzero a");
+    for message in [classical.to_string(), fast.to_string()] {
+        assert!(message.contains("nonzero a"), "{message}");
+        assert!(message.contains("trivial_encrypt"), "{message}");
     }
 }

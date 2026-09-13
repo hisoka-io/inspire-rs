@@ -76,11 +76,16 @@ The key insight: storing value `y_k` at coefficient `k` of polynomial `h(X)`, th
 
 ## Parameters
 
+> **CORRECTED 2026-09-12:** the earlier default was the two-CRT pair
+> `[268369921, 249561089]` with `p = 2^16`. Current `secure_128_d2048` and
+> `secure_128_d4096` use the single-prime `DEFAULT_Q = 2^60 - 2^14 + 1` and `p = 65537`.
+> Two-CRT construction remains explicit through `for_scenario_with_crt`; it is not the default.
+
 | Parameter | Value | Notes |
 |-----------|-------|-------|
 | Ring dimension d | 2048 | Power of two |
-| Ciphertext modulus q | CRT moduli [268369921, 249561089] (q ≈ 2^56) | NTT-friendly per-modulus |
-| Plaintext modulus p | 2^16 | For 32-byte entries |
+| Ciphertext modulus q | `DEFAULT_Q = 2^60 - 2^14 + 1` (one limb) | NTT-friendly prime |
+| Plaintext modulus p | 65537 | Fermat prime F4; supports 16-bit columns |
 | Error σ | 6.4 | Discrete Gaussian |
 | Key-switching matrices | 2 | K_g, K_h only (InspiRING) |
 
@@ -92,7 +97,13 @@ The key insight: storing value `y_k` at coefficient `k` of polynomial `h(X)`, th
 | InspiRING (2-matrix) | 2 (seeds only) | 64 bytes |
 | **Reduction** | **5.5x** | **16,000x** |
 
-**Note**: The conceptual 64-byte figure refers only to InspiRING packing-key seeds. The actual `ServerCrs` in this implementation is ~40-50 MB (d=2048), dominated by `crs_a_vectors` (d×d coefficients ≈ 33 MB) and offline precomputation. The HTTP server defaults to **InspiRING** when clients send packing keys; tree packing is opt-in via `packing_mode=tree`. Default parameters now use CRT moduli (two residues per coefficient); single-modulus params remain for switched-query experiments.
+**Note**: The conceptual 64-byte figure refers only to InspiRING packing-key seeds. **Corrected
+2026-09-12:** the historical `ServerCrs` was reported as ~40-50 MB at d=2048, dominated by a
+~33 MB `crs_a_vectors` field. That field and four other unread fields have since been removed;
+the current client-shipped CRS is ~1.1 MiB. The HTTP server defaults to **InspiRING** when clients
+send packing keys; tree packing is opt-in via `packing_mode=tree`. The previous parameter note also
+called two CRT residues the default; current secure presets use one `DEFAULT_Q` limb. Explicit
+two-CRT scenarios remain available for testing and parameter studies.
 
 ## Building
 
@@ -176,7 +187,10 @@ InsPIRe offers 3 protocol variants with different bandwidth/computation tradeoff
 
 These costs are **independent of database size**—the same whether querying 1 MB or 73 GB.
 
-**Note**: The table reflects serialized sizes in single-modulus mode (crt_moduli length 1). With CRT enabled (default), ciphertexts store two residues per coefficient and sizes increase roughly proportionally.
+**Note**: The table reflects serialized sizes in single-modulus mode (`crt_moduli` length 1), which
+is also the current secure-preset default. **Corrected 2026-09-12:** the older note said "With CRT
+enabled (default), ciphertexts store two residues per coefficient." That describes the historical
+two-CRT default; explicit two-limb scenarios still increase sizes roughly proportionally.
 
 > **Why constant sizes?** This is a privacy requirement. If sizes varied with target index or database, traffic analysis could reveal what's being queried. See [docs/COMMUNICATION_COSTS.md](docs/COMMUNICATION_COSTS.md#why-pir-sizes-are-constant) for the formulas.
 

@@ -14,11 +14,9 @@
 //!
 //! The framing constants below are DERIVED from the independently built closed
 //! form in `crates/client/tests/query_generation_budget.rs`, not fitted to a
-//! measurement here — a constant fitted to the thing it checks is a mirror
-//! oracle. That closed form's anchor, 98,840 B for a `secure_128_d2048` query
-//! with a session handle, is a measured production value reproduced across a
-//! 16x entries range, a 16x width range, four months and two machines. It does
-//! not move: if the two models disagree, the estimator is wrong.
+//! measurement here - a constant fitted to the thing it checks is a mirror
+//! oracle. Its L2 anchor is 49,445 B for a `secure_128_d2048` query with a
+//! session handle.
 
 #![allow(
     clippy::expect_used,
@@ -41,34 +39,33 @@ const fn poly_framing(crt_limbs: usize) -> usize {
 
 /// `SeededClientQuery` framing: `shard_id` (4), the seeded RGSW container
 /// (`8` row-vector length + `24` trailer + `32` seed and one poly header per
-/// each of its `2*ell` rows), `packing_mode` (4), the inlined
+/// each of its `ell` rows), `packing_mode` (4), the inlined
 /// `ClientPackingKeys` (`Option` tag + `25` header + one poly header per each
 /// of its `ell` rows) and the empty `session_handle` (1).
 const fn seeded_query_framing(crt_limbs: usize, gadget_len: usize) -> usize {
-    4 + (8 + 24 + 2 * gadget_len * (32 + poly_framing(crt_limbs)))
+    4 + (8 + 24 + gadget_len * (32 + poly_framing(crt_limbs)))
         + 4
         + (1 + 25 + gadget_len * poly_framing(crt_limbs))
         + 1
 }
 
-/// `ServerResponse` framing: two poly headers for the packed RLWE, the empty
-/// `column_ciphertexts` length prefix (8), and `Some(PackingMode)` (1 + 4).
+/// Packed response framing: enum tag, full-a header, b-prefix length, retained
+/// count, empty column vector, and `Some(PackingMode)`.
 const fn response_framing(crt_limbs: usize) -> usize {
-    2 * poly_framing(crt_limbs) + 8 + 1 + 4
+    4 + poly_framing(crt_limbs) + 8 + 4 + 8 + 1 + 4
 }
 
-/// One packed RLWE ciphertext, in coefficients only — cost.rs's `rlwe_bytes`.
-const fn rlwe_payload(ring_dim: usize, crt_limbs: usize) -> u64 {
-    (2 * ring_dim * crt_limbs * 8) as u64
+/// Full `a` plus the plaintext-bearing prefix of `b`.
+const fn packed_response_payload(ring_dim: usize, gamma: usize, crt_limbs: usize) -> u64 {
+    ((ring_dim + gamma) * crt_limbs * 8) as u64
 }
 
-/// `query_generation_budget.rs::query_bytes_with_inlined_keys(2048, 1, 3)` —
-/// what the shipped client actually uploads, since `register_client_session`
-/// never sets a session handle. 98,840 B of seeded query + 49,324 B of inlined
-/// packing keys, less the 8-byte handle the inlined form does not carry.
-const SHIPPED_QUERY_WIRE_BYTES: usize = 148_156;
+/// `query_generation_budget.rs::query_bytes_with_inlined_keys(2048, 1, 3)`.
+/// The inlined compatibility form is 49,445 B of seeded handle query plus
+/// 49,324 B of packing keys, less the absent 8-byte handle.
+const INLINED_QUERY_WIRE_BYTES: usize = 98_761;
 /// The same closed form's response prediction at the shipped cell.
-const SHIPPED_RESPONSE_WIRE_BYTES: usize = 32_879;
+const SHIPPED_RESPONSE_WIRE_BYTES: usize = 16_590;
 
 fn small_params() -> InspireParams {
     InspireParams {
@@ -114,7 +111,7 @@ fn measure(params: &InspireParams, entry_size: usize) -> Measured {
     );
     assert!(
         seeded_query.inspiring_packing_keys.is_some(),
-        "the shipped client inlines its packing keys; the model prices them"
+        "the measured compatibility query must inline the packing keys the model prices"
     );
     assert!(
         seeded_query.session_handle.is_none(),
@@ -154,14 +151,18 @@ fn measure(params: &InspireParams, entry_size: usize) -> Measured {
     }
 }
 
-/// The response half of the estimate was already right; pinning it is what
-/// lets the query half be isolated from `communication.bytes` below.
+/// Pinning the R1 response estimate is what lets the query half be isolated
+/// from `communication.bytes` below.
 #[test]
 fn cost_model_response_bytes_match_the_wire() {
     let params = small_params();
     let m = measure(&params, 32);
 
-    let modeled = rlwe_payload(params.ring_dim, params.crt_moduli.len()) as usize;
+    let modeled = packed_response_payload(
+        params.ring_dim,
+        raven_inspire::num_columns(32),
+        params.crt_moduli.len(),
+    ) as usize;
     assert_eq!(
         modeled + response_framing(params.crt_moduli.len()),
         m.response_wire,
@@ -183,7 +184,11 @@ fn cost_model_query_bytes_match_the_wire() {
     // here would read as a wildly wrong byte count instead of an underflow.
     let modeled_query = m
         .estimated_communication
-        .checked_sub(rlwe_payload(params.ring_dim, k))
+        .checked_sub(packed_response_payload(
+            params.ring_dim,
+            raven_inspire::num_columns(32),
+            k,
+        ))
         .expect("communication.bytes must at least cover one packed RLWE response");
     let predicted_wire = modeled_query as usize + seeded_query_framing(k, params.gadget_len);
 
@@ -199,11 +204,11 @@ fn cost_model_query_bytes_match_the_wire() {
     );
 }
 
-/// The same identity at the shipped cell, against the closed form in
+/// The same identity for the inlined form at the shipped parameter cell, against the closed form in
 /// `crates/client/tests/query_generation_budget.rs` rather than a local
 /// measurement. Analytic on both sides: no d=2048 crypto runs here.
 #[test]
-fn cost_model_total_matches_the_shipped_2048_cell() {
+fn cost_model_total_matches_the_inlined_2048_cell() {
     let params = InspireParams::secure_128_d2048();
     let k = params.crt_moduli.len();
     assert_eq!(
@@ -223,21 +228,18 @@ fn cost_model_total_matches_the_shipped_2048_cell() {
 
     assert_eq!(
         predicted,
-        SHIPPED_QUERY_WIRE_BYTES + SHIPPED_RESPONSE_WIRE_BYTES,
-        "cost.rs totals {estimated} payload bytes at the shipped cell, which framed is \
+        INLINED_QUERY_WIRE_BYTES + SHIPPED_RESPONSE_WIRE_BYTES,
+        "cost.rs totals {estimated} payload bytes for the inlined form at the shipped cell, which framed is \
          {predicted} B against the {} B the independently derived client model predicts. \
-         The 98,840 B anchor is measured and does not move; a disagreement is the \
+         The 49,445 B registered-query anchor and 49,324 B packing-key payload are exact; a disagreement is the \
          estimator's.",
-        SHIPPED_QUERY_WIRE_BYTES + SHIPPED_RESPONSE_WIRE_BYTES
+        INLINED_QUERY_WIRE_BYTES + SHIPPED_RESPONSE_WIRE_BYTES
     );
 }
 
-/// The structural half of the same claim: an InspiRING query's size is a
-/// function of `ring_dim`, the CRT limb count and `gadget_len` ALONE. That is
-/// exactly what `query_generation_budget.rs` states and what pricing the
-/// packing keys by `gamma` violated.
+/// Only the retained response prefix scales with record width.
 #[test]
-fn two_packing_communication_does_not_depend_on_entry_width() {
+fn two_packing_communication_tracks_the_retained_response_prefix() {
     let params = InspireParams::secure_128_d2048();
     let at = |entry_size| {
         CostEstimator::new(&params, InspireVariant::TwoPacking, entry_size)
@@ -247,12 +249,14 @@ fn two_packing_communication_does_not_depend_on_entry_width() {
     };
 
     let baseline = at(32);
+    let baseline_gamma = raven_inspire::num_columns(32) as u64;
+    let limbs = params.crt_moduli.len() as u64;
     for entry_size in [2usize, 8, 64, 128, 512] {
+        let gamma = raven_inspire::num_columns(entry_size) as u64;
         assert_eq!(
             at(entry_size),
-            baseline,
-            "TwoPacking communication moved with the record width ({entry_size} B vs 32 B); \
-             only the response of the unpacked variant scales with gamma"
+            baseline - baseline_gamma * limbs * 8 + gamma * limbs * 8,
+            "only the retained b prefix may move with record width {entry_size}"
         );
     }
 }

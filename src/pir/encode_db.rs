@@ -78,6 +78,9 @@ pub fn encode_database(
     params: &InspireParams,
     shard_config: &ShardConfig,
 ) -> Result<Vec<ShardData>, super::error::PirError> {
+    shard_config
+        .validate()
+        .map_err(|cause| super::error::PirError::new(format!("encode_database: {cause}")))?;
     if database.is_empty() || entry_size == 0 {
         return Ok(vec![]);
     }
@@ -108,7 +111,7 @@ pub fn encode_database(
     while entry_offset < total_entries {
         let actual_entries = std::cmp::min(entries_per_shard, total_entries - entry_offset);
 
-        let num_polys = (entry_size * 8).div_ceil(16);
+        let num_polys = crate::num_columns(entry_size);
         let mut polynomials = Vec::with_capacity(num_polys);
 
         for poly_idx in 0..num_polys {
@@ -328,7 +331,7 @@ mod tests {
     fn test_extract_reconstruct_entry() {
         let entry: Vec<u8> = (0..32).collect();
         let entry_size: usize = 32;
-        let num_cols = (entry_size * 8).div_ceil(16);
+        let num_cols = crate::num_columns(entry_size);
 
         let mut column_values = Vec::new();
         for col_idx in 0..num_cols {

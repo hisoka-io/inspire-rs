@@ -11,8 +11,9 @@ use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::{InspireParams, SecurityLevel};
 use raven_inspire::rlwe::RlweSecretKey;
 use raven_inspire::{
-    extract_inspiring, query, query_seeded, respond, respond_seeded_inspiring, setup,
-    EncodedDatabase, PackingMode, ServerCrs, ServerResponse, ServerSessionHandle,
+    extract_inspiring, query, query_seeded, respond, respond_inspiring, respond_one_packing,
+    respond_seeded_inspiring, setup, EncodedDatabase, PackingMode, ServerCrs, ServerResponse,
+    ServerSessionHandle,
 };
 
 fn small_params() -> InspireParams {
@@ -61,30 +62,64 @@ where
 fn server_response_packing_mode_all_variants_bincode_stable() {
     let (crs, encoded_db, sk, mut sampler) = fixture_32b();
     let (_state, client_query) = query(&crs, 42, &encoded_db.config, &sk, &mut sampler).unwrap();
-    let mut base = respond(&crs, &encoded_db, &client_query).unwrap();
+    let responses = [
+        (None, respond(&crs, &encoded_db, &client_query).unwrap()),
+        (
+            Some(PackingMode::Tree),
+            respond_one_packing(&crs, &encoded_db, &client_query).unwrap(),
+        ),
+        (
+            Some(PackingMode::Inspiring),
+            respond_inspiring(&crs, &encoded_db, &client_query).unwrap(),
+        ),
+    ];
 
-    for mode in &[None, Some(PackingMode::Tree), Some(PackingMode::Inspiring)] {
-        base.packing_mode = *mode;
+    for (mode, base) in responses {
         bincode_roundtrip_stable(&base, &format!("ServerResponse.packing_mode = {mode:?}"));
 
         // Stability alone is blind to a lossy-but-idempotent codec (a
         // serializer that zeroed every coefficient re-serializes byte-stably),
         // so the decoded ciphertext content is compared against the in-memory
         // original too.
-        let bytes = bincode::serialize(&base).unwrap_or_else(|e| panic!("serialize: {e:?}"));
-        let recovered: ServerResponse =
-            bincode::deserialize(&bytes).unwrap_or_else(|e| panic!("deserialize: {e:?}"));
+        let bytes = base
+            .to_binary()
+            .unwrap_or_else(|e| panic!("serialize: {e:?}"));
+        let recovered =
+            ServerResponse::from_binary(&bytes).unwrap_or_else(|e| panic!("deserialize: {e:?}"));
         assert_eq!(recovered.packing_mode, base.packing_mode, "mode = {mode:?}");
+        assert_eq!(
+            recovered.packed_coefficients, base.packed_coefficients,
+            "retained coefficient count must survive the wire (mode = {mode:?})"
+        );
         assert_eq!(
             recovered.ciphertext.a.coeffs(),
             base.ciphertext.a.coeffs(),
             "ciphertext.a coefficients must survive the wire (mode = {mode:?})"
         );
-        assert_eq!(
-            recovered.ciphertext.b.coeffs(),
-            base.ciphertext.b.coeffs(),
-            "ciphertext.b coefficients must survive the wire (mode = {mode:?})"
-        );
+        if let Some(retained) = base.packed_coefficients {
+            let retained = retained as usize;
+            let dim = base.ciphertext.ring_dim();
+            for limb in 0..base.ciphertext.b.crt_count() {
+                let start = limb * dim;
+                assert_eq!(
+                    &recovered.ciphertext.b.coeffs()[start..start + retained],
+                    &base.ciphertext.b.coeffs()[start..start + retained],
+                    "ciphertext.b prefix must survive the wire (mode = {mode:?})"
+                );
+                assert!(
+                    recovered.ciphertext.b.coeffs()[start + retained..start + dim]
+                        .iter()
+                        .all(|coefficient| *coefficient == 0),
+                    "ciphertext.b tail must be reconstructed as zero (mode = {mode:?})"
+                );
+            }
+        } else {
+            assert_eq!(
+                recovered.ciphertext.b.coeffs(),
+                base.ciphertext.b.coeffs(),
+                "full ciphertext.b must survive the wire (mode = {mode:?})"
+            );
+        }
         assert_eq!(
             recovered.column_ciphertexts.len(),
             base.column_ciphertexts.len(),

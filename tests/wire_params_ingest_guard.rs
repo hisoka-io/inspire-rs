@@ -8,8 +8,8 @@
 )]
 
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel};
-use raven_inspire::pir::{setup, ClientSession, ServerCrs};
+use raven_inspire::params::{InspireParams, SecurityLevel, ShardConfig};
+use raven_inspire::pir::{encode_database, setup, ClientSession, ServerCrs};
 
 fn params_at(ring_dim: usize) -> InspireParams {
     InspireParams {
@@ -90,5 +90,25 @@ fn setup_rejects_a_zero_entry_size_before_dividing_by_it() {
     assert!(
         err.to_string().contains("entry_size"),
         "error must name entry_size, got: {err}"
+    );
+}
+
+#[test]
+fn a_forged_shard_config_is_refused_before_database_encoding() {
+    let params = params_at(256);
+    let forged = ShardConfig {
+        shard_size_bytes: params.ring_dim as u64,
+        entry_size_bytes: 1,
+        total_entries: u64::MAX,
+    };
+    let wire = bincode::serialize(&forged).expect("serialize forged ShardConfig");
+    let decoded: ShardConfig = bincode::deserialize(&wire).expect("decode forged ShardConfig");
+
+    let error = encode_database(&[], 1, &params, &decoded)
+        .expect_err("a wire-decoded config with overflowing shard ids must be refused");
+
+    assert!(
+        error.to_string().contains("num_shards exceeds u32::MAX"),
+        "the refusal must identify the forged shard count: {error}"
     );
 }

@@ -74,10 +74,14 @@ lib.rs
 
 ## 3. Cryptographic Parameters
 
+> **CORRECTED 2026-09-12:** the earlier comparison called
+> `[268369921, 249561089]` the inspire-rs default. That remains Google's reference shape, while
+> current Raven secure presets use one `DEFAULT_Q = 2^60 - 2^14 + 1` limb and `p = 65537`.
+
 | Parameter | inspire-rs | Google |
 |-----------|------------|--------|
 | Ring dimension (d) | 2048 (configurable) | 2048 (fixed) |
-| Modulus (q) | CRT: [268369921, 249561089] (default); single-modulus optional | CRT: [268369921, 249561089] |
+| Modulus (q) | `DEFAULT_Q = 2^60 - 2^14 + 1` (default); explicit two-CRT optional | CRT: [268369921, 249561089] |
 | Noise (sigma) | 6.4 | 6.4 |
 | Gadget base | 2^20 | ~2^19-2^20 |
 | Gadget digits | 3 | 3 (t_gsw), varies for t_exp_* |
@@ -85,7 +89,7 @@ lib.rs
 
 ### Key Difference: Modulus Strategy
 
-- **inspire-rs**: CRT by default, with an optional single-modulus mode used for switched-query sizing experiments
+- **inspire-rs**: single-prime secure presets by default; explicit two-CRT scenarios remain optional
 - **Google**: CRT with two moduli throughout (via spiral-rs)
 
 ---

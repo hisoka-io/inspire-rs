@@ -1,10 +1,30 @@
-//! External product `RLWE x RGSW -> RLWE` and the gadget decomposition it needs.
+//! External product for a trivial RLWE input and one-sided RGSW ciphertext.
 
 use crate::math::mod_q::DEFAULT_Q;
 use crate::math::{NttContext, Poly};
 use crate::rlwe::RlweCiphertext;
 
 use super::types::{GadgetVector, RgswCiphertext};
+
+/// Rejection from a one-sided RGSW external product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalProductError {
+    /// The left input carries a nonzero `a` component that needs the removed RGSW half.
+    NonTrivialInput,
+}
+
+impl std::fmt::Display for ExternalProductError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonTrivialInput => f.write_str(
+                "one-sided RGSW external product refuses a nonzero a component; construct the \
+                 left input with RlweCiphertext::trivial_encrypt",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExternalProductError {}
 
 /// Splits each coefficient into `ell` base-z digits, each in `[0, z)`.
 pub fn gadget_decompose(poly: &Poly, gadget: &GadgetVector) -> Vec<Poly> {
@@ -136,40 +156,44 @@ pub fn rgsw_rows_to_ntt(rgsw: &RgswCiphertext, ctx: &NttContext) -> RgswRowsNtt 
 
 /// [`external_product`] against pre-transformed rows, byte-identical to it.
 ///
-/// Accumulating in NTT domain defers the inverse transform to one pair at the
-/// end, cutting the per-call transform count from 36 to 10 at ell = 3.
+/// Accumulating in NTT domain transforms each surviving row once and defers the
+/// inverse transform to the final ciphertext pair.
 pub fn external_product_with_ntt_rgsw(
     rlwe: &RlweCiphertext,
     rgsw_ntt: &[(Poly, Poly)],
     gadget: &GadgetVector,
     ctx: &NttContext,
+) -> Result<RlweCiphertext, ExternalProductError> {
+    if !rlwe.a.is_zero() {
+        return Err(ExternalProductError::NonTrivialInput);
+    }
+    Ok(external_product_trivial_with_ntt_rgsw(
+        &rlwe.b, rgsw_ntt, gadget, ctx,
+    ))
+}
+
+pub(crate) fn external_product_trivial_with_ntt_rgsw(
+    b: &Poly,
+    rgsw_ntt: &[(Poly, Poly)],
+    gadget: &GadgetVector,
+    ctx: &NttContext,
 ) -> RlweCiphertext {
-    let d = rlwe.ring_dim();
-    let moduli = rlwe.a.moduli();
+    let d = b.dimension();
+    let moduli = b.moduli();
     let ell = gadget.len;
     assert_eq!(
         rgsw_ntt.len(),
-        2 * ell,
-        "RGSW NTT rows must have 2 * gadget.len entries"
+        ell,
+        "one-sided RGSW NTT rows must have gadget.len entries"
     );
-    assert_eq!(rlwe.b.moduli(), moduli, "RLWE components must share moduli");
     assert_eq!(
         ctx.moduli(),
         moduli,
         "NTT context moduli must match ciphertext moduli"
     );
 
-    let a_decomp = gadget_decompose(&rlwe.a, gadget);
-    let b_decomp = gadget_decompose(&rlwe.b, gadget);
+    let b_decomp = gadget_decompose(b, gadget);
 
-    // Each digit meets both the .a and .b of its row, so transform it once.
-    let a_decomp_ntt: Vec<Poly> = a_decomp
-        .into_iter()
-        .map(|mut p| {
-            p.to_ntt(ctx);
-            p
-        })
-        .collect();
     let b_decomp_ntt: Vec<Poly> = b_decomp
         .into_iter()
         .map(|mut p| {
@@ -184,13 +208,9 @@ pub fn external_product_with_ntt_rgsw(
     result_b.to_ntt(ctx);
 
     for i in 0..ell {
-        let (row_a_a_ntt, row_a_b_ntt) = &rgsw_ntt[i];
-        result_a.mul_acc_ntt_domain(&a_decomp_ntt[i], row_a_a_ntt, ctx);
-        result_b.mul_acc_ntt_domain(&a_decomp_ntt[i], row_a_b_ntt, ctx);
-
-        let (row_b_a_ntt, row_b_b_ntt) = &rgsw_ntt[ell + i];
-        result_a.mul_acc_ntt_domain(&b_decomp_ntt[i], row_b_a_ntt, ctx);
-        result_b.mul_acc_ntt_domain(&b_decomp_ntt[i], row_b_b_ntt, ctx);
+        let (row_a_ntt, row_b_ntt) = &rgsw_ntt[i];
+        result_a.mul_acc_ntt_domain(&b_decomp_ntt[i], row_a_ntt, ctx);
+        result_b.mul_acc_ntt_domain(&b_decomp_ntt[i], row_b_ntt, ctx);
     }
 
     result_a.from_ntt(ctx);
@@ -199,18 +219,27 @@ pub fn external_product_with_ntt_rgsw(
     RlweCiphertext::from_parts(result_a, result_b)
 }
 
-/// `RLWE(m0) x RGSW(m1) -> RLWE(m0*m1)`: gadget-decompose `(a, b)` and sum
-/// `g^-1(a)_i * C[i] + g^-1(b)_i * C[ell+i]`.
+/// `RLWE(0, m0) x RGSW(m1) -> RLWE(m0*m1)`: decompose `b` and sum its rows.
 pub fn external_product(
     rlwe: &RlweCiphertext,
     rgsw: &RgswCiphertext,
     ctx: &NttContext,
+) -> Result<RlweCiphertext, ExternalProductError> {
+    if !rlwe.a.is_zero() {
+        return Err(ExternalProductError::NonTrivialInput);
+    }
+    Ok(external_product_trivial(&rlwe.b, rgsw, ctx))
+}
+
+pub(crate) fn external_product_trivial(
+    b: &Poly,
+    rgsw: &RgswCiphertext,
+    ctx: &NttContext,
 ) -> RlweCiphertext {
-    let d = rlwe.ring_dim();
-    let moduli = rlwe.a.moduli();
+    let d = b.dimension();
+    let moduli = b.moduli();
     let gadget = &rgsw.gadget;
     let ell = gadget.len;
-    assert_eq!(rlwe.b.moduli(), moduli, "RLWE components must share moduli");
     assert_eq!(
         ctx.moduli(),
         moduli,
@@ -218,8 +247,8 @@ pub fn external_product(
     );
     assert_eq!(
         rgsw.rows.len(),
-        2 * ell,
-        "RGSW must have 2 * gadget.len rows"
+        ell,
+        "one-sided RGSW must have gadget.len rows"
     );
     for (idx, row) in rgsw.rows.iter().enumerate() {
         assert_eq!(
@@ -239,24 +268,14 @@ pub fn external_product(
         );
     }
 
-    let a_decomp = gadget_decompose(&rlwe.a, gadget);
-    let b_decomp = gadget_decompose(&rlwe.b, gadget);
+    let b_decomp = gadget_decompose(b, gadget);
 
     let mut result_a = Poly::zero_moduli(d, moduli);
     let mut result_b = Poly::zero_moduli(d, moduli);
 
-    for i in 0..ell {
-        let row_a = &rgsw.rows[i];
-        let term_a_a = a_decomp[i].mul_ntt(&row_a.a, ctx);
-        let term_a_b = a_decomp[i].mul_ntt(&row_a.b, ctx);
-        result_a += term_a_a;
-        result_b += term_a_b;
-
-        let row_b = &rgsw.rows[ell + i];
-        let term_b_a = b_decomp[i].mul_ntt(&row_b.a, ctx);
-        let term_b_b = b_decomp[i].mul_ntt(&row_b.b, ctx);
-        result_a += term_b_a;
-        result_b += term_b_b;
+    for (digit, row) in b_decomp.iter().zip(&rgsw.rows) {
+        result_a += digit.mul_ntt(&row.a, ctx);
+        result_b += digit.mul_ntt(&row.b, ctx);
     }
 
     RlweCiphertext::from_parts(result_a, result_b)
@@ -275,10 +294,6 @@ mod tests {
 
     fn make_ctx(params: &InspireParams) -> NttContext {
         params.ntt_context()
-    }
-
-    fn sample_error_poly(dim: usize, moduli: &[u64], sampler: &mut GaussianSampler) -> Poly {
-        Poly::sample_gaussian_moduli(dim, moduli, sampler)
     }
 
     #[test]
@@ -342,14 +357,12 @@ mod tests {
             .map(|i| (i as u64) % params.p)
             .collect();
         let msg = Poly::from_coeffs_moduli(msg_coeffs, params.moduli());
-        let a = Poly::random_moduli(params.ring_dim, params.moduli());
-        let e = sample_error_poly(params.ring_dim, params.moduli(), &mut sampler);
-        let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a, &e, &ctx);
+        let rlwe = RlweCiphertext::trivial_encrypt(&msg, delta, &params);
 
         let rgsw_zero =
             super::super::RgswCiphertext::encrypt_scalar(&sk, 0, &gadget, &mut sampler, &ctx);
 
-        let result = external_product(&rlwe, &rgsw_zero, &ctx);
+        let result = external_product(&rlwe, &rgsw_zero, &ctx).expect("trivial RLWE input");
         let decrypted = result.decrypt(&sk, delta, params.p, &ctx);
 
         for i in 0..params.ring_dim {
@@ -371,14 +384,12 @@ mod tests {
             .map(|i| (i as u64) % params.p)
             .collect();
         let msg = Poly::from_coeffs_moduli(msg_coeffs.clone(), params.moduli());
-        let a = Poly::random_moduli(params.ring_dim, params.moduli());
-        let e = sample_error_poly(params.ring_dim, params.moduli(), &mut sampler);
-        let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a, &e, &ctx);
+        let rlwe = RlweCiphertext::trivial_encrypt(&msg, delta, &params);
 
         let rgsw_one =
             super::super::RgswCiphertext::encrypt_scalar(&sk, 1, &gadget, &mut sampler, &ctx);
 
-        let result = external_product(&rlwe, &rgsw_one, &ctx);
+        let result = external_product(&rlwe, &rgsw_one, &ctx).expect("trivial RLWE input");
         let decrypted = result.decrypt(&sk, delta, params.p, &ctx);
 
         for (i, expected) in msg_coeffs.iter().enumerate().take(params.ring_dim) {
@@ -398,15 +409,13 @@ mod tests {
 
         let msg_coeffs: Vec<u64> = (0..params.ring_dim).map(|i| (i as u64) % 10).collect();
         let msg = Poly::from_coeffs_moduli(msg_coeffs.clone(), params.moduli());
-        let a = Poly::random_moduli(params.ring_dim, params.moduli());
-        let e = sample_error_poly(params.ring_dim, params.moduli(), &mut sampler);
-        let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a, &e, &ctx);
+        let rlwe = RlweCiphertext::trivial_encrypt(&msg, delta, &params);
 
         let scalar = 3u64;
         let rgsw_scalar =
             super::super::RgswCiphertext::encrypt_scalar(&sk, scalar, &gadget, &mut sampler, &ctx);
 
-        let result = external_product(&rlwe, &rgsw_scalar, &ctx);
+        let result = external_product(&rlwe, &rgsw_scalar, &ctx).expect("trivial RLWE input");
         let decrypted = result.decrypt(&sk, delta, params.p, &ctx);
 
         for (i, msg_coeff) in msg_coeffs.iter().enumerate().take(params.ring_dim) {
@@ -435,9 +444,7 @@ mod tests {
         let mut msg_coeffs = vec![0u64; params.ring_dim];
         msg_coeffs[0] = 5;
         let msg = Poly::from_coeffs_moduli(msg_coeffs, params.moduli());
-        let a = Poly::random_moduli(params.ring_dim, params.moduli());
-        let e = sample_error_poly(params.ring_dim, params.moduli(), &mut sampler);
-        let rlwe = RlweCiphertext::encrypt(&sk, &msg, delta, a, &e, &ctx);
+        let rlwe = RlweCiphertext::trivial_encrypt(&msg, delta, &params);
 
         let mut monomial_coeffs = vec![0u64; params.ring_dim];
         monomial_coeffs[1] = 1;
@@ -445,7 +452,7 @@ mod tests {
         let rgsw_mono =
             super::super::RgswCiphertext::encrypt(&sk, &monomial, &gadget, &mut sampler, &ctx);
 
-        let result = external_product(&rlwe, &rgsw_mono, &ctx);
+        let result = external_product(&rlwe, &rgsw_mono, &ctx).expect("trivial RLWE input");
         let decrypted = result.decrypt(&sk, delta, params.p, &ctx);
 
         assert_eq!(decrypted.coeff(0), 0, "Constant term should be 0");

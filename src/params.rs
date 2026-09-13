@@ -1002,6 +1002,19 @@ pub struct ShardConfig {
     pub total_entries: u64,
 }
 
+/// Whether a shard holds exactly one row per ring coefficient.
+///
+/// ```
+/// use raven_inspire::params::rows_per_shard_match_ring_dim;
+///
+/// assert!(rows_per_shard_match_ring_dim(2048, 2048));
+/// assert!(!rows_per_shard_match_ring_dim(1024, 2048));
+/// ```
+#[must_use]
+pub const fn rows_per_shard_match_ring_dim(entries_per_shard: u64, ring_dim: usize) -> bool {
+    entries_per_shard == ring_dim as u64
+}
+
 fn div_rem_by_public_divisor(dividend: u64, divisor: u64) -> (u64, u64) {
     debug_assert_ne!(divisor, 0);
     let reciprocal = u64::MAX / divisor;
@@ -1263,7 +1276,7 @@ impl ShardConfig {
     /// ```
     pub fn validate_for_params(&self, params: &InspireParams) -> Result<(), &'static str> {
         self.validate()?;
-        if self.entries_per_shard() != params.ring_dim as u64 {
+        if !rows_per_shard_match_ring_dim(self.entries_per_shard(), params.ring_dim) {
             return Err(
                 "ShardConfig: entries_per_shard must equal params.ring_dim; set \
                  shard_size_bytes = ring_dim * entry_size_bytes (see ShardConfig::for_ring_dim)",

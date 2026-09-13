@@ -4,7 +4,7 @@
 
 use crate::math::{NttContext, Poly};
 use crate::params::InspireParams;
-use crate::rgsw::{external_product, GadgetVector, RgswCiphertext};
+use crate::rgsw::{external_product, ExternalProductError, GadgetVector, RgswCiphertext};
 use crate::rlwe::RlweCiphertext;
 
 /// Evaluate plaintext h at an RGSW-encrypted point via Horner and external products.
@@ -13,21 +13,21 @@ pub fn eval_poly_homomorphic(
     poly_coeffs: &Poly,
     encrypted_point: &RgswCiphertext,
     params: &InspireParams,
-) -> RlweCiphertext {
+) -> Result<RlweCiphertext, ExternalProductError> {
     let ctx = params.ntt_context();
 
     let degree = find_degree(poly_coeffs);
 
     if degree == 0 {
         let const_coeff = poly_coeffs.coeff(0);
-        return encrypt_constant(const_coeff, params);
+        return Ok(encrypt_constant(const_coeff, params));
     }
 
     let delta = params.delta();
     let mut acc = encrypt_scaled_constant(poly_coeffs.coeff(degree), delta, params);
 
     for i in (0..degree).rev() {
-        let product = external_product(&acc, encrypted_point, &ctx);
+        let product = external_product(&acc, encrypted_point, &ctx)?;
 
         let h_i = poly_coeffs.coeff(i);
         let h_i_scaled = encrypt_scaled_constant(h_i, delta, params);
@@ -35,7 +35,7 @@ pub fn eval_poly_homomorphic(
         acc = product.add(&h_i_scaled);
     }
 
-    acc
+    Ok(acc)
 }
 
 /// `eval_poly_homomorphic` against a caller-owned NTT context.
@@ -45,19 +45,19 @@ pub fn eval_poly_homomorphic_with_ctx(
     encrypted_point: &RgswCiphertext,
     params: &InspireParams,
     ctx: &NttContext,
-) -> RlweCiphertext {
+) -> Result<RlweCiphertext, ExternalProductError> {
     let degree = find_degree(poly_coeffs);
 
     if degree == 0 {
         let const_coeff = poly_coeffs.coeff(0);
-        return encrypt_constant(const_coeff, params);
+        return Ok(encrypt_constant(const_coeff, params));
     }
 
     let delta = params.delta();
     let mut acc = encrypt_scaled_constant(poly_coeffs.coeff(degree), delta, params);
 
     for i in (0..degree).rev() {
-        let product = external_product(&acc, encrypted_point, ctx);
+        let product = external_product(&acc, encrypted_point, ctx)?;
 
         let h_i = poly_coeffs.coeff(i);
         let h_i_scaled = encrypt_scaled_constant(h_i, delta, params);
@@ -65,7 +65,7 @@ pub fn eval_poly_homomorphic_with_ctx(
         acc = product.add(&h_i_scaled);
     }
 
-    acc
+    Ok(acc)
 }
 
 /// Index of the highest non-zero coefficient.
@@ -280,16 +280,16 @@ pub fn homomorphic_select(
     polynomials: &[Poly],
     index_bits: &[RgswCiphertext],
     params: &InspireParams,
-) -> RlweCiphertext {
+) -> Result<RlweCiphertext, ExternalProductError> {
     let delta = params.delta();
     let ctx = params.ntt_context();
 
     if polynomials.is_empty() {
-        return RlweCiphertext::zero(params);
+        return Ok(RlweCiphertext::zero(params));
     }
 
     if polynomials.len() == 1 {
-        return poly_to_rlwe(&polynomials[0], delta, params);
+        return Ok(poly_to_rlwe(&polynomials[0], delta, params));
     }
 
     let mut current: Vec<RlweCiphertext> = polynomials
@@ -307,7 +307,7 @@ pub fn homomorphic_select(
         for pair in current.chunks(2) {
             if pair.len() == 2 {
                 let diff = pair[1].sub(&pair[0]);
-                let selected = external_product(&diff, bit_ct, &ctx);
+                let selected = external_product(&diff, bit_ct, &ctx)?;
                 let result = pair[0].add(&selected);
                 next.push(result);
             } else {
@@ -318,10 +318,10 @@ pub fn homomorphic_select(
         current = next;
     }
 
-    current
+    Ok(current
         .into_iter()
         .next()
-        .unwrap_or_else(|| RlweCiphertext::zero(params))
+        .unwrap_or_else(|| RlweCiphertext::zero(params)))
 }
 
 /// Trivial (noiseless) RLWE encryption of a plaintext polynomial.
@@ -524,7 +524,8 @@ mod tests {
         let encrypted_point =
             RgswCiphertext::encrypt(&sk, &point_poly, &gadget, &mut sampler, &ctx);
 
-        let result = eval_poly_homomorphic(&poly, &encrypted_point, &params);
+        let result = eval_poly_homomorphic(&poly, &encrypted_point, &params)
+            .expect("constant evaluation needs no external product");
         let decrypted = result.decrypt(&sk, params.delta(), params.p, &ctx);
 
         assert_eq!(decrypted.coeff(0), 100);
@@ -539,7 +540,8 @@ mod tests {
         coeffs[0] = 42;
         let poly = Poly::from_coeffs_moduli(coeffs, params.moduli());
 
-        let result = homomorphic_select(&[poly], &[], &params);
+        let result =
+            homomorphic_select(&[poly], &[], &params).expect("single input needs no select");
 
         assert_eq!(result.ring_dim(), d);
     }
@@ -549,7 +551,7 @@ mod tests {
         let params = test_params();
         let d = params.ring_dim;
 
-        let result = homomorphic_select(&[], &[], &params);
+        let result = homomorphic_select(&[], &[], &params).expect("empty input needs no select");
 
         assert_eq!(result.ring_dim(), d);
         assert!(result.a.is_zero());
