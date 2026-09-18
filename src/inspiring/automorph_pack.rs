@@ -356,7 +356,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -376,7 +377,7 @@ mod tests {
         let d = params.ring_dim;
         let q = params.q;
         let ctx = params.ntt_context();
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
         let log_d = (d as f64).log2() as usize;
 
         let mut keys = Vec::with_capacity(log_d);
@@ -419,7 +420,7 @@ mod tests {
         let error = sample_error_poly(d, q, &mut sampler);
         let ct = RlweCiphertext::encrypt(&sk, &msg_poly, delta, a, &error, &ctx);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
         let ks_1 = generate_automorphism_ks_matrix(&sk, 1, &gadget, &mut sampler, &ctx);
         let ct_auto = homomorphic_automorph(&ct, 1, &ks_1, &ctx);
 

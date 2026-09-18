@@ -12,7 +12,7 @@ use crate::inspiring::{ClientPackingKeys, PackParams};
 use crate::lwe::LweSecretKey;
 use crate::math::{GaussianSampler, NttContext};
 use crate::params::ShardConfig;
-use crate::rgsw::{RgswCiphertext, SeededRgswCiphertext};
+use crate::rgsw::{GadgetVector, RgswCiphertext, SeededRgswCiphertext};
 use crate::rlwe::RlweSecretKey;
 
 use super::encode_db::inverse_monomial;
@@ -179,7 +179,7 @@ impl ClientSession {
         &self.rlwe_sk
     }
 
-    /// Emit a `ClientQuery`: inverse monomial, RGSW encrypt, clone cached keys.
+    /// Emit a `ClientQuery`: scale and encrypt the inverse monomial, then attach cached keys.
     pub fn query(
         &self,
         global_index: u64,
@@ -195,13 +195,10 @@ impl ClientSession {
         let (shard_id, local_index) = shard_config.index_to_shard(global_index);
 
         let inv_mono = inverse_monomial(local_index as usize, d, q, self.crs.params.moduli());
-        let rgsw_ciphertext = RgswCiphertext::encrypt(
-            &self.rlwe_sk,
-            &inv_mono,
-            &self.crs.rgsw_gadget,
-            sampler,
-            &ctx,
-        );
+        let scaled_monomial = inv_mono.scalar_mul(self.crs.params.delta());
+        let one_row = GadgetVector::new(self.crs.params.gadget_base, 1, q);
+        let rgsw_ciphertext =
+            RgswCiphertext::encrypt(&self.rlwe_sk, &scaled_monomial, &one_row, sampler, &ctx);
 
         let state = ClientState {
             secret_key: self.lwe_sk.clone(),
@@ -243,13 +240,10 @@ impl ClientSession {
         let (shard_id, local_index) = shard_config.index_to_shard(global_index);
 
         let inv_mono = inverse_monomial(local_index as usize, d, q, self.crs.params.moduli());
-        let rgsw_ciphertext = SeededRgswCiphertext::encrypt(
-            &self.rlwe_sk,
-            &inv_mono,
-            &self.crs.rgsw_gadget,
-            sampler,
-            &ctx,
-        );
+        let scaled_monomial = inv_mono.scalar_mul(self.crs.params.delta());
+        let one_row = GadgetVector::new(self.crs.params.gadget_base, 1, q);
+        let rgsw_ciphertext =
+            SeededRgswCiphertext::encrypt(&self.rlwe_sk, &scaled_monomial, &one_row, sampler, &ctx);
 
         let state = ClientState {
             secret_key: self.lwe_sk.clone(),
@@ -410,6 +404,53 @@ impl HandleAllocator {
 
 static SESSION_HANDLE_ALLOCATOR: HandleAllocator = HandleAllocator::new(0);
 
+pub(crate) fn require_wire_packing_body_coefficient_domain(keys: &ClientPackingKeys) -> Result<()> {
+    for (body_name, polynomials) in [
+        ("y_body", keys.y_body.as_slice()),
+        ("z_body", keys.z_body.as_slice()),
+    ] {
+        for (index, poly) in polynomials.iter().enumerate() {
+            if poly.is_ntt() {
+                return Err(pir_err!(
+                    "coefficient-domain packing-key {body_name}[{index}] required; client \
+                     material declares NTT domain. Rebuild the keys from the current CRS"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn require_wire_packing_body_shape(
+    keys: &ClientPackingKeys,
+    ring_dim: usize,
+    moduli: &[u64],
+) -> Result<()> {
+    require_wire_packing_body_coefficient_domain(keys)?;
+    for (body_name, polynomials) in [
+        ("y_body", keys.y_body.as_slice()),
+        ("z_body", keys.z_body.as_slice()),
+    ] {
+        for (index, poly) in polynomials.iter().enumerate() {
+            if poly.dimension() != ring_dim {
+                return Err(pir_err!(
+                    "packing-key {body_name}[{index}] dimension {}, expected {ring_dim}; \
+                     rebuild the keys from the current CRS",
+                    poly.dimension()
+                ));
+            }
+            if poly.moduli() != moduli {
+                return Err(pir_err!(
+                    "packing-key {body_name}[{index}] moduli {:?}, expected {moduli:?}; \
+                     rebuild the keys from the current CRS",
+                    poly.moduli()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuse client packing keys whose gamma differs from the server's.
 ///
 /// The automorphism generator is `(2n/gamma)+1`, so keys built at another gamma are
@@ -421,11 +462,12 @@ static SESSION_HANDLE_ALLOCATOR: HandleAllocator = HandleAllocator::new(0);
 /// `register_server_side` here, plus the three inlined-key respond paths.
 ///
 /// # Errors
-/// [`crate::pir::Result`] error naming both widths.
+/// [`crate::pir::Result`] error naming the mismatched key domain, material, or width.
 pub(crate) fn ensure_packing_width_matches(
     keys: &ClientPackingKeys,
     pack_params: &PackParams,
 ) -> Result<()> {
+    require_wire_packing_body_shape(keys, pack_params.ring_dim, &pack_params.moduli)?;
     // The key MATERIAL, not just the declared width. `generate_rotations` sizes the
     // outer vector from the server's gamma, but each rotation is `y_body.len()` long,
     // and `packing_online`'s inner loop skips every digit `k >= y_all[i].len()`. A short
@@ -465,6 +507,7 @@ impl ServerSessionStore {
 
     /// Store `keys` under a freshly allocated, monotonically increasing handle.
     pub fn register(&self, keys: ClientPackingKeys) -> Result<ServerSessionHandle> {
+        require_wire_packing_body_coefficient_domain(&keys)?;
         let mut inner = self
             .inner
             .write()
@@ -548,7 +591,8 @@ mod from_residue_failfast_tests {
             p: 65_536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: SecurityLevel::Bits128,
         };
         let db = vec![0u8; params.ring_dim * 32];

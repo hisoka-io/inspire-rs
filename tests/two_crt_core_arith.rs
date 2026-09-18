@@ -126,7 +126,8 @@ fn two_crt_rlwe_encrypt_decrypt_roundtrip() {
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     params.validate().expect("2-CRT params must validate");
@@ -169,7 +170,8 @@ fn two_crt_trivial_encrypt_decrypt_roundtrip() {
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     let ctx = params.ntt_context();
@@ -206,7 +208,8 @@ fn two_crt_external_product_identity() {
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     let ctx = params.ntt_context();
@@ -214,7 +217,7 @@ fn two_crt_external_product_identity() {
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 
     let sk = RlweSecretKey::generate(&params, &mut sampler);
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+    let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
     let mut msg = Poly::zero_moduli(256, params.moduli());
     for i in 0..256 {
@@ -254,7 +257,8 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     let ctx = params.ntt_context();
@@ -262,7 +266,7 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 
     let sk = RlweSecretKey::generate(&params, &mut sampler);
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+    let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
     let mut msg = Poly::zero_moduli(256, params.moduli());
     for i in 0..256 {
@@ -310,7 +314,8 @@ fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     params.validate().expect("2-CRT params must validate");

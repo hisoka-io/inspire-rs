@@ -136,7 +136,7 @@ mod tests {
         let sk1 = RlweSecretKey::generate(&params, &mut sampler);
         let sk2 = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
         let ks_matrix = generate_ks_matrix(&sk1, &sk2, &gadget, &mut sampler, &ctx);
 
         let msg_coeffs: Vec<u64> = (0..params.ring_dim)
@@ -178,7 +178,7 @@ mod tests {
         let sk1 = RlweSecretKey::generate(&params, &mut sampler);
         let sk2 = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
         let ks_matrix = generate_ks_matrix(&sk1, &sk2, &gadget, &mut sampler, &ctx);
 
         let msg = Poly::zero_moduli(params.ring_dim, params.moduli());
@@ -204,7 +204,7 @@ mod tests {
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
         let ks_matrix = generate_ks_matrix(&sk, &sk, &gadget, &mut sampler, &ctx);
 
         let msg_coeffs: Vec<u64> = (0..params.ring_dim).map(|i| (i as u64) % 100).collect();
@@ -232,7 +232,7 @@ mod tests {
         let sk1 = RlweSecretKey::generate(&params, &mut sampler);
         let sk2 = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
         let ks_matrix = generate_ks_matrix(&sk1, &sk2, &gadget, &mut sampler, &ctx);
 
         let msg_coeffs: Vec<u64> = (0..params.ring_dim).map(|i| (i as u64) % 50).collect();
@@ -263,7 +263,7 @@ mod tests {
         let sk1 = RlweSecretKey::generate(&params, &mut sampler);
         let sk2 = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
         let ks_matrix = generate_ks_matrix(&sk1, &sk2, &gadget, &mut sampler, &ctx);
 
         let msg1_coeffs: Vec<u64> = (0..params.ring_dim).map(|i| (i as u64) % 30).collect();

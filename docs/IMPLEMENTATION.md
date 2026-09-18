@@ -23,9 +23,10 @@ Based on the InsPIRe paper's validated parameters:
 | Gadget base z | 2^20 | For key-switching decomposition |
 | Key-switching matrices | 2 | K_g, K_h (vs logarithmic in prior work) |
 
-**Note**: The experimental modulus-switching query path has been removed. Current
-`secure_128_*` params are single-prime; explicit two-CRT construction remains available through
-`for_scenario_with_crt`.
+**Note**: The old modulus-switching query variant was removed. The default-off
+RIMS v2 response codec remains available at a checked 45-bit target but is not
+wired into an adapter transport. Current `secure_128_*` params are single-prime;
+explicit two-CRT construction remains available through `for_scenario_with_crt`.
 
 ### 2. Database Sharding
 
@@ -238,7 +239,9 @@ Core (no external FHE library needed):
   (malb/lattice-estimator @ 3e48ef4, `primal_bdd`). `validate()` runs no lattice
   check, so `security_level` is a declared target only.
 - CRS model: random CRS components and key-switching matrices are fixed at `setup`; the RLWE secret key is generated once and reused across queries
-- No client-specific server state (supports anonymity)
+- Inline queries require no client-specific server state. The recommended adapter session path
+  stores bounded per-client packing keys and links that client's queries for the configured TTL;
+  see `PRIVACY.md`.
 - Circular security assumption (standard for lattice FHE)
 - Secret keys separated from CRS (`ServerCrs` contains only public parameters and precomputation, no secret key)
 - `#[serde(skip)]` on secret key fields prevents accidental serialization

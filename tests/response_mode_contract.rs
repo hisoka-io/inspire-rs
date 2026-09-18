@@ -36,7 +36,8 @@ fn fixture() -> Fixture {
         p: 65_537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     let entry_size = 64;
@@ -212,7 +213,8 @@ fn every_extractor_rounds_an_odd_entry_width_up_to_two_columns() {
         p: 65_537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     let entry_size = 3usize;
@@ -275,7 +277,7 @@ fn assert_all_responders_refuse_forged_gadget(f: &Fixture, query: &ClientQuery) 
     let got_fields = format!("got len={} base={} q={}", got.len, got.base, got.q);
     let expected_fields = format!(
         "expected len={} base={} q={}",
-        expected.gadget_len, expected.gadget_base, expected.q
+        1, expected.gadget_base, expected.q
     );
     for (operation, outcome) in [
         ("respond", respond(&f.crs, &f.encoded_db, query)),
@@ -318,7 +320,7 @@ fn every_responder_refuses_each_forged_rgsw_gadget_field() {
     wrong_len
         .rgsw_ciphertext
         .rows
-        .truncate(2 * wrong_len.rgsw_ciphertext.gadget.len);
+        .truncate(wrong_len.rgsw_ciphertext.gadget.len);
 
     let mut wrong_base = f.query.clone();
     wrong_base.rgsw_ciphertext.gadget.base += 1;
@@ -367,19 +369,21 @@ fn every_responder_refuses_a_wrong_one_sided_rgsw_row_count() {
         let message = error.to_string();
         assert!(message.contains(operation), "{message}");
         assert!(message.contains("row-count mismatch"), "{message}");
-        assert!(message.contains("got 2"), "{message}");
-        assert!(message.contains("expected 3"), "{message}");
+        assert!(message.contains("got 0"), "{message}");
+        assert!(message.contains("expected 1"), "{message}");
     }
 }
 
 #[test]
-fn every_seeded_responder_refuses_row_count_before_expansion() {
+fn every_seeded_responder_refuses_legacy_three_row_shape_before_expansion() {
     let f = fixture();
     let mut query = f.seeded_query.clone();
+    query.rgsw_ciphertext.gadget = f.crs.rgsw_gadget.clone();
+    let row = query.rgsw_ciphertext.rows.first().expect("one row").clone();
     query
         .rgsw_ciphertext
         .rows
-        .truncate(query.rgsw_ciphertext.gadget.len - 1);
+        .resize(query.rgsw_ciphertext.gadget.len, row);
 
     for (operation, outcome) in [
         (
@@ -413,12 +417,12 @@ fn every_seeded_responder_refuses_row_count_before_expansion() {
             respond_seeded_with_variant(&f.crs, &f.encoded_db, &query, InspireVariant::TwoPacking),
         ),
     ] {
-        let error = outcome.expect_err("seeded row mismatch must fail before expansion");
+        let error = outcome.expect_err("legacy seeded query must fail before expansion");
         let message = error.to_string();
         assert!(message.contains(operation), "{message}");
-        assert!(message.contains("row-count mismatch"), "{message}");
-        assert!(message.contains("got 2"), "{message}");
-        assert!(message.contains("expected 3"), "{message}");
+        assert!(message.contains("RGSW gadget mismatch"), "{message}");
+        assert!(message.contains("got len=3"), "{message}");
+        assert!(message.contains("expected len=1"), "{message}");
     }
 }
 

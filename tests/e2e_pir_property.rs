@@ -38,7 +38,8 @@ fn params_for(crt_moduli: Vec<u64>) -> InspireParams {
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     }
 }

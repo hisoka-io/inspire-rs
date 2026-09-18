@@ -19,7 +19,7 @@ pub fn collapse_one(
     let d = params.ring_dim;
     let q = params.q;
     let ctx = params.ntt_context();
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+    let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
 
     if k == 1 {
         let (result_a, new_b) = key_switch_component(&a[0], b, ks_matrix, &ctx, &gadget);
@@ -94,7 +94,7 @@ fn key_switch_component(
 /// coefficient.
 #[allow(dead_code)]
 pub fn gadget_decompose(poly: &Poly, params: &InspireParams) -> Vec<Poly> {
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+    let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
     rgsw_gadget_decompose(poly, &gadget)
 }
 
@@ -120,7 +120,7 @@ mod tests {
         let poly = random_poly(&mut rng, params.ring_dim, params.q, params.moduli());
 
         let decomposed = gadget_decompose(&poly, &params);
-        assert_eq!(decomposed.len(), params.gadget_len);
+        assert_eq!(decomposed.len(), params.packing_gadget_len);
 
         for digit_poly in &decomposed {
             assert_eq!(digit_poly.dimension(), params.ring_dim);
@@ -140,7 +140,7 @@ mod tests {
         let b = random_poly(&mut rng, params.ring_dim, params.q, moduli);
 
         let ks_matrix =
-            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
 
         let (new_a, _new_b) = collapse_one(&a, &b, &ks_matrix, &params);
 

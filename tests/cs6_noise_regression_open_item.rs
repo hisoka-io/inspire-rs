@@ -1,5 +1,5 @@
-//! No test here: empirical packing-noise regression is not implemented, and
-//! nothing in this file may be read as coverage.
+//! No bound assertion here: W5-01 measured served-slot output-error distributions
+//! at gamma 16 and 256, but nothing in this file may be read as a symbolic bound.
 //!
 //! An assertion needs a bound, and the in-crate packing-noise bound has an
 //! unresolved `(q_tilde / q)^2` factor against eprint 2025/1352 Theorem 7.
@@ -10,8 +10,7 @@
 //!
 //! 1. Resolve the `(q_tilde / q)^2` factor against Theorem 7, so a bound exists
 //!    to assert against.
-//! 2. Measure `||e_pack||_inf` at production params and at every legal cell
-//!    shape, not only the one a fixture happens to use.
+//! 2. Extend the gamma 16/256 production measurements to every legal cell shape.
 //! 3. Write a test demonstrated to fail against an injected noise regression.
 //!    One that passes before and after the injection closes nothing.
 //!

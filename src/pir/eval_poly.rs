@@ -352,7 +352,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -514,7 +515,7 @@ mod tests {
         let ctx = params.ntt_context();
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, q);
 
         let mut coeffs = vec![0u64; d];
         coeffs[0] = 100;

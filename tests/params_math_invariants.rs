@@ -26,7 +26,8 @@ fn params_at(ring_dim: usize) -> InspireParams {
         p: 65536,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     }
 }
@@ -169,20 +170,30 @@ fn validate_rejects_a_gadget_narrower_than_q() {
         p: 65537,
         sigma: 6.4,
         gadget_base: 1 << 19,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     };
     assert!(
         (1u128 << 19).pow(3) < q as u128,
         "fixture must actually be narrower than q"
     );
-    assert!(narrow.validate().is_err());
-
     let covering = InspireParams {
-        gadget_len: 4,
-        ..narrow
+        query_gadget_len: 4,
+        packing_gadget_len: 4,
+        ..narrow.clone()
     };
     assert!(covering.validate().is_ok());
+    let query_narrow = InspireParams {
+        query_gadget_len: 3,
+        ..covering.clone()
+    };
+    assert!(query_narrow.validate().is_err());
+    let packing_narrow = InspireParams {
+        packing_gadget_len: 3,
+        ..covering
+    };
+    assert!(packing_narrow.validate().is_err());
 }
 
 #[test]
@@ -197,8 +208,9 @@ fn for_scenario_with_crt_widens_the_gadget_to_cover_the_override() {
     .expect("override must derive");
 
     assert_eq!(params.gadget_base, 1u64 << 19);
-    assert_eq!(params.gadget_len, 4);
-    assert!((params.gadget_base as u128).pow(params.gadget_len as u32) >= params.q as u128);
+    assert_eq!(params.query_gadget_len, 4);
+    assert_eq!(params.packing_gadget_len, 4);
+    assert!((params.gadget_base as u128).pow(params.packing_gadget_len as u32) >= params.q as u128);
 }
 
 /// Causality for the gadget invariant: the recommended override decodes every

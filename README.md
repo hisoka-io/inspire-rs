@@ -68,8 +68,8 @@ cargo run --release --bin inspire-client -- \
 ## Protocol
 
 1. **Setup(D)**: Server encodes database as polynomials, generates CRS
-2. **Query(idx)**: Client encrypts target index as RGSW ciphertext
-3. **Respond(D', qry)**: Server performs homomorphic rotation
+2. **Query(idx)**: Client encrypts `delta * X^(-idx)` as one seeded RLWE row
+3. **Respond(D', qry)**: Server multiplies each plaintext column by the encrypted monomial
 4. **Extract(st, resp)**: Client decrypts RLWE response
 
 The key insight: storing value `y_k` at coefficient `k` of polynomial `h(X)`, then multiplying by `X^{-k}` (the inverse monomial) rotates `y_k` to coefficient 0.
@@ -175,17 +175,19 @@ cargo run --release --bin inspire-setup -- \
 
 ## Communication Costs
 
-InsPIRe offers 3 protocol variants with different bandwidth/computation tradeoffs:
+Current exact TwoPacking binary sizes at d=2048 and a 512-byte record are:
 
-| Variant | Query | Response | Total | Reduction |
-|---------|-------|----------|-------|-----------|
-| **InsPIRe^0** (NoPacking) | 192 KB | 545 KB | **737 KB** | baseline |
-| **InsPIRe^1** (OnePacking) | 192 KB | 32 KB | **224 KB** | 3.3x |
-| **InsPIRe^2** (Seeded+Packed) | 96 KB | 32 KB | **128 KB** | 5.7x |
+| Phase | Bytes | Notes |
+|-------|------:|-------|
+| First query | 61,735 | Includes inline packing keys |
+| Registered query | 15,491 | Carries a session handle |
+| Current tight response | 17,358 | Enabled adapter path |
+| Architecture served response | 17,518 | Includes the separately reserved 160-byte addendum |
+| RIMS v2 codec target | 13,847 | Default-off and not wired into the adapter |
 
-**Production recommendation**: use **InsPIRe^2 (TwoPacking)** — seeded query + packed response.
+**Production recommendation**: use **InsPIRe^2 (TwoPacking)** with the enabled tight response.
 
-These costs are **independent of database size**—the same whether querying 1 MB or 73 GB.
+These costs are independent of database size at a fixed record shape.
 
 **Note**: The table reflects serialized sizes in single-modulus mode (`crt_moduli` length 1), which
 is also the current secure-preset default. **Corrected 2026-09-12:** the older note said "With CRT
@@ -206,7 +208,7 @@ let response = respond(&crs, &db, &query)?;
 // InsPIRe^1: Packed response (17x response reduction)
 let response = respond_one_packing(&crs, &db, &query)?;
 
-// InsPIRe^2: Seeded query + packed response (5.7x total reduction)
+// InsPIRe^2: Seeded one-row query + packed response
 let (state, seeded_query) = query_seeded(&crs, index, &config, &sk, &mut sampler)?;
 let response = respond_seeded_packed(&crs, &db, &seeded_query)?;
 

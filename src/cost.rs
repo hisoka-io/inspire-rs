@@ -5,9 +5,9 @@
 //!
 //! # Variant mapping
 //!
-//! - **NoPacking** (InsPIRe^0): Full query, one RLWE per column, no packing
-//! - **OnePacking** (InsPIRe^1): Full query, tree packing (log(d) automorphisms)
-//! - **TwoPacking** (InsPIRe^2): Seeded query, InspiRING 2-matrix packing
+//! - **NoPacking** (InsPIRe^0): One-row query, one RLWE per column, no packing
+//! - **OnePacking** (InsPIRe^1): One-row query, tree packing (log(d) automorphisms)
+//! - **TwoPacking** (InsPIRe^2): Seeded one-row query, InspiRING 2-matrix packing
 //!
 //! # Example
 //!
@@ -85,8 +85,8 @@ pub struct CostBreakdown {
     pub num_columns: usize,
     /// Ring dimension d.
     pub ring_dim: usize,
-    /// Gadget length l.
-    pub gadget_len: usize,
+    /// Query RGSW gadget length l.
+    pub query_gadget_len: usize,
 
     /// Setup phase costs (key generation, database encoding).
     pub setup: OpCounts,
@@ -125,7 +125,7 @@ impl fmt::Display for CostBreakdown {
         writeln!(
             f,
             "Cost Breakdown: {:?} (d={}, entry={}B, {} columns, l={})",
-            self.variant, self.ring_dim, self.entry_size, self.num_columns, self.gadget_len
+            self.variant, self.ring_dim, self.entry_size, self.num_columns, self.query_gadget_len
         )?;
         writeln!(f, "{:-<72}", "")?;
 
@@ -196,8 +196,8 @@ impl fmt::Display for CostBreakdown {
 /// Computes operation counts per phase without running any cryptographic operations.
 ///
 /// Models the canonical paper variants:
-/// - NoPacking (^0): Full query, per-column response
-/// - OnePacking (^1): Full query, tree-packed response (log(d) key-switches)
+/// - NoPacking (^0): One-row query, per-column response
+/// - OnePacking (^1): One-row query, tree-packed response (log(d) key-switches)
 /// - TwoPacking (^2): Seeded query, InspiRING-packed response (2 KS matrices)
 pub struct CostEstimator {
     params: InspireParams,
@@ -226,7 +226,7 @@ impl CostEstimator {
             entry_size: self.entry_size,
             num_columns: self.num_columns,
             ring_dim: self.params.ring_dim,
-            gadget_len: self.params.gadget_len,
+            query_gadget_len: self.params.query_gadget_len,
             setup: self.estimate_setup(),
             query: self.estimate_query(),
             respond: self.estimate_respond(),
@@ -248,16 +248,34 @@ impl CostEstimator {
             .saturating_mul(8)
     }
 
-    /// Size of one one-sided RGSW ciphertext in bytes: l RLWE ciphertexts.
-    fn rgsw_bytes(&self) -> u64 {
-        self.params.gadget_len as u64 * self.rlwe_bytes()
+    fn wire_coefficient_bits(&self) -> u64 {
+        self.params
+            .moduli()
+            .iter()
+            .copied()
+            .max()
+            .map_or(0, |modulus| {
+                u64::from(u64::BITS - modulus.saturating_sub(1).leading_zeros())
+            })
+    }
+
+    fn wire_coefficient_bytes(&self, count: u64) -> u64 {
+        count
+            .saturating_mul(self.wire_coefficient_bits())
+            .div_ceil(8)
+    }
+
+    fn wire_poly_bytes(&self) -> u64 {
+        self.wire_coefficient_bytes(
+            (self.params.ring_dim as u64).saturating_mul(self.crt_moduli_count()),
+        )
     }
 
     // ---- Setup phase ----
 
     fn estimate_setup(&self) -> OpCounts {
         let d = self.params.ring_dim as u64;
-        let ell = self.params.gadget_len as u64;
+        let ell = self.params.packing_gadget_len as u64;
         let log_d = if d == 0 { 0 } else { d.ilog2() as u64 };
 
         // Base key-switching matrices: each is l RLWE encryptions
@@ -299,9 +317,9 @@ impl CostEstimator {
     // ---- Query phase ----
 
     fn estimate_query(&self) -> OpCounts {
-        let ell = self.params.gadget_len as u64;
+        let ell = 1u64;
 
-        // One-sided RGSW ciphertext of X^(-k): l RLWE encryptions.
+        // One RLWE encryption of delta*X^(-k).
         let num_encryptions = ell;
         let ntt_transforms = num_encryptions * 2;
         let poly_multiplications = num_encryptions;
@@ -337,24 +355,9 @@ impl CostEstimator {
     // ---- Respond phase ----
 
     fn estimate_respond(&self) -> OpCounts {
-        let ell = self.params.gadget_len as u64;
         let gamma = self.num_columns as u64;
-
-        // Per external product (RLWE x RGSW -> RLWE):
-        //   1 gadget decomposition (the trivial input's b component)
-        //   2l poly_muls (l digits x 2 row components)
-        //   2l poly_adds (accumulate results)
-        //   ~3 NTTs per poly_mul (fwd x2, inv)
-        let gadget_decomp_per_ext = 1u64;
-        let poly_mul_per_ext = 2 * ell;
-        let ntt_per_ext = poly_mul_per_ext * 3;
-        let poly_add_per_ext = 2 * ell;
-
-        let respond_external_products = gamma;
-        let respond_gadget_decompositions = gamma * gadget_decomp_per_ext;
-        let respond_poly_muls = gamma * poly_mul_per_ext;
-        let respond_ntts = gamma * ntt_per_ext;
-        let respond_poly_adds = gamma * poly_add_per_ext;
+        let respond_poly_muls = gamma * 2;
+        let respond_ntts = respond_poly_muls * 3;
 
         // NoPacking: combine all columns into one ciphertext
         // Each RLWE addition touches both a and b components: 2 poly_adds per RLWE add
@@ -366,9 +369,9 @@ impl CostEstimator {
         OpCounts {
             ntt_transforms: respond_ntts,
             poly_multiplications: respond_poly_muls,
-            gadget_decompositions: respond_gadget_decompositions,
-            external_products: respond_external_products,
-            poly_additions: respond_poly_adds + combine_adds,
+            gadget_decompositions: 0,
+            external_products: 0,
+            poly_additions: combine_adds,
             ..Default::default()
         }
     }
@@ -377,7 +380,7 @@ impl CostEstimator {
 
     fn estimate_packing(&self) -> OpCounts {
         let d = self.params.ring_dim as u64;
-        let ell = self.params.gadget_len as u64;
+        let ell = self.params.packing_gadget_len as u64;
         let gamma = self.num_columns as u64;
 
         match self.variant {
@@ -508,8 +511,8 @@ impl CostEstimator {
     fn estimate_communication(&self) -> OpCounts {
         let gamma = self.num_columns as u64;
 
-        let query_bytes_full = self.rgsw_bytes();
-        let query_bytes_seeded = query_bytes_full / 2;
+        let query_bytes_full = self.wire_poly_bytes().saturating_mul(2);
+        let query_bytes_seeded = self.wire_poly_bytes();
 
         // InspiRING packing keys: only `y_body` crosses the wire, and it holds
         // one polynomial per gadget digit - `ClientPackingKeys::generate` builds
@@ -521,18 +524,20 @@ impl CostEstimator {
         // Only sent for TwoPacking (InspiRING mode).
         let packing_key_bytes = match self.variant {
             InspireVariant::NoPacking | InspireVariant::OnePacking => 0,
-            InspireVariant::TwoPacking => (self.params.gadget_len as u64)
+            InspireVariant::TwoPacking => (self.params.packing_gadget_len as u64)
                 .saturating_mul(self.params.ring_dim as u64)
-                .saturating_mul(self.crt_moduli_count())
-                .saturating_mul(8),
+                .checked_mul(self.crt_moduli_count())
+                .map_or(u64::MAX, |coefficients| {
+                    self.wire_coefficient_bytes(coefficients)
+                }),
         };
 
         let response_bytes = match self.variant {
-            InspireVariant::NoPacking => (1 + gamma) * self.rlwe_bytes(),
+            InspireVariant::NoPacking => (1 + gamma) * 2 * self.wire_poly_bytes(),
             InspireVariant::OnePacking | InspireVariant::TwoPacking => {
-                (self.params.ring_dim as u64 + gamma)
-                    .saturating_mul(self.crt_moduli_count())
-                    .saturating_mul(8)
+                self.wire_poly_bytes().saturating_add(
+                    self.wire_coefficient_bytes(gamma.saturating_mul(self.crt_moduli_count())),
+                )
             }
         };
 
@@ -552,6 +557,10 @@ impl CostEstimator {
 mod tests {
     use super::*;
 
+    const fn tight_bytes(coefficients: u64) -> u64 {
+        coefficients.saturating_mul(60).div_ceil(8)
+    }
+
     #[test]
     fn test_cost_estimator_no_packing() {
         let params = InspireParams::secure_128_d2048();
@@ -560,19 +569,20 @@ mod tests {
 
         assert_eq!(breakdown.num_columns, 16);
         assert_eq!(breakdown.ring_dim, 2048);
-        assert_eq!(breakdown.gadget_len, 3);
+        assert_eq!(breakdown.query_gadget_len, 3);
 
-        // 16 external products (one per column)
-        assert_eq!(breakdown.respond.external_products, 16);
+        assert_eq!(breakdown.respond.external_products, 0);
+        assert_eq!(breakdown.respond.poly_multiplications, 32);
         // No packing
         assert_eq!(breakdown.packing.key_switches, 0);
 
-        // Communication: full RGSW query + (1 + 16) RLWE response
+        // Communication: one RLWE query + (1 + 16) RLWE response
         let crt_limbs = params.crt_moduli.len().max(1) as u64;
-        let rlwe_size = 2u64 * 2048 * crt_limbs * 8;
-        let rgsw_size = 3 * rlwe_size;
+        let poly_size = tight_bytes(2048 * crt_limbs);
+        let rlwe_size = 2 * poly_size;
+        let query_size = rlwe_size;
         let response_size = 17 * rlwe_size;
-        assert_eq!(breakdown.communication.bytes, rgsw_size + response_size);
+        assert_eq!(breakdown.communication.bytes, query_size + response_size);
     }
 
     #[test]
@@ -591,12 +601,13 @@ mod tests {
         // Per node: 6 + 2*l = 12 poly_adds, so 2047*12 + 2048 finalize = 26612
         assert_eq!(breakdown.packing.poly_additions, 2047 * 12 + 2048);
 
-        // Communication: full RGSW + full a and the plaintext-bearing b prefix.
+        // Communication: one RLWE query + full a and the plaintext-bearing b prefix.
         let crt_limbs = params.crt_moduli.len().max(1) as u64;
-        let rlwe_size = 2u64 * 2048 * crt_limbs * 8;
-        let rgsw_size = 3 * rlwe_size;
-        let packed_response = (2048u64 + 16) * crt_limbs * 8;
-        assert_eq!(breakdown.communication.bytes, rgsw_size + packed_response);
+        let poly_size = tight_bytes(2048 * crt_limbs);
+        let rlwe_size = 2 * poly_size;
+        let query_size = rlwe_size;
+        let packed_response = poly_size + tight_bytes(16 * crt_limbs);
+        assert_eq!(breakdown.communication.bytes, query_size + packed_response);
     }
 
     #[test]
@@ -619,19 +630,19 @@ mod tests {
         // Online: (γ-1)*l+1 = 46 poly_adds
         assert_eq!(breakdown.packing.poly_additions, 301 + 46);
 
-        // Communication: seeded RGSW + y_body packing keys + packed response prefix.
+        // Communication: seeded fold row + y_body packing keys + packed response prefix.
         // y_body is gadget_len polynomials, NOT gamma - this line read `16u64`
         // (gamma at a 32-byte record) and so restated the estimator's own
         // over-count instead of checking it. The wire is the oracle now:
         // tests/cost_model_matches_the_wire.rs.
         let crt_limbs = params.crt_moduli.len().max(1) as u64;
-        let rlwe_size = 2u64 * 2048 * crt_limbs * 8;
-        let rgsw_seeded = 3 * rlwe_size / 2;
-        let packing_keys = params.gadget_len as u64 * 2048 * crt_limbs * 8;
-        let packed_response = (2048u64 + 16) * crt_limbs * 8;
+        let poly_size = tight_bytes(2048 * crt_limbs);
+        let query_seeded = poly_size;
+        let packing_keys = params.packing_gadget_len as u64 * poly_size;
+        let packed_response = poly_size + tight_bytes(16 * crt_limbs);
         assert_eq!(
             breakdown.communication.bytes,
-            rgsw_seeded + packing_keys + packed_response
+            query_seeded + packing_keys + packed_response
         );
     }
 
@@ -720,16 +731,10 @@ mod tests {
             "NoPacking ({no_pack}) should exceed TwoPacking ({two_pack})"
         );
 
-        // TwoPacking is the smallest: its seeded query halves the RGSW and the
-        // packing keys it adds back are gadget_len polynomials, not gamma of
-        // them. The reverse ordering this test asserted until 2026-09-07 was an
-        // artifact of that over-count, and it held at every entry width for the
-        // same reason - so the corrected ordering is checked at both ends of the
-        // width range rather than at one point.
         assert_eq!(
-            two_pack, one_pack,
-            "after L2, TwoPacking's seeded rows plus y_body carry the same coefficient payload \
-             as OnePacking's one-sided unseeded rows"
+            two_pack - one_pack,
+            2 * tight_bytes(params.ring_dim as u64),
+            "the seeded row saves one polynomial while y_body adds three"
         );
         for entry_size in [2usize, 512] {
             let wide = CostEstimator::new(&params, InspireVariant::TwoPacking, entry_size)
@@ -739,9 +744,9 @@ mod tests {
                 .estimate()
                 .total_communication_bytes();
             assert_eq!(
-                wide, wide_one,
-                "OnePacking and TwoPacking must price the same retained response prefix \
-                 at {entry_size} B"
+                wide - wide_one,
+                2 * tight_bytes(params.ring_dim as u64),
+                "query and packing-key delta must not vary with entry width {entry_size} B"
             );
         }
     }
@@ -753,7 +758,8 @@ mod tests {
         let breakdown = estimator.estimate();
 
         assert_eq!(breakdown.ring_dim, 4096);
-        assert_eq!(breakdown.respond.external_products, 16);
+        assert_eq!(breakdown.respond.external_products, 0);
+        assert_eq!(breakdown.respond.poly_multiplications, 32);
     }
 
     #[test]

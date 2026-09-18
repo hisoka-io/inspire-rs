@@ -21,8 +21,8 @@ HTTP endpoints.
 
 The server cannot determine which *index within a shard* the client is querying,
 assuming the hardness of ring-LWE with the chosen parameters (121.5 bits at the
-shipped modulus, see Known Limitation 6). The query is an RGSW encryption of an
-inverse monomial; without the secret key, the server gains no information about
+shipped modulus, see Known Limitation 6). The query is an RLWE encryption of a
+scaled inverse monomial; without the secret key, the server gains no information about
 the local index.
 
 This guarantee stops at the shard boundary. `shard_id` travels in cleartext and
@@ -33,17 +33,28 @@ entries at the shipped preset. See Known Limitation 1.
 
 Query and response sizes are constant regardless of the queried index:
 
-- **Query size**: ~230 KB (seeded) / ~458 KB (full JSON)
-- **Response size**: ~32 KB (InspiRING packed) / ~544 KB (no packing)
+- **Registered query**: 15,491 bytes at d=2048
+- **Current tight response**: 17,358 bytes at a 512-byte record width
+- **Architecture served response**: 17,518 bytes after the separately reserved 160-byte addendum
+- **RIMS v2 target**: 13,847 bytes, default-off and not wired into the adapter
 
 This prevents traffic-analysis attacks that could otherwise infer the queried
 index from message sizes.
 
-### No Client-Specific Server State
+### Bounded Client-Specific Server State
 
-The server does not store per-client state. The CRS and encoded database are
-generic and shared across all clients. This supports client anonymity at the
-network layer (e.g., when combined with Tor or a VPN).
+The server stores bounded, expiring per-client packing-key sessions. Reusing a
+session handle links that client's queries within the TTL window; the CRS and
+encoded database remain generic and shared. Transport anonymity requires a
+separate network layer such as Tor or a VPN.
+
+### Packed Response a-Side Analysis
+
+At d=256 and gamma=4, a bounded experiment reproduced the packed response's `a`
+polynomial but failed to recover either a dense column or three independently
+generated one-sparse targets. Failed bounded attacks are not privacy evidence.
+The experiment covers few deterministic keys and queries and does not establish
+a production d=2048 security bound.
 
 ## Known Limitations
 
@@ -179,12 +190,15 @@ are in direct tension and the tradeoff is unresolved.
   server hardware are not addressed.
 - **Client compromise**: If the client machine is compromised, the attacker has
   access to the secret key and all query/response data.
+- **Structured-database inference by a client**: Bounded sparse and dense recovery
+  attempts failed. Failure is not a security bound; stronger and production-scale
+  recovery remain uncharacterized.
 
 ## Data Handling Summary
 
 | Data | Where | Encrypted | Notes |
 |------|-------|-----------|-------|
-| Local index within shard | Client → Server | Yes (RGSW) | Computationally hidden |
+| Local index within shard | Client → Server | Yes (RLWE) | Computationally hidden |
 | Shard ID | Client → Server | No | Anonymity set is one shard, capped at `ring_dim` (2048 at the shipped preset) |
 | Response entry | Server → Client | Yes (RLWE) | Decrypted client-side |
 | Processing time | Server → Client | No | Potential timing side-channel |

@@ -56,11 +56,11 @@ fn a_dim_larger_than_its_coefficients_is_refused() {
         .expect_err("a dim of 2^44 against 4 coefficients must be refused");
     let msg = format!("{err}");
     assert!(
-        msg.contains("Poly decode refused"),
+        msg.contains("tight coefficient"),
         "the refusal must name itself; got: {msg}"
     );
     assert!(
-        msg.contains("coefficients"),
+        msg.contains("payload") && msg.contains("expected"),
         "the refusal must name the length disagreement; got: {msg}"
     );
 }
@@ -86,7 +86,7 @@ fn an_empty_modulus_vector_is_refused_unless_the_whole_value_is_default() {
         .expect_err("a Poly whose modulus vector was emptied on the wire must not decode");
     let msg = format!("{err}");
     assert!(
-        msg.contains("Poly decode refused"),
+        msg.contains("tight coefficient"),
         "the refusal must come from the validating decode, not an incidental \
          parse error; got: {msg}"
     );
@@ -121,7 +121,7 @@ fn a_zero_modulus_is_refused() {
         .expect_err("a zero modulus must be refused, not divided by");
     let msg = format!("{err}");
     assert!(
-        msg.contains("Poly decode refused"),
+        msg.contains("tight coefficient"),
         "the refusal must name itself; got: {msg}"
     );
     assert!(

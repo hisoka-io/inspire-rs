@@ -199,7 +199,7 @@ fn lwe_to_rlwe_keyswitch(
     b_coeffs[0] = lwe.b;
     let b_poly = Poly::from_coeffs_moduli(b_coeffs, moduli);
 
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+    let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
     let a_decomp = gadget_decompose(&a_poly, &gadget);
 
     let mut result_a = Poly::zero_moduli(d, moduli);
@@ -234,7 +234,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -361,7 +362,7 @@ mod tests {
         let rlwe_sk = RlweSecretKey::generate(&params, &mut sampler);
         let lwe_sk = LweSecretKey::from_rlwe(&rlwe_sk);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
         let packing_ks = generate_packing_ks_matrix(&lwe_sk, &rlwe_sk, &gadget, &mut sampler, &ctx);
 
         let message = 12345u64;

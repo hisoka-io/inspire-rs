@@ -36,7 +36,7 @@ fn drive_one_cell(label: &str, entries: usize, entry_bytes: usize, params: Inspi
     eprintln!(
         "    ring_dim={}, gadget=(base=2^20, len={}), feature={}",
         params.ring_dim,
-        params.gadget_len,
+        params.packing_gadget_len,
         if cfg!(feature = "simd-packing-offline") {
             "simd-packing-offline"
         } else {

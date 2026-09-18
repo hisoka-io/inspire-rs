@@ -8,31 +8,23 @@ This document analyzes the communication costs of InsPIRe PIR for Ethereum state
 
 ## Measured Communication (d=2048)
 
-Benchmarked with the `secure_128_d2048` preset (measures 121.5 bits):
+Current exact binary sizes at the 512-byte production record width:
 
-| Component | Full (Binary) | Seeded (Binary) | Seeded (JSON) |
-|-----------|---------------|-----------------|---------------|
-| Query (client→server) | 192 KB | **96 KB** | 230 KB |
-| Response (server→client) | 544 KB | 544 KB | 1,296 KB |
-| **Total per-query** | **736 KB** | **640 KB** | **1,526 KB** |
+| Component | Bytes | Notes |
+|-----------|------:|-------|
+| First query | 61,735 | One seeded fold row plus inline packing keys |
+| Registered query | 15,491 | One seeded fold row plus session handle |
+| Current tight response | 17,358 | Packed response with lossless 60-bit coefficients |
+| Architecture served response | 17,518 | Current response plus the reserved 160-byte sibling addendum |
+| Architecture registered round trip | **33,009** | Warm query plus served response |
 
-Optimizations:
-- **Seed expansion**: 50% query reduction (seeds replace `a` polynomials)
-- **Binary (bincode)**: ~60% reduction vs JSON (no text overhead)
+The pre-W4 implementation used a three-row seeded query of 49,445 bytes and an
+18,510-byte packed response. Older 96/192/544 KB figures described unoptimized
+RGSW and no-packing shapes; they are historical and are not current wire sizes.
 
-### Protocol Variant Comparison
-
-The table above shows **InsPIRe^0 (NoPacking)** costs. With packing enabled, response sizes drop significantly:
-
-| Variant | Query (binary) | Response (binary) | Total | Notes |
-|---------|----------------|-------------------|-------|-------|
-| **InsPIRe^0** | 192 KB | 544 KB | 736 KB | No packing (17 RLWEs) |
-| **InsPIRe^0 seeded** | 96 KB | 544 KB | 640 KB | Seed expansion only |
-| **InsPIRe^1** | 192 KB | 32 KB | 224 KB | Tree-packed response (1 RLWE) |
-| **InsPIRe^2** | 96 KB | 32 KB | **128 KB** | Seeded + packed |
-**Production recommendation**: use InsPIRe^2 (seeded + packed).
-
-**Key insight**: Packing reduces response from 544 KB → 32 KB (17x reduction) by combining all column values into a single RLWE ciphertext using Galois automorphisms.
+The live TwoPacking path combines the columns into one RLWE response and packs
+each canonical coefficient at the modulus's exact 60-bit width. The smaller RIMS v2 codec is tested behind the default-off
+`mod-switch-response` feature but is not wired into the adapter transport.
 
 ## CRS (Common Reference String) Overhead
 
@@ -79,33 +71,30 @@ A common question: why do different database sizes produce identical query and r
 
 ### Query Size Formula
 
-The query is an RGSW ciphertext encrypting `X^(-k)` (the inverse monomial for target index k):
+The query is one seeded RLWE row encrypting `delta * X^(-k)`:
 
 ```
-Query Size = 2ℓ × 2 × d × 8 bytes
+Query coefficient payload = ceil(d * 60 / 8) bytes + 32-byte seed
 
 Where:
-  ℓ = gadget length (3)
   d = ring dimension (2048)
-  8 = bytes per coefficient (64-bit integers)
+  60 = exact bit width of DEFAULT_Q coefficients
 
-Calculation: 2 × 3 × 2 × 2048 × 8 = 196,608 bytes ≈ 192 KB
-With JSON overhead: ~458 KB
-With seed expansion: ~230 KB (seeds replace half the polynomials)
+The production query with a session handle is 15,491 bytes. Before the session
+handshake it also carries 46,252 bytes of packing keys, for 61,735 bytes.
 ```
 
 **What affects query size:**
 | Factor | Effect |
 |--------|--------|
 | Ring dimension (d) | Linear scaling |
-| Gadget length (ℓ) | Linear scaling |
 | Coefficient size | Linear scaling |
 
 **What does NOT affect query size:**
 | Factor | Why Not |
 |--------|---------|
 | Database size | Index k only changes polynomial coefficients, not structure |
-| Target index | Same RGSW structure regardless of which entry |
+| Target index | Same seeded RLWE structure regardless of which entry |
 | Number of shards | Shard ID is metadata, not ciphertext size |
 
 ### Sharding Tradeoffs (Implementation Note)
@@ -118,30 +107,38 @@ chosen by fixed parameters.
 
 ### Response Size Formula
 
-The response contains RLWE ciphertexts for each column of the entry:
+The current tight response stores the full `a` polynomial and the
+plaintext-bearing prefix of `b` at the exact modulus width:
 
 ```
-Response Size = num_ciphertexts × 2 × d × 8 bytes
+Current bytes = ceil(d * 60 / 8) + ceil(gamma * 60 / 8) + 78
+              = 15,360 + 1,920 + 78
+              = 17,358 at d = 2048 and gamma = 256
+```
+
+The default-off RIMS v2 target switches to 45 bits and stores each coefficient
+in six whole bytes:
+
+```
+RIMS v2 bytes = 23-byte header + (d + gamma) * ceil(45 / 8)
 
 Where:
-  num_ciphertexts = num_columns + 1 (combined + per-column)
-                  = ceil(256 / 16) + 1 = 17  (for 32-byte entries)
   d = ring dimension (2048)
-  8 = bytes per coefficient
+  gamma = ceil(entry_size / 2), 256 for a 512-byte record
+  45 = checked modulus-switch target bits
 
-Calculation (NoPacking): 17 × 2 × 2048 × 8 = 557,056 bytes ≈ 544 KB (binary)
-                         18 ciphertexts in implementation = ~576 KB actual
-With JSON overhead: ~1,296 KB
+The feature-gated codec emits 23 + (2048 + 256) * 6 = 13,847 bytes. The
+architecture's separate 160-byte sibling addendum raises the target served
+response to 14,007 bytes; that addendum is not part of the RIMS codec. Until
+the adapter wires this codec, the current tight response is 17,358 bytes.
 ```
-
-Note: The implementation includes one additional combined ciphertext alongside the 16 per-column ciphertexts, so the actual binary size is closer to 576 KB for InsPIRe^0 (NoPacking). The "Binary" column assumes bincode serialization; the HTTP API uses JSON by default.
 
 **What affects response size:**
 | Factor | Effect |
 |--------|--------|
 | Entry size | More columns → more ciphertexts |
 | Ring dimension (d) | Linear scaling |
-| Plaintext modulus (p) | Higher p → fewer columns needed |
+| Modulus-switch target | Linear in retained coefficient width |
 
 **What does NOT affect response size:**
 | Factor | Why Not |
@@ -152,12 +149,12 @@ Note: The implementation includes one additional combined ciphertext alongside t
 
 ### Database Size Effect
 
-| Database Size | Shards | Query Size (seeded) | Response Size | Server Time |
+| Database Size | Shards | Registered Query | 512 B Response | Server Time |
 |---------------|--------|---------------------|---------------|-------------|
-| 1K entries | 1 | 96 KB | 544 KB | ~1 ms |
-| 64K entries | 32 | 96 KB | 544 KB | ~1.5 ms |
-| 1M entries | 512 | 96 KB | 544 KB | ~3 ms |
-| 100M entries | 50K | 96 KB | 544 KB | ~3 ms |
+| 1K entries | 1 | 15,491 B | 17,358 B | ~1 ms |
+| 64K entries | 32 | 15,491 B | 17,358 B | ~1.5 ms |
+| 1M entries | 512 | 15,491 B | 17,358 B | ~3 ms |
+| 100M entries | 50K | 15,491 B | 17,358 B | ~3 ms |
 
 **The only thing that changes is server computation time** (selecting and processing the correct shard).
 
@@ -168,19 +165,18 @@ Note: The implementation includes one additional combined ciphertext alongside t
 │                    WHY PIR SIZES ARE CONSTANT                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
-│  QUERY (~230 KB)                                                │
+│  QUERY (15,491 B after handshake)                               │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  RGSW(X^(-k))                                           │   │
-│  │  ├── 6 RLWE rows (2ℓ where ℓ=3)                        │   │
-│  │  │   └── Each row: 2 polynomials × 2048 coeffs × 8B    │   │
-│  │  └── Structure fixed by (d, ℓ), not by k or DB size    │   │
+│  │  RLWE(delta*X^(-k))                                     │   │
+│  │  ├── one seeded row: b polynomial plus 32-byte a seed  │   │
+│  │  └── Structure fixed by d, not by k or DB size         │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
-│  RESPONSE (~544 KB)                                             │
+│  CURRENT TIGHT RESPONSE (17,358 B at 512-byte record width)     │
 │  ┌─────────────────────────────────────────────────────────┐   │
-│  │  17 × RLWE ciphertexts (for 32-byte entry)              │   │
-│  │  ├── 1 combined + 16 column ciphertexts                 │   │
-│  │  │   └── Each: 2 polynomials × 2048 coeffs × 8B = 32KB │   │
+│  │  Packed ServerResponse                                   │   │
+│  │  ├── full a polynomial + 256-coefficient b prefix       │   │
+│  │  ├── lossless 60-bit coefficients                       │   │
 │  │  └── Structure fixed by (d, entry_size), not DB size   │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
@@ -213,10 +209,11 @@ Benchmarked on AMD/Intel x64 server:
 | Client: Extract result | ~5 ms |
 | **Total round-trip** | **~12 ms** |
 
-### Measured Request/Response Sizes (d=2048, entry_size=32)
+### Historical Request/Response Sizes (Superseded)
 
 Measured on 2026-01-12 using `benches/query_size_latency.rs` with `INSPIRE_BENCH_SIZES_ONLY=1`.
-Values are serialized payload sizes for a single request/response.
+These pre-one-row values are retained as benchmark history and are not current
+wire or capacity-planning numbers.
 
 | Variant | Request (bincode) | Response (bincode) | Request (JSON) | Response (JSON) | Notes |
 |---------|-------------------|--------------------|----------------|-----------------|-------|
@@ -224,13 +221,13 @@ Values are serialized payload sizes for a single request/response.
 | InsPIRe^1 (OnePacking) | 480.9 KB | 64.1 KB | 576.4 KB | 76.8 KB | Full query + packed response (InspiRING) |
 | InsPIRe^2 (TwoPacking) | 288.7 KB | 64.1 KB | 346.5 KB | 76.9 KB | Seeded query + packed response (InspiRING) |
 
-Notes:
-- JSON sizes reflect HTTP payload size and include key material when present.
-- Sizes vary with parameters and serialization format.
-
 ## Modulus Switching Status
 
-The experimental modulus-switching variant (InsPIRe^2+) has been removed. Current recommendations focus on seed expansion plus InspiRING packing (InsPIRe^2).
+The default-off RIMS v2 codec applies a checked 45-bit modulus switch and
+prefix truncation to packed responses. Its production-cell regression runs the
+real respond, switch, encode, decode, and extract path and pins 13,847 codec bytes.
+It is not wired into the adapter transport. The exported 33-bit target remains
+rejected by the conservative noise gate.
 
 ## Why Generic Compression Won't Help
 
@@ -242,7 +239,12 @@ LWE/RLWE ciphertexts are cryptographically pseudorandom (indistinguishable from 
 | CRS (key material) | ~8 bits/byte | ~0-2% reduction |
 | Query ciphertexts | ~8 bits/byte | ~0-2% reduction |
 
-## Real-World Example: Wallet Open
+## Historical Ethereum Example (Superseded)
+
+The scenario below came from the upstream application-specific prototype. Its
+lookup model is retained as historical context, but its old JSON byte totals are
+not current Raven measurements. Raven now exposes generic PIR and its adapters
+define their own record shapes.
 
 ### Scenario: User opens wallet with 10 tokens, 3 NFTs, ETH balance
 
@@ -257,18 +259,18 @@ LWE/RLWE ciphertexts are cryptographically pseudorandom (indistinguishable from 
 
 Actual payload needed: 96 + 13×32 = **512 bytes**
 
-#### Communication (Measured)
+#### Former Communication Estimate
 
 | Scenario | Upload | Download | Total |
 |----------|--------|----------|-------|
-| 14 queries (standard) | 14 × 458 KB = 6.4 MB | 14 × 1,296 KB = 18.1 MB | **24.5 MB** |
-| 14 queries (seeded) | 14 × 230 KB = 3.2 MB | 14 × 1,296 KB = 18.1 MB | **21.3 MB** |
+| 14 queries (standard) | 6.4 MB | 18.1 MB | **24.5 MB** |
+| 14 queries (seeded) | 3.2 MB | 18.1 MB | **21.3 MB** |
 
-#### Realistic Expectations
+#### Historical Expectations
 
-- **Per query**: ~1.5 MB (seeded)
-- **Wallet open (14 queries)**: ~21 MB total
-- **PIR overhead vs raw**: ~40,000× (512 bytes → 21 MB)
+- These numbers predate the one-row query, response prefix truncation, binary
+  HTTP wire, and session handshake.
+- Do not use them for capacity planning.
 
 ## Optimization Strategies
 
@@ -290,16 +292,19 @@ Actual payload needed: 96 + 13×32 = **512 bytes**
 
 ## Summary
 
-| Metric | Binary | JSON |
-|--------|--------|------|
-| Query size (seeded) | 96 KB | 230 KB |
-| Response size | 544 KB | 1,296 KB |
-| Per-query total | 640 KB | 1,526 KB |
-| Server respond time | ~3-4 ms | ~3-4 ms |
-| End-to-end latency | ~12 ms | ~12 ms |
-| Wallet open (14 queries) | ~9 MB | ~21 MB |
+| Current d=2048, 512-byte cell metric | Bytes |
+|--------------------------------------|------:|
+| First query with inline packing keys | 61,735 |
+| Registered query | 15,491 |
+| Current tight response | 17,358 |
+| Architecture served response with reserved addendum | 17,518 |
+| Architecture registered round trip | 33,009 |
+| Default-off, unwired RIMS v2 codec target | 13,847 |
+| RIMS served target with reserved addendum | 14,007 |
 
-InsPIRe provides **full query privacy** with ~640 KB per query (binary) and ~12ms latency. The bandwidth overhead is significant but acceptable for privacy-critical applications on modern networks.
+These sizes are constant with respect to the target index and database size.
+The cleartext shard id limits query anonymity to one shard; communication-size
+constancy does not enlarge that set.
 
 ## Interactive Visualization
 

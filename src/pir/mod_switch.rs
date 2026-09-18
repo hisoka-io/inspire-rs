@@ -30,8 +30,8 @@ const ROUND_HALF: f64 = 0.5;
 /// [`encode_response_packed`] - bincode pads every coefficient to 8 bytes.
 pub const MOD_SWITCH_TARGET_45BIT: u64 = 35_184_372_060_161;
 
-/// 33-bit NTT-friendly prime: five bytes per coefficient at a tighter noise margin,
-/// so verify [`check_mod_switch_noise_budget`] against the deployed cell first.
+/// 33-bit NTT-friendly prime that fails the shipped noise gate. It is reachable only
+/// through unchecked benchmark and KAT paths until a measured gate proves it safe.
 pub const MOD_SWITCH_TARGET_33BIT: u64 = 8_589_905_921;
 
 /// Spiral's `(q1, q2, t)` triple in InsPIRe's `(q, q', p)` naming.
@@ -228,16 +228,16 @@ fn mod_switch_secret_key(
 ///
 /// ```text
 ///   magic          : 4 bytes  ("RIMS")
-///   version        : 1 byte   (currently 1)
+///   version        : 1 byte   (currently 2)
 ///   target_modulus : 8 bytes  (LE u64)
 ///   ring_dim       : 4 bytes  (LE u32)
 ///   bytes_per_coeff: 1 byte
 ///   packing_mode   : 1 byte   (0 None / 1 Inspiring / 2 Tree)
-///   num_columns    : 4 bytes  (LE u32)
-///   payload        : (2 + 2 * num_columns) * ring_dim * bytes_per_coeff
+///   shape          : 4 bytes  (columns when unpacked, retained b coefficients when packed)
+///   payload        : main a, retained main b, then full unpacked column pairs
 /// ```
 ///
-/// Payload order is `a`, `b`, then each column ciphertext's `a`, `b`,
+/// Payload order is `a`, retained `b`, then each column ciphertext's `a`, `b`,
 /// coefficient-major little-endian. Every poly must already be single-CRT and in
 /// coefficient domain.
 pub fn encode_response_packed(response: &ServerResponse) -> Result<Vec<u8>> {
@@ -253,6 +253,7 @@ pub fn encode_response_packed(response: &ServerResponse) -> Result<Vec<u8>> {
             "encode_response_packed: ciphertext must be single-CRT after mod-switch"
         ));
     }
+    validate_ciphertext_shape(&response.ciphertext, main_dim, target_modulus, "main")?;
 
     let bits = (64u32 - (target_modulus.saturating_sub(1)).leading_zeros()).max(1);
     let bytes_per_coeff = bits.div_ceil(8) as u8;
@@ -263,28 +264,58 @@ pub fn encode_response_packed(response: &ServerResponse) -> Result<Vec<u8>> {
         Some(PackingMode::Tree) => 2,
     };
 
-    let num_columns = u32::try_from(response.column_ciphertexts.len())
-        .map_err(|_| pir_err!("encode_response_packed: too many column ciphertexts"))?;
+    let (shape, retained_b, num_columns) = match (response.packing_mode, response.packed_coefficients)
+    {
+        (None, None) => {
+            let columns = u32::try_from(response.column_ciphertexts.len())
+                .map_err(|_| pir_err!("encode_response_packed: too many column ciphertexts"))?;
+            (columns, main_dim, columns)
+        }
+        (Some(_), Some(retained)) if response.column_ciphertexts.is_empty() => {
+            let retained = usize::try_from(retained)
+                .map_err(|_| pir_err!("encode_response_packed: retained count does not fit usize"))?;
+            if retained == 0 || retained > main_dim {
+                return Err(pir_err!(
+                    "encode_response_packed: retained count {} outside 1..={}",
+                    retained,
+                    main_dim
+                ));
+            }
+            (u32::try_from(retained).map_err(|_| pir_err!("encode_response_packed: retained count exceeds u32"))?, retained, 0)
+        }
+        _ => return Err(pir_err!("encode_response_packed: packed mode requires an exact b prefix and no column ciphertexts")),
+    };
     let ring_dim_u32 = u32::try_from(main_dim)
         .map_err(|_| pir_err!("encode_response_packed: ring_dim does not fit in u32"))?;
 
-    let payload_polys = 2usize + 2 * (num_columns as usize);
-    let payload_len = payload_polys
-        .checked_mul(main_dim)
-        .and_then(|n| n.checked_mul(bytes_per_coeff as usize))
+    let column_coeffs = (num_columns as usize)
+        .checked_mul(2)
+        .and_then(|n| n.checked_mul(main_dim))
+        .ok_or_else(|| pir_err!("encode_response_packed: column coefficient overflow"))?;
+    let payload_coeffs = main_dim
+        .checked_add(retained_b)
+        .and_then(|n| n.checked_add(column_coeffs))
+        .ok_or_else(|| pir_err!("encode_response_packed: payload coefficient overflow"))?;
+    let payload_len = payload_coeffs
+        .checked_mul(bytes_per_coeff as usize)
         .ok_or_else(|| pir_err!("encode_response_packed: payload size overflow"))?;
     let header_len = 4 + 1 + 8 + 4 + 1 + 1 + 4;
     let mut out = Vec::with_capacity(header_len + payload_len);
     out.extend_from_slice(b"RIMS");
-    out.push(1u8);
+    out.push(2u8);
     out.extend_from_slice(&target_modulus.to_le_bytes());
     out.extend_from_slice(&ring_dim_u32.to_le_bytes());
     out.push(bytes_per_coeff);
     out.push(pack_mode_byte);
-    out.extend_from_slice(&num_columns.to_le_bytes());
+    out.extend_from_slice(&shape.to_le_bytes());
 
     write_poly_packed(&response.ciphertext.a, bytes_per_coeff, &mut out)?;
-    write_poly_packed(&response.ciphertext.b, bytes_per_coeff, &mut out)?;
+    write_poly_prefix_packed(
+        &response.ciphertext.b,
+        retained_b,
+        bytes_per_coeff,
+        &mut out,
+    )?;
     for col_ct in &response.column_ciphertexts {
         if col_ct.a.crt_count() != 1 || col_ct.b.crt_count() != 1 {
             return Err(pir_err!(
@@ -296,6 +327,7 @@ pub fn encode_response_packed(response: &ServerResponse) -> Result<Vec<u8>> {
                 "encode_response_packed: column ciphertext ring_dim mismatch"
             ));
         }
+        validate_ciphertext_shape(col_ct, main_dim, target_modulus, "column")?;
         write_poly_packed(&col_ct.a, bytes_per_coeff, &mut out)?;
         write_poly_packed(&col_ct.b, bytes_per_coeff, &mut out)?;
     }
@@ -310,7 +342,7 @@ pub fn decode_response_packed(bytes: &[u8]) -> Result<ServerResponse> {
         ));
     }
     let version = bytes[4];
-    if version != 1 {
+    if !matches!(version, 1 | 2) {
         return Err(pir_err!(
             "decode_response_packed: unsupported version {}",
             version
@@ -321,17 +353,37 @@ pub fn decode_response_packed(bytes: &[u8]) -> Result<ServerResponse> {
             .try_into()
             .map_err(|_| pir_err!("decode_response_packed: target_modulus header truncated"))?,
     );
+    if target_modulus == 0 {
+        return Err(pir_err!(
+            "decode_response_packed: target_modulus must be positive"
+        ));
+    }
     let ring_dim = u32::from_le_bytes(
         bytes[13..17]
             .try_into()
             .map_err(|_| pir_err!("decode_response_packed: ring_dim header truncated"))?,
     ) as usize;
+    if ring_dim == 0 {
+        return Err(pir_err!(
+            "decode_response_packed: ring_dim must be positive"
+        ));
+    }
     let bytes_per_coeff = bytes[17];
+    let expected_width = (64u32 - target_modulus.saturating_sub(1).leading_zeros())
+        .max(1)
+        .div_ceil(8) as u8;
+    if bytes_per_coeff != expected_width || bytes_per_coeff > 8 {
+        return Err(pir_err!(
+            "decode_response_packed: bytes_per_coeff {} does not match modulus width {}",
+            bytes_per_coeff,
+            expected_width
+        ));
+    }
     let pack_mode_byte = bytes[18];
-    let num_columns = u32::from_le_bytes(
+    let shape = u32::from_le_bytes(
         bytes[19..23]
             .try_into()
-            .map_err(|_| pir_err!("decode_response_packed: num_columns header truncated"))?,
+            .map_err(|_| pir_err!("decode_response_packed: shape header truncated"))?,
     ) as usize;
 
     let packing_mode = match pack_mode_byte {
@@ -345,44 +397,98 @@ pub fn decode_response_packed(bytes: &[u8]) -> Result<ServerResponse> {
             ))
         }
     };
+    if version == 1 && packing_mode.is_some() {
+        return Err(pir_err!(
+            "decode_response_packed: legacy v1 packed modes have no retained-prefix field"
+        ));
+    }
 
-    let payload_polys = 2usize + 2 * num_columns;
-    let payload_len = payload_polys
-        .checked_mul(ring_dim)
-        .and_then(|n| n.checked_mul(bytes_per_coeff as usize))
+    let (num_columns, retained_b, packed_coefficients) =
+        if version == 1 {
+            (shape, ring_dim, None)
+        } else {
+            match packing_mode {
+                None => (shape, ring_dim, None),
+                Some(_) if shape > 0 && shape <= ring_dim => (
+                    0,
+                    shape,
+                    Some(u32::try_from(shape).map_err(|_| {
+                        pir_err!("decode_response_packed: retained count exceeds u32")
+                    })?),
+                ),
+                Some(_) => {
+                    return Err(pir_err!(
+                        "decode_response_packed: retained count {} outside 1..={}",
+                        shape,
+                        ring_dim
+                    ))
+                }
+            }
+        };
+    let column_coeffs = num_columns
+        .checked_mul(2)
+        .and_then(|n| n.checked_mul(ring_dim))
+        .ok_or_else(|| pir_err!("decode_response_packed: column coefficient overflow"))?;
+    let payload_coeffs = ring_dim
+        .checked_add(retained_b)
+        .and_then(|n| n.checked_add(column_coeffs))
+        .ok_or_else(|| pir_err!("decode_response_packed: payload coefficient overflow"))?;
+    let payload_len = payload_coeffs
+        .checked_mul(bytes_per_coeff as usize)
         .ok_or_else(|| pir_err!("decode_response_packed: payload length overflow"))?;
     let payload_start = 23usize;
-    if bytes.len() != payload_start + payload_len {
+    let expected_len = payload_start
+        .checked_add(payload_len)
+        .ok_or_else(|| pir_err!("decode_response_packed: total length overflow"))?;
+    if bytes.len() != expected_len {
         return Err(pir_err!(
             "decode_response_packed: payload length mismatch (expected {}, got {})",
-            payload_start + payload_len,
+            expected_len,
             bytes.len()
         ));
     }
 
     let mut cursor = payload_start;
-    let read_poly = |cursor: &mut usize, src: &[u8]| -> Result<Poly> {
-        let chunk_len = ring_dim * bytes_per_coeff as usize;
-        let chunk = &src[*cursor..*cursor + chunk_len];
-        *cursor += chunk_len;
+    let read_poly = |cursor: &mut usize, src: &[u8], retained: usize| -> Result<Poly> {
+        let chunk_len = retained * bytes_per_coeff as usize;
+        let end = cursor
+            .checked_add(chunk_len)
+            .ok_or_else(|| pir_err!("decode_response_packed: cursor overflow"))?;
+        let chunk = src
+            .get(*cursor..end)
+            .ok_or_else(|| pir_err!("decode_response_packed: truncated polynomial"))?;
+        *cursor = end;
         let mut coeffs = vec![0u64; ring_dim];
-        for (i, slot) in coeffs.iter_mut().enumerate() {
+        for (i, slot) in coeffs.iter_mut().take(retained).enumerate() {
             let mut buf = [0u8; 8];
             let off = i * bytes_per_coeff as usize;
             let width = bytes_per_coeff as usize;
-            buf[..width].copy_from_slice(&chunk[off..off + width]);
+            let source = chunk
+                .get(off..off + width)
+                .ok_or_else(|| pir_err!("decode_response_packed: truncated coefficient"))?;
+            let target = buf
+                .get_mut(..width)
+                .ok_or_else(|| pir_err!("decode_response_packed: invalid coefficient width"))?;
+            target.copy_from_slice(source);
             *slot = u64::from_le_bytes(buf);
+            if *slot >= target_modulus {
+                return Err(pir_err!(
+                    "decode_response_packed: coefficient {} is not canonical for modulus {}",
+                    *slot,
+                    target_modulus
+                ));
+            }
         }
         Ok(Poly::from_coeffs(coeffs, target_modulus))
     };
 
-    let main_a = read_poly(&mut cursor, bytes)?;
-    let main_b = read_poly(&mut cursor, bytes)?;
+    let main_a = read_poly(&mut cursor, bytes, ring_dim)?;
+    let main_b = read_poly(&mut cursor, bytes, retained_b)?;
     let main_ct = RlweCiphertext::from_parts(main_a, main_b);
     let mut column_ciphertexts = Vec::with_capacity(num_columns);
     for _ in 0..num_columns {
-        let col_a = read_poly(&mut cursor, bytes)?;
-        let col_b = read_poly(&mut cursor, bytes)?;
+        let col_a = read_poly(&mut cursor, bytes, ring_dim)?;
+        let col_b = read_poly(&mut cursor, bytes, ring_dim)?;
         column_ciphertexts.push(RlweCiphertext::from_parts(col_a, col_b));
     }
 
@@ -390,16 +496,46 @@ pub fn decode_response_packed(bytes: &[u8]) -> Result<ServerResponse> {
         ciphertext: main_ct,
         column_ciphertexts,
         packing_mode,
-        packed_coefficients: None,
+        packed_coefficients,
     })
 }
 
 fn write_poly_packed(poly: &Poly, bytes_per_coeff: u8, out: &mut Vec<u8>) -> Result<()> {
+    write_poly_prefix_packed(poly, poly.dimension(), bytes_per_coeff, out)
+}
+
+fn validate_ciphertext_shape(
+    ciphertext: &RlweCiphertext,
+    dimension: usize,
+    modulus: u64,
+    label: &str,
+) -> Result<()> {
+    for (component, poly) in [("a", &ciphertext.a), ("b", &ciphertext.b)] {
+        if poly.dimension() != dimension || poly.modulus() != modulus || poly.is_ntt() {
+            return Err(pir_err!(
+                "encode_response_packed: {label}.{component} shape/domain mismatch"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_poly_prefix_packed(
+    poly: &Poly,
+    retained: usize,
+    bytes_per_coeff: u8,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     if poly.is_ntt() {
         return Err(pir_err!("write_poly_packed: refuses NTT-domain Poly"));
     }
     let dim = poly.dimension();
-    for i in 0..dim {
+    if retained > dim {
+        return Err(pir_err!(
+            "write_poly_prefix_packed: retained count exceeds dimension"
+        ));
+    }
+    for i in 0..retained {
         let value = poly.coeff(i);
         let bytes = value.to_le_bytes();
         out.extend_from_slice(&bytes[..bytes_per_coeff as usize]);
@@ -426,6 +562,20 @@ pub fn extract_inspiring_mod_switched(
     }
 
     let target_modulus = response.ciphertext.modulus();
+    if response.ciphertext.ring_dim() != crs.params.ring_dim {
+        return Err(pir_err!(
+            "extract_inspiring_mod_switched response ring_dim {} != expected {}",
+            response.ciphertext.ring_dim(),
+            crs.params.ring_dim
+        ));
+    }
+    validate_ciphertext_shape(
+        &response.ciphertext,
+        crs.params.ring_dim,
+        target_modulus,
+        "response",
+    )?;
+    check_mod_switch_noise_budget(&crs.params, target_modulus)?;
     let p = crs.params.p;
     let delta_prime = target_modulus / p;
     if delta_prime == 0 {
@@ -462,9 +612,13 @@ mod tests {
     use super::*;
     use crate::math::GaussianSampler;
     use crate::params::InspireParams;
+    use crate::pir::encode_db::inverse_monomial;
     use crate::pir::query::query_seeded;
     use crate::pir::respond::respond_seeded_inspiring;
-    use crate::pir::setup::setup;
+    use crate::pir::setup::{setup, setup_with_rng};
+    use crate::rgsw::{GadgetVector, SeededRgswCiphertext};
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha20Rng;
 
     fn small_inspiring_params() -> InspireParams {
         InspireParams {
@@ -474,7 +628,8 @@ mod tests {
             p: 65537,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -586,15 +741,100 @@ mod tests {
             ciphertext: ct,
             column_ciphertexts: vec![],
             packing_mode: Some(PackingMode::Inspiring),
-            packed_coefficients: None,
+            packed_coefficients: Some(4),
         };
         let encoded = encode_response_packed(&response).unwrap();
+        assert_eq!(encoded[4], 2);
+        assert_eq!(encoded.len(), 23 + (dim + 4) * 8);
         let decoded = decode_response_packed(&encoded).unwrap();
         assert_eq!(decoded.packing_mode, Some(PackingMode::Inspiring));
+        assert_eq!(decoded.packed_coefficients, Some(4));
         assert_eq!(decoded.ciphertext.modulus(), modulus);
         for i in 0..dim {
             assert_eq!(decoded.ciphertext.a.coeff(i), coeffs_a[i]);
-            assert_eq!(decoded.ciphertext.b.coeff(i), coeffs_b[i]);
+            let expected_b = if i < 4 { coeffs_b[i] } else { 0 };
+            assert_eq!(decoded.ciphertext.b.coeff(i), expected_b);
+        }
+    }
+
+    #[test]
+    fn production_45bit_packed_response_is_below_head() {
+        let dim = 2048;
+        let retained = 256u32;
+        let a = Poly::zero(dim, MOD_SWITCH_TARGET_45BIT);
+        let b = Poly::zero(dim, MOD_SWITCH_TARGET_45BIT);
+        let response = ServerResponse {
+            ciphertext: RlweCiphertext::from_parts(a, b),
+            column_ciphertexts: Vec::new(),
+            packing_mode: Some(PackingMode::Inspiring),
+            packed_coefficients: Some(retained),
+        };
+
+        let encoded = encode_response_packed(&response).unwrap();
+
+        assert_eq!(encoded.len(), 13_847);
+        assert!(encoded.len() + 160 < 18_670);
+    }
+
+    #[test]
+    fn legacy_v1_unpacked_frame_still_decodes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIMS");
+        bytes.push(1);
+        bytes.extend_from_slice(&257u64.to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&[2, 0]);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&[1, 0, 2, 0, 3, 0, 4, 0]);
+
+        let decoded = decode_response_packed(&bytes).unwrap();
+
+        assert_eq!(decoded.packing_mode, None);
+        assert_eq!(decoded.packed_coefficients, None);
+        assert_eq!(decoded.ciphertext.a.coeffs(), &[1, 2]);
+        assert_eq!(decoded.ciphertext.b.coeffs(), &[3, 4]);
+    }
+
+    #[test]
+    fn packed_decoder_rejects_malformed_shape_and_noncanonical_coefficients() {
+        let response = ServerResponse {
+            ciphertext: RlweCiphertext::from_parts(Poly::zero(2, 257), Poly::zero(2, 257)),
+            column_ciphertexts: Vec::new(),
+            packing_mode: Some(PackingMode::Inspiring),
+            packed_coefficients: Some(1),
+        };
+        let valid = encode_response_packed(&response).unwrap();
+        let mut cases = Vec::new();
+        let mut legacy_packed = valid.clone();
+        legacy_packed[4] = 1;
+        cases.push(legacy_packed);
+        let mut zero_modulus = valid.clone();
+        zero_modulus[5..13].fill(0);
+        cases.push(zero_modulus);
+        let mut zero_dim = valid.clone();
+        zero_dim[13..17].fill(0);
+        cases.push(zero_dim);
+        let mut wrong_width = valid.clone();
+        wrong_width[17] = 1;
+        cases.push(wrong_width);
+        let mut zero_retained = valid.clone();
+        zero_retained[19..23].fill(0);
+        cases.push(zero_retained);
+        let mut excessive_retained = valid.clone();
+        excessive_retained[19..23].copy_from_slice(&3u32.to_le_bytes());
+        cases.push(excessive_retained);
+        let mut truncated = valid.clone();
+        truncated.pop();
+        cases.push(truncated);
+        let mut trailing = valid.clone();
+        trailing.push(0);
+        cases.push(trailing);
+        let mut noncanonical = valid;
+        noncanonical[23..25].copy_from_slice(&257u16.to_le_bytes());
+        cases.push(noncanonical);
+
+        for bytes in cases {
+            assert!(decode_response_packed(&bytes).is_err());
         }
     }
 
@@ -625,15 +865,10 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "compiles only under --features mod-switch-response, which gates the whole module, \
-                and is ignored on top, so it runs in no default configuration. Trigger: cargo test \
-                --release --features mod-switch-response -- --ignored, when changing the 45-bit \
-                mod-switch target or extract_inspiring_mod_switched. Setup alone is ~4 s at \
-                d=2048, essentially all PackParams::try_new."]
     fn production_45bit_mod_switch_roundtrip() {
         let params = production_params();
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
-        let entry_size = 32;
+        let entry_size = 512;
         let num_entries = params.ring_dim;
         let database: Vec<u8> = (0..(num_entries * entry_size))
             .map(|i| ((i * 37 + 11) % 256) as u8)
@@ -655,8 +890,10 @@ mod tests {
         let response = respond_seeded_inspiring(&crs, &encoded_db, &query).unwrap();
         let switched =
             mod_switch_response_checked(&crs.params, &response, MOD_SWITCH_TARGET_45BIT).unwrap();
-        let extracted =
-            extract_inspiring_mod_switched(&crs, &state, &switched, entry_size).unwrap();
+        let encoded = encode_response_packed(&switched).unwrap();
+        assert_eq!(encoded.len(), 13_847);
+        let decoded = decode_response_packed(&encoded).unwrap();
+        let extracted = extract_inspiring_mod_switched(&crs, &state, &decoded, entry_size).unwrap();
 
         let expected_start = (target_index as usize) * entry_size;
         let expected = &database[expected_start..expected_start + entry_size];
@@ -668,6 +905,87 @@ mod tests {
         let params = production_params();
         check_mod_switch_noise_budget(&params, MOD_SWITCH_TARGET_45BIT)
             .expect("45-bit target must pass noise budget at production cell");
+    }
+
+    fn served_post_switch_error(
+        params: &InspireParams,
+        state: &ClientState,
+        response: &ServerResponse,
+        row: &[u8],
+        entry_size: usize,
+    ) -> u64 {
+        let target_modulus = response.ciphertext.modulus();
+        let target_ctx = NttContext::with_moduli(params.ring_dim, &[target_modulus]);
+        let switched_sk =
+            mod_switch_secret_key(&state.rlwe_secret_key, target_modulus, params.q).unwrap();
+        let noisy = &response
+            .ciphertext
+            .a
+            .mul_ntt(&switched_sk.poly, &target_ctx)
+            + &response.ciphertext.b;
+        let delta_prime = target_modulus / params.p;
+        let mut maximum = 0u64;
+        for coefficient in 0..crate::num_columns(entry_size) {
+            let offset = coefficient * 2;
+            let pair: [u8; 2] = row
+                .get(offset..offset + 2)
+                .expect("served column pair")
+                .try_into()
+                .expect("two-byte column");
+            let message = u64::from(u16::from_le_bytes(pair));
+            let expected =
+                (u128::from(message) * u128::from(delta_prime) % u128::from(target_modulus)) as u64;
+            let distance = noisy.coeff(coefficient).abs_diff(expected);
+            maximum = maximum.max(distance.min(target_modulus - distance));
+        }
+        maximum
+    }
+
+    #[test]
+    fn production_post_switch_error_kat_at_45_and_33_bits() {
+        let params = production_params();
+        let mut sampler = GaussianSampler::with_seed(params.sigma, 0x5002);
+        let entry_size = 512;
+        let database: Vec<u8> = (0..params.ring_dim * entry_size)
+            .map(|offset| ((offset * 37 + 11) % 256) as u8)
+            .collect();
+        let mut setup_rng = ChaCha20Rng::seed_from_u64(0x5002_0001);
+        let (crs, encoded, secret_key) =
+            setup_with_rng(&params, &database, entry_size, &mut sampler, &mut setup_rng).unwrap();
+        let target = 17u64;
+        let (state, mut query) =
+            query_seeded(&crs, target, &encoded.config, &secret_key, &mut sampler).unwrap();
+        let scaled_monomial = inverse_monomial(
+            state.local_index as usize,
+            params.ring_dim,
+            params.q,
+            params.moduli(),
+        )
+        .scalar_mul(params.delta());
+        let gadget = GadgetVector::new(params.gadget_base, 1, params.q);
+        let mut query_noise = GaussianSampler::with_seed(params.sigma, 0x5002_0002);
+        let mut query_rng = ChaCha20Rng::seed_from_u64(0x5002_0003);
+        query.rgsw_ciphertext = SeededRgswCiphertext::encrypt_with_rng(
+            &secret_key,
+            &scaled_monomial,
+            &gadget,
+            &mut query_noise,
+            &params.ntt_context(),
+            &mut query_rng,
+        );
+        let response = respond_seeded_inspiring(&crs, &encoded, &query).unwrap();
+        let row = &database[target as usize * entry_size..(target as usize + 1) * entry_size];
+
+        for (target_modulus, expected_error) in [
+            (MOD_SWITCH_TARGET_45BIT, 317_711),
+            (MOD_SWITCH_TARGET_33BIT, 36_836),
+        ] {
+            let switched = mod_switch_response_unchecked(&response, target_modulus).unwrap();
+            let error = served_post_switch_error(&params, &state, &switched, row, entry_size);
+            assert_eq!(error, expected_error);
+            assert!(error < target_modulus / (2 * params.p));
+        }
+        assert!(check_mod_switch_noise_budget(&params, MOD_SWITCH_TARGET_33BIT).is_err());
     }
 
     #[test]

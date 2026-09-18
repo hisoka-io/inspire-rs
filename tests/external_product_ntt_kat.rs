@@ -51,7 +51,7 @@ proptest::proptest! {
     ) {
         let p = params();
         let ctx = p.ntt_context();
-        let gadget = GadgetVector::new(p.gadget_base, p.gadget_len, p.q);
+        let gadget = GadgetVector::new(p.gadget_base, p.query_gadget_len, p.q);
 
         let mut sampler = GaussianSampler::with_seed(p.sigma, seed);
         let sk = RlweSecretKey::generate(&p, &mut sampler);
@@ -96,7 +96,7 @@ fn external_product_ntt_preserves_correctness_rgsw_scalar() {
     let delta = p.delta();
 
     let sk = RlweSecretKey::generate(&p, &mut sampler);
-    let gadget = GadgetVector::new(p.gadget_base, p.gadget_len, p.q);
+    let gadget = GadgetVector::new(p.gadget_base, p.query_gadget_len, p.q);
 
     let msg_coeffs: Vec<u64> = (0..p.ring_dim).map(|i| (i as u64) % 10).collect();
     let msg = Poly::from_coeffs_moduli(msg_coeffs.clone(), p.moduli());
@@ -122,7 +122,7 @@ fn one_sided_external_products_refuse_a_nontrivial_rlwe_input() {
     let ctx = p.ntt_context();
     let mut sampler = GaussianSampler::with_seed(p.sigma, 0x1206);
     let sk = RlweSecretKey::generate(&p, &mut sampler);
-    let gadget = GadgetVector::new(p.gadget_base, p.gadget_len, p.q);
+    let gadget = GadgetVector::new(p.gadget_base, p.query_gadget_len, p.q);
     let message = Poly::constant_moduli(1, p.ring_dim, p.moduli());
     let rgsw = RgswCiphertext::encrypt_scalar(&sk, 1, &gadget, &mut sampler, &ctx);
     let rgsw_ntt = rgsw_rows_to_ntt(&rgsw, &ctx);

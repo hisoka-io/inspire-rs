@@ -43,8 +43,7 @@ fn has_avx512_ifma_cached() -> bool {
 /// assert_eq!(poly.coeff(0), 42);
 /// assert_eq!(poly.dimension(), 256);
 /// ```
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
-#[serde(try_from = "PolyWire")]
+#[derive(Clone, Debug, Default)]
 pub struct Poly {
     coeffs: Vec<u64>,
     moduli: Vec<u64>,
@@ -62,7 +61,7 @@ pub struct Poly {
 /// bound it: a small body can carry `dim = 2^44`, and `apply_automorphism` allocates
 /// `vec![0u64; poly.dimension()]` before it touches `coeffs`, which aborts the
 /// process rather than returning an error.
-#[derive(serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct PolyWire {
     coeffs: Vec<u64>,
     moduli: Vec<u64>,
@@ -70,6 +69,262 @@ struct PolyWire {
     dim: usize,
     crt_q0_inv_mod_q1: u64,
     is_ntt: bool,
+}
+
+const MAX_TIGHT_COEFFICIENT_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Debug)]
+pub(crate) struct TightBytes(Vec<u8>);
+
+impl TightBytes {
+    pub(crate) fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl From<Vec<u8>> for TightBytes {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl serde::Serialize for TightBytes {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for TightBytes {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct TightBytesVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for TightBytesVisitor {
+            type Value = TightBytes;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(
+                    formatter,
+                    "at most {MAX_TIGHT_COEFFICIENT_BYTES} tight coefficient bytes"
+                )
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut sequence: A,
+            ) -> Result<Self::Value, A::Error> {
+                let declared = sequence.size_hint().unwrap_or(0);
+                if declared > MAX_TIGHT_COEFFICIENT_BYTES {
+                    return Err(serde::de::Error::custom(format!(
+                        "tight coefficient payload declares {declared} bytes, cap is {MAX_TIGHT_COEFFICIENT_BYTES}"
+                    )));
+                }
+                let mut bytes = Vec::with_capacity(declared);
+                while let Some(byte) = sequence.next_element()? {
+                    if bytes.len() == MAX_TIGHT_COEFFICIENT_BYTES {
+                        return Err(serde::de::Error::custom(format!(
+                            "tight coefficient payload exceeds {MAX_TIGHT_COEFFICIENT_BYTES}-byte cap"
+                        )));
+                    }
+                    bytes.push(byte);
+                }
+                Ok(TightBytes(bytes))
+            }
+        }
+
+        deserializer.deserialize_seq(TightBytesVisitor)
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TightPolyWire {
+    coeffs: TightBytes,
+    moduli: Vec<u64>,
+    q: u64,
+    dim: usize,
+    crt_q0_inv_mod_q1: u64,
+    is_ntt: bool,
+}
+
+fn tight_coefficient_bits(moduli: &[u64]) -> Result<usize, String> {
+    let largest = moduli
+        .iter()
+        .copied()
+        .max()
+        .ok_or_else(|| "tight coefficient codec requires at least one modulus".to_owned())?;
+    if largest < 2 {
+        return Err(format!(
+            "tight coefficient codec requires every modulus >= 2, got {largest}"
+        ));
+    }
+    Ok((u64::BITS - largest.saturating_sub(1).leading_zeros()) as usize)
+}
+
+pub(crate) fn pack_coefficients_tight(
+    coeffs: &[u64],
+    moduli: &[u64],
+    dim: usize,
+) -> Result<Vec<u8>, String> {
+    if coeffs.is_empty() && moduli.is_empty() && dim == 0 {
+        return Ok(Vec::new());
+    }
+    let bits = tight_coefficient_bits(moduli)?;
+    let expected = dim
+        .checked_mul(moduli.len())
+        .ok_or_else(|| "tight coefficient count overflow".to_owned())?;
+    if coeffs.len() != expected {
+        return Err(format!(
+            "tight coefficient shape needs {expected} values, got {}",
+            coeffs.len()
+        ));
+    }
+    let bit_len = coeffs
+        .len()
+        .checked_mul(bits)
+        .ok_or_else(|| "tight coefficient bit length overflow".to_owned())?;
+    let byte_len = bit_len
+        .checked_add(7)
+        .ok_or_else(|| "tight coefficient byte length overflow".to_owned())?
+        / 8;
+    let mut packed = vec![0u8; byte_len];
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    for (index, coefficient) in coeffs.iter().copied().enumerate() {
+        let modulus = moduli[index / dim];
+        if coefficient >= modulus {
+            return Err(format!(
+                "tight coefficient {coefficient} at index {index} is not canonical for modulus {modulus}"
+            ));
+        }
+        let bit_offset = index * bits;
+        let byte_offset = bit_offset / 8;
+        let shift = bit_offset % 8;
+        let value = coefficient & mask;
+        let bytes_for_value = (bits + shift).div_ceil(8);
+        let available = packed
+            .len()
+            .saturating_sub(byte_offset)
+            .min(bytes_for_value);
+        for byte_index in 0..available {
+            let source_shift = byte_index * 8;
+            let byte = if source_shift >= shift {
+                value >> (source_shift - shift)
+            } else {
+                value << (shift - source_shift)
+            };
+            packed[byte_offset + byte_index] |= byte as u8;
+        }
+    }
+    Ok(packed)
+}
+
+pub(crate) fn unpack_coefficients_tight(
+    packed: &[u8],
+    moduli: &[u64],
+    dim: usize,
+) -> Result<Vec<u64>, String> {
+    if packed.is_empty() && moduli.is_empty() && dim == 0 {
+        return Ok(Vec::new());
+    }
+    let bits = tight_coefficient_bits(moduli)?;
+    let count = dim
+        .checked_mul(moduli.len())
+        .ok_or_else(|| "tight coefficient count overflow".to_owned())?;
+    let bit_len = count
+        .checked_mul(bits)
+        .ok_or_else(|| "tight coefficient bit length overflow".to_owned())?;
+    let expected_bytes = bit_len
+        .checked_add(7)
+        .ok_or_else(|| "tight coefficient byte length overflow".to_owned())?
+        / 8;
+    if packed.len() != expected_bytes {
+        return Err(format!(
+            "tight coefficient payload has {} bytes, expected {expected_bytes}",
+            packed.len()
+        ));
+    }
+    if bit_len % 8 != 0 {
+        let used = bit_len % 8;
+        let unused_mask = !((1u8 << used) - 1);
+        if packed.last().copied().unwrap_or_default() & unused_mask != 0 {
+            return Err("tight coefficient payload has nonzero unused high bits".to_owned());
+        }
+    }
+    let mask = if bits == 64 {
+        u64::MAX
+    } else {
+        (1u64 << bits) - 1
+    };
+    let mut coeffs = Vec::with_capacity(count);
+    for index in 0..count {
+        let bit_offset = index * bits;
+        let byte_offset = bit_offset / 8;
+        let shift = bit_offset % 8;
+        let available = packed.len().saturating_sub(byte_offset).min(9);
+        let mut window = 0u128;
+        for byte_index in 0..available {
+            window |= u128::from(packed[byte_offset + byte_index]) << (byte_index * 8);
+        }
+        let coefficient = ((window >> shift) as u64) & mask;
+        let modulus = moduli[index / dim];
+        if coefficient >= modulus {
+            return Err(format!(
+                "tight coefficient {coefficient} at index {index} is not canonical for modulus {modulus}"
+            ));
+        }
+        coeffs.push(coefficient);
+    }
+    Ok(coeffs)
+}
+
+impl serde::Serialize for Poly {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            return PolyWire {
+                coeffs: self.coeffs.clone(),
+                moduli: self.moduli.clone(),
+                q: self.q,
+                dim: self.dim,
+                crt_q0_inv_mod_q1: self.crt_q0_inv_mod_q1,
+                is_ntt: self.is_ntt,
+            }
+            .serialize(serializer);
+        }
+        let coeffs = pack_coefficients_tight(&self.coeffs, &self.moduli, self.dim)
+            .map_err(serde::ser::Error::custom)?;
+        TightPolyWire {
+            coeffs: coeffs.into(),
+            moduli: self.moduli.clone(),
+            q: self.q,
+            dim: self.dim,
+            crt_q0_inv_mod_q1: self.crt_q0_inv_mod_q1,
+            is_ntt: self.is_ntt,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Poly {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            let wire = PolyWire::deserialize(deserializer)?;
+            return Self::try_from(wire).map_err(serde::de::Error::custom);
+        }
+        let wire = TightPolyWire::deserialize(deserializer)?;
+        let coeffs = unpack_coefficients_tight(&wire.coeffs.into_vec(), &wire.moduli, wire.dim)
+            .map_err(serde::de::Error::custom)?;
+        Self::try_from(PolyWire {
+            coeffs,
+            moduli: wire.moduli,
+            q: wire.q,
+            dim: wire.dim,
+            crt_q0_inv_mod_q1: wire.crt_q0_inv_mod_q1,
+            is_ntt: wire.is_ntt,
+        })
+        .map_err(serde::de::Error::custom)
+    }
 }
 
 impl TryFrom<PolyWire> for Poly {
@@ -1047,6 +1302,7 @@ impl MulAssign for Poly {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn make_ctx(n: usize) -> NttContext {
         NttContext::with_default_q(n)
@@ -1327,5 +1583,140 @@ mod tests {
         result2.from_ntt(&ctx);
 
         assert_eq!(result1, result2);
+    }
+
+    #[test]
+    fn tight_60bit_codec_round_trips_boundaries_and_exact_size() {
+        let values = vec![
+            0,
+            1,
+            (1u64 << 59) - 1,
+            1u64 << 59,
+            DEFAULT_Q - 2,
+            DEFAULT_Q - 1,
+            17,
+            23,
+        ];
+        let packed = pack_coefficients_tight(&values, &[DEFAULT_Q], values.len()).unwrap();
+        assert_eq!(packed.len(), 60);
+        assert_eq!(
+            unpack_coefficients_tight(&packed, &[DEFAULT_Q], values.len()).unwrap(),
+            values
+        );
+    }
+
+    #[test]
+    fn tight_codec_refuses_shape_truncation_and_noncanonical_values() {
+        let values = vec![0, DEFAULT_Q - 1, 7, 9];
+        let mut packed = pack_coefficients_tight(&values, &[DEFAULT_Q], values.len()).unwrap();
+        packed.pop();
+        assert!(
+            unpack_coefficients_tight(&packed, &[DEFAULT_Q], values.len())
+                .unwrap_err()
+                .contains("expected")
+        );
+        assert!(pack_coefficients_tight(&[DEFAULT_Q], &[DEFAULT_Q], 1)
+            .unwrap_err()
+            .contains("not canonical"));
+
+        let encoded_noncanonical = pack_coefficients_tight(&[DEFAULT_Q], &[1u64 << 60], 1).unwrap();
+        assert!(
+            unpack_coefficients_tight(&encoded_noncanonical, &[DEFAULT_Q], 1)
+                .unwrap_err()
+                .contains("not canonical")
+        );
+
+        let mut nonzero_padding = pack_coefficients_tight(&[1], &[257], 1).unwrap();
+        nonzero_padding[1] |= 0x80;
+        assert!(unpack_coefficients_tight(&nonzero_padding, &[257], 1)
+            .unwrap_err()
+            .contains("unused high bits"));
+
+        let mut overlong = pack_coefficients_tight(&[1], &[257], 1).unwrap();
+        overlong.push(0);
+        assert!(unpack_coefficients_tight(&overlong, &[257], 1)
+            .unwrap_err()
+            .contains("expected"));
+    }
+
+    #[test]
+    fn tight_codec_round_trips_two_crt_limbs_without_mixing_them() {
+        let moduli = [257, 769];
+        let values = vec![0, 256, 1, 200, 0, 768, 500, 42];
+        let packed = pack_coefficients_tight(&values, &moduli, 4).unwrap();
+        assert_eq!(
+            unpack_coefficients_tight(&packed, &moduli, 4).unwrap(),
+            values
+        );
+    }
+
+    #[test]
+    fn tight_codec_covers_every_bit_offset_and_width_through_64() {
+        let mut observed_offsets = [false; 8];
+        for bits in 2usize..=64 {
+            let modulus = if bits == 64 {
+                u64::MAX
+            } else {
+                (1u64 << (bits - 1)) + 1
+            };
+            let coefficients: Vec<u64> = (0..17)
+                .map(|index| {
+                    u64::try_from((index as u128 * 0x9e37 + 1) % u128::from(modulus))
+                        .expect("reduced coefficient fits u64")
+                })
+                .collect();
+            for index in 0..coefficients.len() {
+                observed_offsets[(index * bits) % 8] = true;
+            }
+            let packed = pack_coefficients_tight(&coefficients, &[modulus], coefficients.len())
+                .expect("width fixture packs");
+            assert_eq!(packed.len(), (coefficients.len() * bits).div_ceil(8));
+            assert_eq!(
+                unpack_coefficients_tight(&packed, &[modulus], coefficients.len())
+                    .expect("width fixture unpacks"),
+                coefficients,
+                "bits={bits}"
+            );
+        }
+        assert!(observed_offsets.into_iter().all(|observed| observed));
+    }
+
+    #[test]
+    fn tight_codec_64bit_fallback_round_trips_boundaries() {
+        let coefficients = vec![0, 1, 1u64 << 63, u64::MAX - 1];
+        let packed = pack_coefficients_tight(&coefficients, &[u64::MAX], coefficients.len())
+            .expect("64-bit coefficients pack");
+        assert_eq!(packed.len(), 32);
+        assert_eq!(
+            unpack_coefficients_tight(&packed, &[u64::MAX], coefficients.len())
+                .expect("64-bit coefficients unpack"),
+            coefficients
+        );
+    }
+
+    #[test]
+    fn tight_byte_vector_refuses_an_oversized_declared_length_before_allocation() {
+        let forged = u64::MAX.to_le_bytes();
+        let error = bincode::deserialize::<TightBytes>(&forged)
+            .expect_err("oversized tight byte vector must be refused");
+        assert!(error.to_string().contains("cap is"), "{error}");
+    }
+
+    proptest! {
+        #[test]
+        fn tight_codec_round_trips_arbitrary_default_q_coefficients(
+            coefficients in proptest::collection::vec(0u64..DEFAULT_Q, 1..64)
+        ) {
+            let packed = pack_coefficients_tight(
+                &coefficients,
+                &[DEFAULT_Q],
+                coefficients.len(),
+            ).expect("canonical coefficients pack");
+            prop_assert_eq!(
+                unpack_coefficients_tight(&packed, &[DEFAULT_Q], coefficients.len())
+                    .expect("packed coefficients unpack"),
+                coefficients
+            );
+        }
     }
 }

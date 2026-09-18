@@ -119,7 +119,7 @@ pub enum InspireVariant {
 /// * `p` - Plaintext modulus for message encoding
 /// * `sigma` - Standard deviation for discrete Gaussian error sampling
 /// * `gadget_base` - Base for gadget decomposition (typically 2^20)
-/// * `gadget_len` - Number of gadget digits: ℓ = ⌈log_z(q)⌉
+/// * `query_gadget_len` / `packing_gadget_len` - Gadget digits per role
 /// * `security_level` - declared target; never read, never validated
 ///
 /// # Example
@@ -177,11 +177,13 @@ pub struct InspireParams {
     /// Typical value: 2^20.
     pub gadget_base: u64,
 
-    /// Number of digits in gadget decomposition: ℓ = ⌈log_z(q)⌉.
+    /// Legacy query decomposition width retained in the serialized parameter identity.
     ///
-    /// Determines the size of key-switching matrices and RGSW ciphertexts.
-    /// Typical value: 3 for q ≈ 2^60 and z = 2^20.
-    pub gadget_len: usize,
+    /// The one-row fold query does not allocate these digits.
+    pub query_gadget_len: usize,
+
+    /// Number of key-switching and InspiRING packing gadget digits.
+    pub packing_gadget_len: usize,
 
     /// Advisory security target; serialized but not validated or dispatched on.
     pub security_level: SecurityLevel,
@@ -216,7 +218,7 @@ impl InspireParams {
     /// - `p`: 65537 (Fermat prime F4)
     /// - `sigma`: 6.4
     /// - `gadget_base`: 2^20
-    /// - `gadget_len`: 3
+    /// - `query_gadget_len` / `packing_gadget_len`: 3
     ///
     /// # Example
     ///
@@ -250,7 +252,8 @@ impl InspireParams {
             p: 65537, // Fermat prime F4, coprime with any power-of-2 ring dimension
             sigma: 6.4,
             gadget_base,
-            gadget_len,
+            query_gadget_len: gadget_len,
+            packing_gadget_len: gadget_len,
             security_level: SecurityLevel::Bits128,
         }
     }
@@ -272,7 +275,7 @@ impl InspireParams {
     /// - `p`: 65537 (Fermat prime F4)
     /// - `sigma`: 6.4
     /// - `gadget_base`: 2^20
-    /// - `gadget_len`: 3
+    /// - `query_gadget_len` / `packing_gadget_len`: 3
     ///
     /// # Example
     ///
@@ -299,7 +302,8 @@ impl InspireParams {
             p: 65537, // Fermat prime F4, coprime with any power-of-2 ring dimension
             sigma: 6.4,
             gadget_base,
-            gadget_len,
+            query_gadget_len: gadget_len,
+            packing_gadget_len: gadget_len,
             security_level: SecurityLevel::Bits128,
         }
     }
@@ -349,7 +353,7 @@ impl InspireParams {
     /// - `ring_dim` is a power of two
     /// - `q` is NTT-friendly: q ≡ 1 (mod 2d)
     /// - `q >= p` for valid scaling
-    /// - `gadget_base^gadget_len >= q`, so the gadget spans every residue
+    /// - both gadget lengths span every residue modulo `q`
     ///
     /// # Returns
     ///
@@ -361,7 +365,7 @@ impl InspireParams {
     /// - `"ring_dim must be a power of two"` if ring_dim is not a power of 2
     /// - `"q must be ≡ 1 (mod 2d) for NTT"` if q is not NTT-friendly
     /// - `"q must be >= p"` if q < p
-    /// - `"gadget_base^gadget_len must be >= q ..."` if the gadget is too narrow
+    /// - a role-specific gadget-width error if either gadget is too narrow
     ///
     /// # Example
     ///
@@ -430,16 +434,18 @@ impl InspireParams {
             );
         }
 
-        // `gadget_decompose` emits exactly `gadget_len` base-`gadget_base`
-        // digits and drops the rest, so a gadget narrower than q silently
-        // reconstructs `value mod gadget_base^gadget_len` instead of `value`.
         let covering_len =
             min_gadget_len(self.gadget_base, self.q).ok_or("gadget_base must be >= 2")?;
-        if self.gadget_len < covering_len {
+        if self.query_gadget_len < covering_len {
             return Err(
-                "gadget_base^gadget_len must be >= q; a narrower gadget drops the high \
-                 digits during key switching and decryption returns garbage. Raise \
-                 gadget_len (or gadget_base) until gadget_base^gadget_len >= q",
+                "gadget_base^query_gadget_len must be >= q; a narrower query gadget drops \
+                 high digits and returns wrong plaintext",
+            );
+        }
+        if self.packing_gadget_len < covering_len {
+            return Err(
+                "gadget_base^packing_gadget_len must be >= q; a narrower packing gadget drops \
+                 high digits and returns wrong plaintext",
             );
         }
 
@@ -849,7 +855,7 @@ impl InspireParams {
     ///
     /// All other derivation fields (poly_len, p=65537, sigma=6.4,
     /// gadget_base=2^19) come from the Google derivation unchanged.
-    /// `gadget_len` is re-derived as `ceil(log_z(q))` from the override:
+    /// Both gadget lengths are re-derived as `ceil(log_z(q))` from the override:
     /// the derivation's `t_exp_left = 3` covers only Google's ~2^53 q, and
     /// a gadget narrower than q makes every decoded byte wrong.
     ///
@@ -906,16 +912,18 @@ impl InspireParams {
             p: d.p,
             sigma: d.sigma_x,
             gadget_base: d.z,
-            gadget_len,
+            query_gadget_len: gadget_len,
+            packing_gadget_len: gadget_len,
             security_level: SecurityLevel::Bits128,
         };
         params.validate()?;
         Ok(params)
     }
 
-    /// Build an InspireParams from a pre-computed derivation. Exposed for
-    /// the audit-trail KAT path: tests can hold the `AdaptiveDerivation`
-    /// + the resulting `InspireParams` side-by-side and check every field.
+    /// Unchecked conversion for audit-trail KATs comparing a derivation with
+    /// its parameters. The sole in-tree caller, [`Self::for_scenario`], validates
+    /// the result immediately. Other callers must call [`Self::validate`]
+    /// before use; invalid derivations can also overflow the modulus product.
     pub fn from_derivation(d: &AdaptiveDerivation) -> Self {
         let q: u64 = d.custom_moduli.iter().product();
         Self {
@@ -925,7 +933,8 @@ impl InspireParams {
             p: d.p,
             sigma: d.sigma_x,
             gadget_base: d.z,
-            gadget_len: d.t_exp_left,
+            query_gadget_len: d.t_exp_left,
+            packing_gadget_len: d.t_exp_left,
             security_level: SecurityLevel::Bits128,
         }
     }

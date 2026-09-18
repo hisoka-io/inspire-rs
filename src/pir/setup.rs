@@ -23,7 +23,7 @@
 //! ```
 
 use super::error::{pir_err, Result};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::inspiring::{PackParams, PackingKeyBody};
 use crate::ks::{generate_automorphism_ks_matrix, KeySwitchingMatrix};
@@ -34,6 +34,30 @@ use crate::rgsw::GadgetVector;
 use crate::rlwe::RlweSecretKey;
 
 use super::encode_db::encode_database;
+
+fn deserialize_coefficient_galois_keys<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<KeySwitchingMatrix>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    let keys = Vec::<KeySwitchingMatrix>::deserialize(deserializer)?;
+    for (key_index, key) in keys.iter().enumerate() {
+        for (row_index, row) in key.rows.iter().enumerate() {
+            for (component, poly) in [("a", &row.a), ("b", &row.b)] {
+                if poly.is_ntt() {
+                    return Err(D::Error::custom(format!(
+                        "coefficient-domain CRS galois key[{key_index}] row[{row_index}] \
+                         {component} required; wire key declares NTT domain"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(keys)
+}
 
 /// Server Common Reference String containing public parameters.
 ///
@@ -50,6 +74,7 @@ pub struct ServerCrs {
     /// System parameters
     pub params: InspireParams,
     /// Galois keys for the automorphism-packing (OnePacking) variant.
+    #[serde(deserialize_with = "deserialize_coefficient_galois_keys")]
     pub galois_keys: Vec<KeySwitchingMatrix>,
     /// RGSW gadget vector parameters
     pub rgsw_gadget: GadgetVector,
@@ -83,7 +108,7 @@ impl ServerCrs {
     /// snapshot magic. A CRS is a persistent cryptographic artifact that can be
     /// decoded without HTTP metadata, so its prefix identifies both the artifact
     /// kind and the layout that requires re-bootstrap when changed.
-    pub const MAGIC: [u8; 16] = *b"RAVEN_CRS_v01\0\0\0";
+    pub const MAGIC: [u8; 16] = *b"RAVEN_CRS_v03\0\0\0";
 
     /// Reject a CRS body larger than this before decoding, so a malicious or stale
     /// (e.g. the pre-shrink ~35 MiB) blob cannot drive an unbounded bincode allocation.
@@ -106,7 +131,7 @@ impl ServerCrs {
     pub fn check_magic(bytes: &[u8]) -> Result<()> {
         if bytes.get(..Self::MAGIC.len()) != Some(Self::MAGIC.as_slice()) {
             return Err(pir_err!(
-                "ServerCrs version magic mismatch: expected a RAVEN_CRS_v01-prefixed blob; \
+                "ServerCrs version magic mismatch: expected a RAVEN_CRS_v03-prefixed blob; \
                  a CRS layout change requires the operator to re-bootstrap"
             ));
         }
@@ -237,7 +262,8 @@ pub fn setup_with_rng<R: rand::RngCore + rand::CryptoRng>(
 
     let rlwe_sk = RlweSecretKey::generate(params, sampler);
 
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+    let packing_gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
+    let query_gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, q);
 
     // Generate galois keys for tree packing automorphisms
     // For tree packing we need τ_t where t = d/2^i + 1 for i = 0..log_d
@@ -246,7 +272,8 @@ pub fn setup_with_rng<R: rand::RngCore + rand::CryptoRng>(
     let mut galois_keys = Vec::with_capacity(log_d);
     for i in 0..log_d {
         let t = (d >> i) + 1; // t = d/2^i + 1
-        let ks_matrix = generate_automorphism_ks_matrix(&rlwe_sk, t, &gadget, sampler, &ctx);
+        let ks_matrix =
+            generate_automorphism_ks_matrix(&rlwe_sk, t, &packing_gadget, sampler, &ctx);
         galois_keys.push(ks_matrix);
     }
 
@@ -284,7 +311,7 @@ pub fn setup_with_rng<R: rand::RngCore + rand::CryptoRng>(
     let crs = ServerCrs {
         params: params.clone(),
         galois_keys,
-        rgsw_gadget: gadget,
+        rgsw_gadget: query_gadget,
         inspiring_pack_params: Some(inspiring_pack_params),
         inspiring_packing_key: Some(inspiring_packing_key),
         inspiring_w_seed,
@@ -329,7 +356,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }

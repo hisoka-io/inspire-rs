@@ -184,7 +184,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -219,8 +220,10 @@ mod tests {
             .map(|_| random_lwe(&mut rng, &params))
             .collect();
 
-        let k_g = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
-        let k_h = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
+        let k_g =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
+        let k_h =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
 
         let result = pack(&lwe_cts, &k_g, &k_h, &params);
 
@@ -237,7 +240,8 @@ mod tests {
         let lwe_cts: Vec<LweCiphertext> =
             (0..gamma).map(|_| random_lwe(&mut rng, &params)).collect();
 
-        let k_g = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
+        let k_g =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
 
         let result = partial_pack(&lwe_cts, &k_g, &params);
 
@@ -258,8 +262,10 @@ mod tests {
             })
             .collect();
 
-        let k_g = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
-        let k_h = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
+        let k_g =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
+        let k_h =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
 
         let precomp = precompute_packing(&crs_a_vectors, &k_g, &k_h, &params);
         assert_eq!(precomp.num_ciphertexts(), n);
@@ -292,8 +298,10 @@ mod tests {
             assert_eq!(decrypted, expected, "LWE decryption failed");
         }
 
-        let k_g = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
-        let k_h = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
+        let k_g =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
+        let k_h =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
 
         let packed = pack(&lwe_cts, &k_g, &k_h, &params);
 
@@ -304,7 +312,8 @@ mod tests {
     #[test]
     fn test_empty_partial_pack() {
         let params = test_params();
-        let k_g = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
+        let k_g =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
 
         let result = partial_pack(&[], &k_g, &params);
 

@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn test_gadget_decompose_reconstruct_roundtrip() {
         let params = test_params();
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let poly = Poly::random_moduli(params.ring_dim, params.moduli());
 
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn test_gadget_decompose_small_digits() {
         let params = test_params();
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let poly = Poly::random_moduli(params.ring_dim, params.moduli());
         let decomposed = gadget_decompose(&poly, &gadget);
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn test_gadget_decompose_zero() {
         let params = test_params();
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let zero = Poly::zero_moduli(params.ring_dim, params.moduli());
         let decomposed = gadget_decompose(&zero, &gadget);
@@ -351,7 +351,7 @@ mod tests {
         let delta = params.delta();
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let msg_coeffs: Vec<u64> = (0..params.ring_dim)
             .map(|i| (i as u64) % params.p)
@@ -378,7 +378,7 @@ mod tests {
         let delta = params.delta();
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let msg_coeffs: Vec<u64> = (0..params.ring_dim)
             .map(|i| (i as u64) % params.p)
@@ -405,7 +405,7 @@ mod tests {
         let delta = params.delta();
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let msg_coeffs: Vec<u64> = (0..params.ring_dim).map(|i| (i as u64) % 10).collect();
         let msg = Poly::from_coeffs_moduli(msg_coeffs.clone(), params.moduli());
@@ -439,7 +439,7 @@ mod tests {
         let delta = params.delta();
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let mut msg_coeffs = vec![0u64; params.ring_dim];
         msg_coeffs[0] = 5;

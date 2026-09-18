@@ -188,10 +188,10 @@ mod tests {
         let sk1 = RlweSecretKey::generate(&params, &mut sampler);
         let sk2 = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
         let ks_matrix = generate_ks_matrix(&sk1, &sk2, &gadget, &mut sampler, &ctx);
 
-        assert_eq!(ks_matrix.rows.len(), params.gadget_len);
+        assert_eq!(ks_matrix.rows.len(), params.packing_gadget_len);
         assert_eq!(ks_matrix.ring_dim(), params.ring_dim);
         assert_eq!(ks_matrix.modulus(), params.q);
     }
@@ -206,7 +206,7 @@ mod tests {
         let sk1 = RlweSecretKey::generate(&params, &mut sampler);
         let sk2 = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
         let ks_matrix = generate_ks_matrix(&sk1, &sk2, &gadget, &mut sampler, &ctx);
 
         let powers = gadget.powers();
@@ -239,12 +239,12 @@ mod tests {
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, params.q);
 
         let auto_g = 3;
         let ks_matrix = generate_automorphism_ks_matrix(&sk, auto_g, &gadget, &mut sampler, &ctx);
 
-        assert_eq!(ks_matrix.rows.len(), params.gadget_len);
+        assert_eq!(ks_matrix.rows.len(), params.packing_gadget_len);
         let transformed = apply_automorphism(&sk.poly, auto_g);
         for (row, power) in ks_matrix.rows.iter().zip(gadget.powers()) {
             let decrypted = &row.a.mul_ntt(&sk.poly, &ctx) + &row.b;

@@ -58,7 +58,7 @@ fn for_scenario_bridges_to_inspire_params_byte_identical() {
     );
     assert_eq!(params.sigma.to_bits(), 6.4f64.to_bits());
     assert_eq!(params.gadget_base, 1u64 << 19);
-    assert_eq!(params.gadget_len, 3);
+    assert_eq!(params.packing_gadget_len, 3);
     assert_eq!(params.security_level, SecurityLevel::Bits128);
 
     params
@@ -74,7 +74,8 @@ fn for_scenario_bridges_to_inspire_params_byte_identical() {
     assert_eq!(params_32b.crt_moduli, params.crt_moduli);
     assert_eq!(params_32b.p, params.p);
     assert_eq!(params_32b.gadget_base, params.gadget_base);
-    assert_eq!(params_32b.gadget_len, params.gadget_len);
+    assert_eq!(params_32b.query_gadget_len, params.query_gadget_len);
+    assert_eq!(params_32b.packing_gadget_len, params.packing_gadget_len);
 }
 
 #[test]

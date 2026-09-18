@@ -242,7 +242,7 @@ fn key_switch_absorb(
 ) -> (Poly, Poly) {
     let d = params.ring_dim;
     let q = params.q;
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+    let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
     let decomposed = gadget_decompose(a_component, &gadget);
 
     let mut result_a = Poly::zero_moduli(d, params.moduli());
@@ -412,7 +412,8 @@ mod tests {
         let b_poly = random_poly(&mut rng, params.ring_dim, params.q, moduli);
         let ct = IntermediateCiphertext::new(a_polys, b_poly);
 
-        let k_g = KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.gadget_len);
+        let k_g =
+            KeySwitchingMatrix::dummy(params.ring_dim, params.moduli(), params.packing_gadget_len);
 
         let result = collapse_partial(gamma, &ct, &k_g, &params);
 

@@ -4,12 +4,12 @@
     clippy::print_stderr,
     reason = "research-test diagnostics and fixed experimental fixtures"
 )]
-//! Statistical regression oracle for same-shard RGSW query transcripts.
+//! Statistical regression oracle for same-shard shipping query transcripts.
 //!
 //! This is not an IND-CPA proof and makes no whole-query constant-time claim.
 //! Fixed public constants below implement a pre-registered protocol.
-//! It covers one fixed d=256 key, indices 0 and 255 in one shard, and seeded
-//! and unseeded RGSW bytes at the power demonstrated by a 25% one-byte leak.
+//! It covers one fixed d=256 session, indices 0 and 255 in one shard, and seeded
+//! and unseeded one-row fold bytes at the power demonstrated by a 25% one-byte leak.
 //! It excludes the clear shard id, packing keys and handles, adaptive queries,
 //! other parameters and indices, responses, OS entropy, arbitrary nonlinear
 //! distinguishers, and every timing, cache, or power channel. A pass neither
@@ -18,11 +18,9 @@
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use raven_inspire::inverse_monomial;
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::{InspireParams, SecurityLevel};
-use raven_inspire::rgsw::{GadgetVector, RgswCiphertext, SeededRgswCiphertext};
-use raven_inspire::rlwe::RlweSecretKey;
+use raven_inspire::{setup_with_rng, ClientSession};
 
 const TRAIN_PER_CLASS: usize = 256;
 const HELD_OUT_PER_CLASS: usize = 256;
@@ -69,8 +67,8 @@ enum QueryForm {
 impl QueryForm {
     const fn name(self) -> &'static str {
         match self {
-            Self::Unseeded => "unseeded RGSW index 0 vs 255",
-            Self::Seeded => "seeded RGSW index 0 vs 255",
+            Self::Unseeded => "unseeded fold row index 0 vs 255",
+            Self::Seeded => "seeded fold row index 0 vs 255",
         }
     }
 }
@@ -89,7 +87,8 @@ fn test_params() -> InspireParams {
         p: 65_536,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     }
 }
@@ -147,43 +146,44 @@ fn synthetic_control(partial_leak: bool) -> RawSplit {
 
 fn rgsw_samples(form: QueryForm, challenge: Challenge) -> RawSplit {
     let params = test_params();
-    let mut key_sampler = GaussianSampler::from_seed(params.sigma, KEY_SEED);
-    let secret_key = RlweSecretKey::generate(&params, &mut key_sampler);
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
-    let context = params.ntt_context();
+    let database = vec![0u8; params.ring_dim * 32];
+    let mut setup_sampler = GaussianSampler::from_seed(params.sigma, KEY_SEED);
+    let mut setup_rng = ChaCha20Rng::from_seed(KEY_SEED);
+    let (crs, encoded, secret_key) = setup_with_rng(
+        &params,
+        &database,
+        32,
+        &mut setup_sampler,
+        &mut setup_rng,
+    )
+    .expect("deterministic setup");
+    let mut session_sampler = GaussianSampler::from_seed(params.sigma, KEY_SEED);
+    let session = ClientSession::new(crs, secret_key, &mut session_sampler).expect("session");
 
     collect_raw(|right, entropy| {
         let local_index = match challenge {
             Challenge::EndpointIndices if right => params.ring_dim - 1,
             Challenge::Null | Challenge::EndpointIndices => 0,
         };
-        let message = inverse_monomial(local_index, params.ring_dim, params.q, params.moduli());
         let mut gaussian_seed = [0u8; 32];
-        let mut encryption_seed = [0u8; 32];
         entropy.fill_bytes(&mut gaussian_seed);
-        entropy.fill_bytes(&mut encryption_seed);
         let mut sampler = GaussianSampler::from_seed(params.sigma, gaussian_seed);
-        let mut rng = ChaCha20Rng::from_seed(encryption_seed);
 
         match form {
-            QueryForm::Unseeded => bincode::serialize(&RgswCiphertext::encrypt_with_rng(
-                &secret_key,
-                &message,
-                &gadget,
-                &mut sampler,
-                &context,
-                &mut rng,
-            ))
-            .expect("unseeded RGSW transcript serialization"),
-            QueryForm::Seeded => bincode::serialize(&SeededRgswCiphertext::encrypt_with_rng(
-                &secret_key,
-                &message,
-                &gadget,
-                &mut sampler,
-                &context,
-                &mut rng,
-            ))
-            .expect("seeded RGSW transcript serialization"),
+            QueryForm::Unseeded => {
+                let (_, query) = session
+                    .query(local_index as u64, &encoded.config, &mut sampler)
+                    .expect("unseeded shipping query");
+                bincode::serialize(&query.rgsw_ciphertext)
+                    .expect("unseeded fold-row serialization")
+            }
+            QueryForm::Seeded => {
+                let (_, query) = session
+                    .query_seeded(local_index as u64, &encoded.config, &mut sampler)
+                    .expect("seeded shipping query");
+                bincode::serialize(&query.rgsw_ciphertext)
+                    .expect("seeded fold-row serialization")
+            }
         }
     })
 }

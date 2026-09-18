@@ -217,7 +217,7 @@ impl PackParams {
             neg_monomials_ntt.push(neg_mono_ntt);
         }
 
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
 
         let automorph_tables = generate_automorph_tables(n, &moduli, &ctx);
 
@@ -1630,7 +1630,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -1737,7 +1738,7 @@ mod tests {
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, q);
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
 
         let g = 3;
         let k_g = generate_automorphism_ks_matrix(&sk, g, &gadget, &mut sampler, &ctx);

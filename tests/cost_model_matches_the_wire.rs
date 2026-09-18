@@ -1,21 +1,19 @@
 //! `cost.rs`'s communication estimate, tied to the bytes that actually cross
 //! the wire.
 //!
-//! `CostEstimator` is a coefficient-payload model: every polynomial is
-//! `ring_dim * crt_limbs * 8` bytes and serde framing is out of scope. That is
-//! a legitimate model, but nothing in the tree ever compared it to a real
-//! serialized query, and the packing-key term was wrong by a factor of
-//! `gamma / gadget_len` — `y_body` carries `gadget_len` polynomials, not
-//! `gamma` (`src/pir/session.rs` refuses a query whose
+//! `CostEstimator` is a tight coefficient-payload model: it charges the public
+//! modulus bit width and leaves serde framing out of scope. The original model
+//! was never compared to a real serialized query and also priced packing keys
+//! by `gamma` instead of `gadget_len`. `y_body` carries `gadget_len` polynomials,
+//! not `gamma` (`src/pir/session.rs` refuses a query whose
 //! `y_body.len() != pack_params.gadget.len`; `inspiring2.rs` builds it from
-//! `generate_ksk_body(.., &pack_params.gadget, ..)`). At the shipped
-//! `secure_128_d2048` cell that is 262,144 B claimed against 49,324 B on the
-//! wire, and 4,194,304 B against the same 49,324 B at a 512-byte record.
+//! `generate_ksk_body(.., &pack_params.gadget, ..)`). The shipped d=2048
+//! packing-key payload is 46,252 B on the tight wire.
 //!
 //! The framing constants below are DERIVED from the independently built closed
 //! form in `crates/client/tests/query_generation_budget.rs`, not fitted to a
 //! measurement here - a constant fitted to the thing it checks is a mirror
-//! oracle. Its L2 anchor is 49,445 B for a `secure_128_d2048` query with a
+//! oracle. Its tight one-row anchor is 15,491 B for a `secure_128_d2048` query with a
 //! session handle.
 
 #![allow(
@@ -39,13 +37,13 @@ const fn poly_framing(crt_limbs: usize) -> usize {
 
 /// `SeededClientQuery` framing: `shard_id` (4), the seeded RGSW container
 /// (`8` row-vector length + `24` trailer + `32` seed and one poly header per
-/// each of its `ell` rows), `packing_mode` (4), the inlined
+/// its one row), `packing_mode` (4), the inlined
 /// `ClientPackingKeys` (`Option` tag + `25` header + one poly header per each
 /// of its `ell` rows) and the empty `session_handle` (1).
-const fn seeded_query_framing(crt_limbs: usize, gadget_len: usize) -> usize {
-    4 + (8 + 24 + gadget_len * (32 + poly_framing(crt_limbs)))
+const fn seeded_query_framing(crt_limbs: usize, packing_gadget_len: usize) -> usize {
+    4 + (8 + 24 + 32 + poly_framing(crt_limbs))
         + 4
-        + (1 + 25 + gadget_len * poly_framing(crt_limbs))
+        + (1 + 25 + packing_gadget_len * poly_framing(crt_limbs))
         + 1
 }
 
@@ -56,16 +54,18 @@ const fn response_framing(crt_limbs: usize) -> usize {
 }
 
 /// Full `a` plus the plaintext-bearing prefix of `b`.
+const fn tight_payload_bytes(coefficients: usize) -> usize {
+    (coefficients * 60).div_ceil(8)
+}
+
 const fn packed_response_payload(ring_dim: usize, gamma: usize, crt_limbs: usize) -> u64 {
-    ((ring_dim + gamma) * crt_limbs * 8) as u64
+    (tight_payload_bytes(ring_dim * crt_limbs) + tight_payload_bytes(gamma * crt_limbs)) as u64
 }
 
 /// `query_generation_budget.rs::query_bytes_with_inlined_keys(2048, 1, 3)`.
-/// The inlined compatibility form is 49,445 B of seeded handle query plus
-/// 49,324 B of packing keys, less the absent 8-byte handle.
-const INLINED_QUERY_WIRE_BYTES: usize = 98_761;
+const INLINED_QUERY_WIRE_BYTES: usize = 61_735;
 /// The same closed form's response prediction at the shipped cell.
-const SHIPPED_RESPONSE_WIRE_BYTES: usize = 16_590;
+const SHIPPED_RESPONSE_WIRE_BYTES: usize = 15_558;
 
 fn small_params() -> InspireParams {
     InspireParams {
@@ -75,7 +75,8 @@ fn small_params() -> InspireParams {
         p: 65_537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     }
 }
@@ -120,7 +121,7 @@ fn measure(params: &InspireParams, entry_size: usize) -> Measured {
     let keys = seeded_query.inspiring_packing_keys.as_ref().unwrap();
     assert_eq!(
         keys.y_body.len(),
-        params.gadget_len,
+        params.packing_gadget_len,
         "y_body carries one polynomial per gadget digit - this is the row count \
          cost.rs must use, and the reason the gamma form was wrong"
     );
@@ -190,7 +191,8 @@ fn cost_model_query_bytes_match_the_wire() {
             k,
         ))
         .expect("communication.bytes must at least cover one packed RLWE response");
-    let predicted_wire = modeled_query as usize + seeded_query_framing(k, params.gadget_len);
+    let predicted_wire =
+        modeled_query as usize + seeded_query_framing(k, params.packing_gadget_len);
 
     assert_eq!(
         predicted_wire,
@@ -198,9 +200,9 @@ fn cost_model_query_bytes_match_the_wire() {
         "cost.rs prices this query at {modeled_query} payload bytes (+{} framing) = \
          {predicted_wire} B, but the wire carries {} B. y_body has gadget_len ({}) \
          polynomials, not gamma.",
-        seeded_query_framing(k, params.gadget_len),
+        seeded_query_framing(k, params.packing_gadget_len),
         m.query_wire,
-        params.gadget_len
+        params.packing_gadget_len
     );
 }
 
@@ -215,7 +217,7 @@ fn cost_model_total_matches_the_inlined_2048_cell() {
         k, 1,
         "the client-side closed form is anchored at one CRT limb"
     );
-    assert_eq!(params.gadget_len, 3, "and at gadget_len 3");
+    assert_eq!(params.packing_gadget_len, 3, "and at gadget_len 3");
     assert_eq!(params.ring_dim, 2048, "and at ring_dim 2048");
 
     let estimated = CostEstimator::new(&params, InspireVariant::TwoPacking, 32)
@@ -223,15 +225,16 @@ fn cost_model_total_matches_the_inlined_2048_cell() {
         .communication
         .bytes;
 
-    let predicted =
-        estimated as usize + seeded_query_framing(k, params.gadget_len) + response_framing(k);
+    let predicted = estimated as usize
+        + seeded_query_framing(k, params.packing_gadget_len)
+        + response_framing(k);
 
     assert_eq!(
         predicted,
         INLINED_QUERY_WIRE_BYTES + SHIPPED_RESPONSE_WIRE_BYTES,
         "cost.rs totals {estimated} payload bytes for the inlined form at the shipped cell, which framed is \
          {predicted} B against the {} B the independently derived client model predicts. \
-         The 49,445 B registered-query anchor and 49,324 B packing-key payload are exact; a disagreement is the \
+         The 15,491 B registered-query anchor and 46,252 B packing-key payload are exact; a disagreement is the \
          estimator's.",
         INLINED_QUERY_WIRE_BYTES + SHIPPED_RESPONSE_WIRE_BYTES
     );
@@ -249,13 +252,14 @@ fn two_packing_communication_tracks_the_retained_response_prefix() {
     };
 
     let baseline = at(32);
-    let baseline_gamma = raven_inspire::num_columns(32) as u64;
-    let limbs = params.crt_moduli.len() as u64;
+    let baseline_gamma = raven_inspire::num_columns(32);
+    let limbs = params.crt_moduli.len();
     for entry_size in [2usize, 8, 64, 128, 512] {
-        let gamma = raven_inspire::num_columns(entry_size) as u64;
+        let gamma = raven_inspire::num_columns(entry_size);
         assert_eq!(
             at(entry_size),
-            baseline - baseline_gamma * limbs * 8 + gamma * limbs * 8,
+            baseline - tight_payload_bytes(baseline_gamma * limbs) as u64
+                + tight_payload_bytes(gamma * limbs) as u64,
             "only the retained b prefix may move with record width {entry_size}"
         );
     }

@@ -31,7 +31,6 @@ fn seeded_query_with_gadget(
     shard_config: &ShardConfig,
     rlwe_sk: &RlweSecretKey,
     sampler: &mut GaussianSampler,
-    gadget: &GadgetVector,
 ) -> Result<(ClientState, SeededClientQuery)> {
     ensure_inspiring_query_width(crs)?;
     ensure_query_shard_geometry(crs, shard_config)?;
@@ -44,7 +43,10 @@ fn seeded_query_with_gadget(
     let lwe_sk = LweSecretKey::from_rlwe(rlwe_sk);
 
     let inv_mono = inverse_monomial(local_index as usize, d, q, crs.params.moduli());
-    let rgsw_ciphertext = SeededRgswCiphertext::encrypt(rlwe_sk, &inv_mono, gadget, sampler, &ctx);
+    let scaled_monomial = inv_mono.scalar_mul(crs.params.delta());
+    let one_row = GadgetVector::new(crs.params.gadget_base, 1, q);
+    let rgsw_ciphertext =
+        SeededRgswCiphertext::encrypt(rlwe_sk, &scaled_monomial, &one_row, sampler, &ctx);
 
     let state = ClientState {
         secret_key: lwe_sk,
@@ -102,7 +104,7 @@ pub struct ServerSessionHandle(pub u64);
 pub struct ClientQuery {
     /// Target shard, unencrypted.
     pub shard_id: u32,
-    /// RGSW-encrypted inverse monomial.
+    /// One-row encrypted scaled inverse monomial.
     pub rgsw_ciphertext: RgswCiphertext,
     /// Packing algorithm the server should use.
     #[serde(default)]
@@ -121,7 +123,7 @@ pub struct ClientQuery {
 pub struct SeededClientQuery {
     /// Target shard, unencrypted.
     pub shard_id: u32,
-    /// Seeds standing in for the RGSW `a` polynomials.
+    /// Seeded one-row encrypted scaled inverse monomial.
     pub rgsw_ciphertext: SeededRgswCiphertext,
     /// Packing algorithm the server should use.
     #[serde(default)]
@@ -206,8 +208,10 @@ pub fn query(
     let lwe_sk = LweSecretKey::from_rlwe(rlwe_sk);
 
     let inv_mono = inverse_monomial(local_index as usize, d, q, crs.params.moduli());
+    let scaled_monomial = inv_mono.scalar_mul(crs.params.delta());
+    let one_row = GadgetVector::new(crs.params.gadget_base, 1, q);
     let rgsw_ciphertext =
-        RgswCiphertext::encrypt(rlwe_sk, &inv_mono, &crs.rgsw_gadget, sampler, &ctx);
+        RgswCiphertext::encrypt(rlwe_sk, &scaled_monomial, &one_row, sampler, &ctx);
 
     let state = ClientState {
         secret_key: lwe_sk,
@@ -238,14 +242,7 @@ pub fn query_seeded(
     rlwe_sk: &RlweSecretKey,
     sampler: &mut GaussianSampler,
 ) -> Result<(ClientState, SeededClientQuery)> {
-    seeded_query_with_gadget(
-        crs,
-        global_index,
-        shard_config,
-        rlwe_sk,
-        sampler,
-        &crs.rgsw_gadget,
-    )
+    seeded_query_with_gadget(crs, global_index, shard_config, rlwe_sk, sampler)
 }
 
 #[cfg(test)]
@@ -261,7 +258,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -332,7 +330,8 @@ mod tests {
             p: 65536,
             sigma: 6.4,
             gadget_base: 1 << 20,
-            gadget_len: 3,
+            query_gadget_len: 3,
+            packing_gadget_len: 3,
             security_level: crate::params::SecurityLevel::Bits128,
         };
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
@@ -370,7 +369,7 @@ mod tests {
 
         println!(
             "\n=== Query Size Comparison (d={}, l_full={}) ===",
-            params.ring_dim, params.gadget_len
+            params.ring_dim, params.query_gadget_len
         );
         println!(
             "Full query:     {:>8} bytes ({:.1} KB)",

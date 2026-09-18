@@ -34,7 +34,8 @@ fn params() -> InspireParams {
         p: 65_537,
         sigma: 6.4,
         gadget_base: 1 << 20,
-        gadget_len: 3,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
         security_level: SecurityLevel::Bits128,
     }
 }
@@ -235,7 +236,7 @@ fn production_gamma_128_wire_bytes_are_exact() {
     let response = respond_seeded_inspiring(&crs, &encoded, &query).expect("production response");
     assert_eq!(response.packed_coefficients, Some(128));
     let compact = response.to_binary().expect("production compact encode");
-    assert_eq!(compact.len(), 17_486);
+    assert_eq!(compact.len(), 16_398);
     let decoded = raven_inspire::ServerResponse::from_binary(&compact).expect("production decode");
     assert_eq!(
         extract_inspiring(&crs, &state, &decoded, ENTRY_SIZE).expect("production extract"),
@@ -247,11 +248,42 @@ fn production_gamma_128_wire_bytes_are_exact() {
     let mut full = response;
     full.packed_coefficients = Some(params.ring_dim as u32);
     let full_bytes = full.to_binary().expect("production full control");
-    assert_eq!(full_bytes.len(), 32_846);
+    assert_eq!(full_bytes.len(), 30_798);
     let full = raven_inspire::ServerResponse::from_binary(&full_bytes).expect("full decode");
     let error = extract_inspiring(&crs, &state, &full, ENTRY_SIZE)
         .expect_err("surplus packed coefficients must be refused");
     assert!(error.to_string().contains("packed coefficient"), "{error}");
+}
+
+#[test]
+fn production_gamma_256_tight_wire_saves_exactly_1152_bytes() {
+    let params = InspireParams::secure_128_d2048();
+    let coefficients = |offset: u64| {
+        (0..params.ring_dim)
+            .map(|index| (offset + index as u64 * 17) % params.q)
+            .collect()
+    };
+    let response = raven_inspire::ServerResponse {
+        ciphertext: raven_inspire::rlwe::RlweCiphertext::from_parts(
+            raven_inspire::math::Poly::from_coeffs(coefficients(3), params.q),
+            raven_inspire::math::Poly::from_coeffs(coefficients(11), params.q),
+        ),
+        column_ciphertexts: Vec::new(),
+        packing_mode: Some(raven_inspire::PackingMode::Inspiring),
+        packed_coefficients: Some(256),
+    };
+    let wire = response.to_binary().expect("tight production response");
+    assert_eq!(wire.len(), 17_358);
+    assert_eq!(18_510 - wire.len(), 1_152);
+    let decoded = raven_inspire::ServerResponse::from_binary(&wire).expect("tight decode");
+    assert_eq!(
+        decoded.ciphertext.a.coeffs(),
+        response.ciphertext.a.coeffs()
+    );
+    assert_eq!(
+        decoded.ciphertext.b.coeffs().get(..256),
+        response.ciphertext.b.coeffs().get(..256)
+    );
 }
 
 proptest! {

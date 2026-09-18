@@ -17,7 +17,7 @@ fn seeded_rgsw_uses_one_row_per_gadget_digit_and_exact_wire_bytes() {
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0x1204);
     let secret_key = RlweSecretKey::generate(&params, &mut sampler);
     let message = Poly::constant_moduli(1, params.ring_dim, params.moduli());
-    let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+    let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
     let mut row_rng = ChaCha20Rng::seed_from_u64(0x1205);
 
     let seeded = SeededRgswCiphertext::encrypt_with_rng(
@@ -29,12 +29,9 @@ fn seeded_rgsw_uses_one_row_per_gadget_digit_and_exact_wire_bytes() {
         &mut row_rng,
     );
 
-    assert_eq!(seeded.rows.len(), params.gadget_len);
-    assert_eq!(seeded.expand().rows.len(), params.gadget_len);
-    assert_eq!(
-        bincode::serialize(&seeded)
-            .expect("serialize seeded RGSW")
-            .len(),
-        49_427
-    );
+    assert_eq!(seeded.rows.len(), params.query_gadget_len);
+    assert_eq!(seeded.expand().rows.len(), params.query_gadget_len);
+    let tight = bincode::serialize(&seeded).expect("serialize seeded RGSW");
+    assert_eq!(tight.len(), 46_355);
+    assert_eq!(49_427 - tight.len(), 3_072);
 }

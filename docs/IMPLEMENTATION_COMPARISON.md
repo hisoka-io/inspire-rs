@@ -68,7 +68,7 @@ lib.rs
 - InsPIRe^1: `respond_one_packing()` - tree-packed response (uses `automorph_pack`)
 - InsPIRe^2: `query_seeded()` + `respond_seeded_packed()` - seeded + packed
 
-**Production recommendation**: use InsPIRe^2 (seeded + packed / TwoPacking) without modulus switching.
+**Production recommendation**: use the enabled InsPIRe^2 seeded-query and bincode packed-response path. The default-off RIMS v2 response codec is not wired into an adapter transport.
 
 ---
 
@@ -267,7 +267,7 @@ Based on this comparison, potential future enhancements:
 5. **SimplePIR variant** - For comparison/simpler use cases
 
 Note: Seed expansion was implemented in December 2024, achieving 50% query size reduction (192 KB -> 98 KB).
-The prior modulus-switching experiment was removed because it exceeded the noise budget with default parameters.
+The prior modulus-switching query experiment was removed. A checked 45-bit RIMS v2 response codec now exists behind a default-off feature; its 33-bit target fails the conservative noise gate, and no adapter transport calls either target.
 
 ---
 

@@ -373,11 +373,11 @@ mod tests {
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let rgsw = RgswCiphertext::encrypt_scalar(&sk, 1, &gadget, &mut sampler, &ctx);
 
-        assert_eq!(rgsw.rows.len(), params.gadget_len);
+        assert_eq!(rgsw.rows.len(), params.query_gadget_len);
         assert_eq!(rgsw.ring_dim(), params.ring_dim);
         assert_eq!(rgsw.modulus(), params.q);
     }
@@ -389,7 +389,7 @@ mod tests {
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 
         let sk = RlweSecretKey::generate(&params, &mut sampler);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let rgsw = RgswCiphertext::encrypt_scalar(&sk, 0, &gadget, &mut sampler, &ctx);
 
@@ -403,7 +403,7 @@ mod tests {
 
         let params = test_params();
         let ctx = make_ctx(&params);
-        let gadget = GadgetVector::new(params.gadget_base, params.gadget_len, params.q);
+        let gadget = GadgetVector::new(params.gadget_base, params.query_gadget_len, params.q);
 
         let run_once = |sampler_seed: u64, rng_seed: u64| -> Vec<[u8; 32]> {
             let mut sampler = GaussianSampler::with_seed(params.sigma, sampler_seed);
