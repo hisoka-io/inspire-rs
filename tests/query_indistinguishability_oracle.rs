@@ -149,14 +149,9 @@ fn rgsw_samples(form: QueryForm, challenge: Challenge) -> RawSplit {
     let database = vec![0u8; params.ring_dim * 32];
     let mut setup_sampler = GaussianSampler::from_seed(params.sigma, KEY_SEED);
     let mut setup_rng = ChaCha20Rng::from_seed(KEY_SEED);
-    let (crs, encoded, secret_key) = setup_with_rng(
-        &params,
-        &database,
-        32,
-        &mut setup_sampler,
-        &mut setup_rng,
-    )
-    .expect("deterministic setup");
+    let (crs, encoded, secret_key) =
+        setup_with_rng(&params, &database, 32, &mut setup_sampler, &mut setup_rng)
+            .expect("deterministic setup");
     let mut session_sampler = GaussianSampler::from_seed(params.sigma, KEY_SEED);
     let session = ClientSession::new(crs, secret_key, &mut session_sampler).expect("session");
 
@@ -174,15 +169,13 @@ fn rgsw_samples(form: QueryForm, challenge: Challenge) -> RawSplit {
                 let (_, query) = session
                     .query(local_index as u64, &encoded.config, &mut sampler)
                     .expect("unseeded shipping query");
-                bincode::serialize(&query.rgsw_ciphertext)
-                    .expect("unseeded fold-row serialization")
+                bincode::serialize(&query.rgsw_ciphertext).expect("unseeded fold-row serialization")
             }
             QueryForm::Seeded => {
                 let (_, query) = session
                     .query_seeded(local_index as u64, &encoded.config, &mut sampler)
                     .expect("seeded shipping query");
-                bincode::serialize(&query.rgsw_ciphertext)
-                    .expect("seeded fold-row serialization")
+                bincode::serialize(&query.rgsw_ciphertext).expect("seeded fold-row serialization")
             }
         }
     })
