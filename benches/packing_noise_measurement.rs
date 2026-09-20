@@ -1,4 +1,12 @@
-//! Empirical packed-response noise at the two production record widths.
+//! Empirical packed-response noise at the two production record widths, gated against the
+//! decode boundary.
+//!
+//! `get_variance` models Spiral-family LWE and gadget noise and does **not** model the noise
+//! InspiRING 2-matrix packing adds (root `SECURITY.md`, item G6). The failure mode is silent:
+//! once the packed noise crosses `Delta/2` a coefficient decodes to the wrong plaintext and
+//! nothing errors. This file is the empirical bound that disclosure needs — it measures
+//! `||e_pack||_inf` on the shipped respond path at both production widths and now ASSERTS the
+//! margin instead of printing a distribution nobody reads.
 
 #![allow(clippy::expect_used, clippy::print_stderr)]
 
@@ -83,6 +91,21 @@ fn packing_noise_distribution() {
         let sum: u128 = maxima.iter().map(|value| u128::from(*value)).sum();
         let minimum = maxima.first().copied().expect("at least one sample");
         let maximum = maxima.last().copied().expect("at least one sample");
+
+        // THE BOUND. A coefficient decodes correctly iff its noise magnitude stays under
+        // `Delta/2 = q/(2p)`; at or past it the value rounds to a neighbouring plaintext and
+        // is returned with no error. Assert the worst sample, not the mean — the mean says
+        // nothing about the sample that scrambles a row.
+        let params = InspireParams::secure_128_d2048();
+        let boundary = params.delta() / 2;
+        let margin_bits = (boundary as f64 / maximum.max(1) as f64).log2();
+        assert!(
+            maximum < boundary,
+            "packed noise reached {maximum} against a decode boundary of {boundary} \
+             (Delta/2 = q/2p) at gamma {}: a response at this width decodes to the WRONG \
+             plaintext with no error raised. Widen q before shipping this cell.",
+            raven_inspire::num_columns(entry_size)
+        );
         eprintln!(
             "{{\"gamma\":{},\"samples\":{},\"min\":{},\"p05\":{},\"p25\":{},\"median\":{},\"p75\":{},\"p95\":{},\"max\":{},\"mean\":{:.3},\"elapsed_seconds\":{:.3}}}",
             raven_inspire::num_columns(entry_size),
@@ -96,6 +119,13 @@ fn packing_noise_distribution() {
             maximum,
             sum as f64 / samples as f64,
             started.elapsed().as_secs_f64(),
+        );
+        eprintln!(
+            "{{\"gamma\":{},\"decode_boundary\":{},\"worst_sample\":{},\"margin_bits\":{:.3}}}",
+            raven_inspire::num_columns(entry_size),
+            boundary,
+            maximum,
+            margin_bits,
         );
     }
 }

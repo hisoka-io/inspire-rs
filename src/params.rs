@@ -758,6 +758,16 @@ impl InspireParams {
     /// InspiRING-specific noise term crosses the `delta = floor(q/p)`
     /// scaling boundary.
     ///
+    /// **Measured 2026-09-20**, 1,000 responses per width on the shipped respond
+    /// path (`benches/packing_noise_measurement.rs`), against the decode boundary
+    /// `Delta/2 = q/(2p)` = 8,795,958,806,527: **11.225 bits** of margin at
+    /// gamma 16 (32 B records) and **9.245 bits** at gamma 256 (512 B records).
+    /// The bench asserts the worst sample, so an erosion fails there rather than
+    /// scrambling a response in production. That is an empirical margin on the
+    /// sampled path, **not** an analytic bound and not a tail bound - this
+    /// function's own ~0.093-bit slack figure stays unreliable as a predictor
+    /// because the term is still unmodelled. Root `SECURITY.md`, item G6.
+    ///
     /// Use [`for_scenario_with_crt`](Self::for_scenario_with_crt) with a
     /// wider 2-CRT pair (typically 2 x 30-bit primes, q ~= 2^60) for the
     /// empirically-correctness-safe shape that matches `DEFAULT_Q`'s
