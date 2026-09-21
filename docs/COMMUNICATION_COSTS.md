@@ -14,17 +14,22 @@ Current exact binary sizes at the 512-byte production record width:
 |-----------|------:|-------|
 | First query | 61,735 | One seeded fold row plus inline packing keys |
 | Registered query | 15,491 | One seeded fold row plus session handle |
-| Current tight response | 17,358 | Packed response with lossless 60-bit coefficients |
-| Architecture served response | 17,518 | Current response plus the reserved 160-byte sibling addendum |
-| Architecture registered round trip | **33,009** | Warm query plus served response |
+| Served response | 10,446 | Packed response mod-switched to 36-bit coefficients; an adapter's 2-byte schema prefix makes 10,448 on the wire |
+| Served response with sibling addendum | 10,606 | Served response plus the 160-byte sibling addendum a batch slot carries |
+| Registered round trip | **26,097** | Warm query plus served response plus addendum |
 
 The pre-W4 implementation used a three-row seeded query of 49,445 bytes and an
-18,510-byte packed response. Older 96/192/544 KB figures described unoptimized
-RGSW and no-packing shapes; they are historical and are not current wire sizes.
+18,510-byte packed response. Unswitched, at the 60-bit source modulus, the
+response is 17,358 bytes (17,518 with the addendum, 33,009 per round trip). Older
+96/192/544 KB figures described unoptimized RGSW and no-packing shapes; they are
+historical and are not current wire sizes.
 
-The live TwoPacking path combines the columns into one RLWE response and packs
-each canonical coefficient at the modulus's exact 60-bit width. The smaller RIMS v2 codec is tested behind the default-off
-`mod-switch-response` feature but is not wired into the adapter transport.
+The served TwoPacking path combines the columns into one RLWE response, mod-switches
+it to `MOD_SWITCH_TARGET_36BIT` and packs each canonical coefficient at the switched
+modulus's exact 36-bit width. The switch sits behind the `mod-switch-response`
+feature, default-off in this crate and enabled by the adapter and client workspaces.
+The byte-aligned RIMS codec is not on the wire: it is 11,543 bytes at 36 bits, 1,097
+more than the tight serializer.
 
 ## CRS (Common Reference String) Overhead
 
@@ -107,30 +112,36 @@ chosen by fixed parameters.
 
 ### Response Size Formula
 
-The current tight response stores the full `a` polynomial and the
-plaintext-bearing prefix of `b` at the exact modulus width:
+The served response is mod-switched to a 36-bit modulus and stores the full `a`
+polynomial and the plaintext-bearing prefix of `b` at the exact switched width:
 
 ```
-Current bytes = ceil(d * 60 / 8) + ceil(gamma * 60 / 8) + 78
-              = 15,360 + 1,920 + 78
-              = 17,358 at d = 2048 and gamma = 256
+Served bytes = ceil(d * 36 / 8) + ceil(gamma * 36 / 8) + 78
+             = 9,216 + 1,152 + 78
+             = 10,446 at d = 2048 and gamma = 256
+
+Unswitched, at the 60-bit source modulus, the same layout is
+               ceil(d * 60 / 8) + ceil(gamma * 60 / 8) + 78
+             = 15,360 + 1,920 + 78
+             = 17,358
 ```
 
-The default-off RIMS v2 target switches to 45 bits and stores each coefficient
-in six whole bytes:
+The RIMS codec (`encode_response_packed`) is byte-aligned and stores each
+coefficient in whole bytes:
 
 ```
-RIMS v2 bytes = 23-byte header + (d + gamma) * ceil(45 / 8)
+RIMS bytes = 23-byte header + (d + gamma) * ceil(bits / 8)
 
 Where:
   d = ring dimension (2048)
   gamma = ceil(entry_size / 2), 256 for a 512-byte record
-  45 = checked modulus-switch target bits
+  bits = modulus-switch target width
 
-The feature-gated codec emits 23 + (2048 + 256) * 6 = 13,847 bytes. The
-architecture's separate 160-byte sibling addendum raises the target served
-response to 14,007 bytes; that addendum is not part of the RIMS codec. Until
-the adapter wires this codec, the current tight response is 17,358 bytes.
+At the 45-bit target it emits 23 + (2048 + 256) * 6 = 13,847 bytes; at the served
+36-bit target, 23 + (2048 + 256) * 5 = 11,543 bytes. It is not on the wire: the
+tight serializer above is 1,097 bytes smaller at 36 bits. The separate 160-byte
+sibling addendum is appended per batch slot and is part of neither codec; it
+raises the served response to 10,606 bytes.
 ```
 
 **What affects response size:**
@@ -151,10 +162,10 @@ the adapter wires this codec, the current tight response is 17,358 bytes.
 
 | Database Size | Shards | Registered Query | 512 B Response | Server Time |
 |---------------|--------|---------------------|---------------|-------------|
-| 1K entries | 1 | 15,491 B | 17,358 B | ~1 ms |
-| 64K entries | 32 | 15,491 B | 17,358 B | ~1.5 ms |
-| 1M entries | 512 | 15,491 B | 17,358 B | ~3 ms |
-| 100M entries | 50K | 15,491 B | 17,358 B | ~3 ms |
+| 1K entries | 1 | 15,491 B | 10,446 B | ~1 ms |
+| 64K entries | 32 | 15,491 B | 10,446 B | ~1.5 ms |
+| 1M entries | 512 | 15,491 B | 10,446 B | ~3 ms |
+| 100M entries | 50K | 15,491 B | 10,446 B | ~3 ms |
 
 **The only thing that changes is server computation time** (selecting and processing the correct shard).
 
@@ -172,11 +183,11 @@ the adapter wires this codec, the current tight response is 17,358 bytes.
 │  │  └── Structure fixed by d, not by k or DB size         │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
-│  CURRENT TIGHT RESPONSE (17,358 B at 512-byte record width)     │
+│  SERVED RESPONSE (10,446 B at 512-byte record width)            │
 │  ┌─────────────────────────────────────────────────────────┐   │
 │  │  Packed ServerResponse                                   │   │
 │  │  ├── full a polynomial + 256-coefficient b prefix       │   │
-│  │  ├── lossless 60-bit coefficients                       │   │
+│  │  ├── 36-bit mod-switched coefficients                   │   │
 │  │  └── Structure fixed by (d, entry_size), not DB size   │   │
 │  └─────────────────────────────────────────────────────────┘   │
 │                                                                 │
@@ -223,11 +234,40 @@ wire or capacity-planning numbers.
 
 ## Modulus Switching Status
 
-The default-off RIMS v2 codec applies a checked 45-bit modulus switch and
-prefix truncation to packed responses. Its production-cell regression runs the
-real respond, switch, encode, decode, and extract path and pins 13,847 codec bytes.
-It is not wired into the adapter transport. The exported 33-bit target remains
-rejected by the conservative noise gate.
+Every served response is mod-switched to `MOD_SWITCH_TARGET_36BIT =
+68_718_428_161 = 2^36 - 2^20 + 1` before it is serialized, and the client
+extracts through the mod-switched path. The feature `mod-switch-response` is
+default-off in this crate and enabled by the adapter and client workspaces.
+
+The target is a prime, `== 1 (mod 4096)` and `== 33 (mod 65537)`, chosen for the
+small residue `q' mod p` rather than for size. Decryption divides by
+`floor(q'/p)` while the switched coefficient carries `m * q'/p`, so `q' mod p`
+is a deterministic per-coefficient offset, which the noise gate charges in full.
+The gate's ratio alone is identical for two primes of one bit width: a seeded KAT
+pins error 652 at this prime and 53,503 at the largest 36-bit NTT prime (residue
+53,266).
+
+`served_post_switch_noise_distribution` in `benches/packing_noise_measurement.rs`
+(`--release --features mod-switch-response -- --ignored`) measures the decode
+margin on the switched response after the response serializer, 1,000 samples per
+width across 40 sessions. Worst error against a decode boundary of 524,272: 1,113
+at 512-byte rows (gamma = 256), 8.88 bits of margin; 417 at 32-byte rows
+(gamma = 16), 10.30 bits. A session's packing key puts a fixed offset on every
+response of that session, so a margin taken inside one session reads a few tenths
+of a bit high.
+
+The modulus arrives off the wire. `extract_inspiring_mod_switched` refuses, before
+deriving anything from it, any response modulus that is neither the CRS's own
+limbs (unswitched) nor an implemented target (45-bit, 36-bit), so serving a
+different rung is a client change as well as a server one.
+
+The production-cell regression
+`production_36bit_switched_response_round_trips_through_bincode` runs the real
+respond, switch, serialize, deserialize, and extract path and pins 10,446
+serialized bytes against 11,543 for the byte-aligned RIMS codec, which is why
+RIMS is not on the wire. The 45-bit RIMS regression still pins 13,847 codec
+bytes. The exported 33-bit target remains unwired; it fails the conservative
+noise gate at 0.833x.
 
 ## Why Generic Compression Won't Help
 
@@ -296,11 +336,11 @@ Actual payload needed: 96 + 13×32 = **512 bytes**
 |--------------------------------------|------:|
 | First query with inline packing keys | 61,735 |
 | Registered query | 15,491 |
-| Current tight response | 17,358 |
-| Architecture served response with reserved addendum | 17,518 |
-| Architecture registered round trip | 33,009 |
-| Default-off, unwired RIMS v2 codec target | 13,847 |
-| RIMS served target with reserved addendum | 14,007 |
+| Served response, mod-switched to 36 bits | 10,446 |
+| Served response with the 160-byte sibling addendum | 10,606 |
+| Registered round trip | 26,097 |
+| RIMS codec at 36 bits, not on the wire | 11,543 |
+| RIMS codec at 45 bits, not on the wire | 13,847 |
 
 These sizes are constant with respect to the target index and database size.
 The cleartext shard id limits query anonymity to one shard; communication-size

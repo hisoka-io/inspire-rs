@@ -395,6 +395,26 @@ fn require_shard_width(operation: &'static str, crs: &ServerCrs, shard: &ShardDa
     Ok(())
 }
 
+/// The rows a query addresses are the rows the encoder placed only when a shard holds
+/// exactly `ring_dim` of them; the same rule the client and the encoder enforce.
+fn require_shard_geometry(
+    operation: &'static str,
+    crs: &ServerCrs,
+    encoded_db: &EncodedDatabase,
+) -> Result<()> {
+    encoded_db
+        .config
+        .validate_for_params(&crs.params)
+        .map_err(|cause| {
+            pir_err!(
+                "{operation}: encoded database declares {} rows per shard at ring_dim {}; \
+                 refusing to serve rows the client did not address: {cause}",
+                encoded_db.config.entries_per_shard(),
+                crs.params.ring_dim,
+            )
+        })
+}
+
 fn require_dense_shard<'a>(
     operation: &'static str,
     encoded_db: &'a EncodedDatabase,
@@ -560,6 +580,7 @@ pub fn respond(
     require_crs_rgsw_gadget("respond", crs, query)?;
     let ctx = crs.params.ntt_context();
 
+    require_shard_geometry("respond", crs, encoded_db)?;
     let shard = require_dense_shard("respond", encoded_db, query.shard_id)?;
     require_shard_width("respond", crs, shard)?;
 
@@ -645,6 +666,7 @@ pub fn respond_one_packing(
     let _q = crs.modulus();
     let ctx = crs.params.ntt_context();
 
+    require_shard_geometry("respond_one_packing", crs, encoded_db)?;
     let shard = require_dense_shard("respond_one_packing", encoded_db, query.shard_id)?;
     require_shard_width("respond_one_packing", crs, shard)?;
 
@@ -687,6 +709,7 @@ pub fn respond_inspiring(
         .as_ref()
         .ok_or_else(|| pir_err!("InspiRING client packing keys missing from query"))?;
 
+    require_shard_geometry("respond_inspiring", crs, encoded_db)?;
     let shard = require_dense_shard("respond_inspiring", encoded_db, query.shard_id)?;
     require_shard_width("respond_inspiring", crs, shard)?;
 
@@ -918,6 +941,7 @@ pub fn respond_inspiring_cached(
         .as_ref()
         .ok_or_else(|| pir_err!("InspiRING client packing keys missing from query"))?;
 
+    require_shard_geometry("respond_inspiring_cached", crs, encoded_db)?;
     let shard = require_dense_shard("respond_inspiring_cached", encoded_db, query.shard_id)?;
     require_shard_width("respond_inspiring_cached", crs, shard)?;
 
@@ -1034,6 +1058,7 @@ pub fn respond_inspiring_cached_with_session(
     };
     let client_packing_keys = resolved_keys.as_ref();
 
+    require_shard_geometry("respond_inspiring_cached_with_session", crs, encoded_db)?;
     let shard = require_dense_shard(
         "respond_inspiring_cached_with_session",
         encoded_db,
@@ -1228,6 +1253,7 @@ pub fn respond_sequential(
     let _q = crs.modulus();
     let ctx = crs.params.ntt_context();
 
+    require_shard_geometry("respond_sequential", crs, encoded_db)?;
     let shard = require_dense_shard("respond_sequential", encoded_db, query.shard_id)?;
     require_shard_width("respond_sequential", crs, shard)?;
 

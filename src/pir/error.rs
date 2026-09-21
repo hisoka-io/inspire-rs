@@ -65,6 +65,13 @@ pub enum ExtractError {
         /// Leading coefficients required.
         required: usize,
     },
+    /// A response arrived at a modulus this build has no verified constant for.
+    UnimplementedResponseModulus {
+        /// Modulus the response declared.
+        modulus: u64,
+        /// CRT limbs the response carried.
+        limbs: usize,
+    },
     /// The TwoPacking extractor received a tree-packed or untagged response.
     TwoPackingModeMismatch {
         /// Decoded semantic mode.
@@ -100,6 +107,11 @@ impl fmt::Display for ExtractError {
                 f,
                 "{operation}: packed coefficient prefix has {got}, requires exactly {required}; \
                  refusing a partial or surplus response"
+            ),
+            Self::UnimplementedResponseModulus { modulus, limbs } => write!(
+                f,
+                "response modulus {modulus} ({limbs} limb(s)) is neither the CRS modulus nor an \
+                 implemented mod-switch target; refusing before deriving anything from it"
             ),
             Self::TwoPackingModeMismatch {
                 mode,

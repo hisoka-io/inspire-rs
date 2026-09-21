@@ -2,7 +2,7 @@
 //! negacyclic (X^d = -1), so X^(-k) = -X^(d-k) for k > 0.
 
 use crate::math::Poly;
-use crate::params::{InspireParams, ShardConfig};
+use crate::params::{rows_per_shard_match_ring_dim, InspireParams, ShardConfig};
 use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 
 use super::setup::ShardData;
@@ -71,7 +71,8 @@ pub fn inverse_monomial(k: usize, d: usize, q: u64, moduli: &[u64]) -> Poly {
     Poly::from_crt_coeffs_reduced(crt_coeffs, moduli)
 }
 
-/// Split concatenated entries into shards of at most `ring_dim` entries and encode each.
+/// Split concatenated entries into shards of `ring_dim` entries and encode each; only the
+/// last shard may be partial.
 pub fn encode_database(
     database: &[u8],
     entry_size: usize,
@@ -88,13 +89,14 @@ pub fn encode_database(
     let total_entries = database.len() / entry_size;
     let entries_per_shard = shard_config.entries_per_shard() as usize;
 
-    // Typed, not debug_assert: release builds would let an oversized shard wrap `d - k`
-    // inside `inverse_monomial`.
-    if entries_per_shard > params.ring_dim {
+    // Typed, not debug_assert: a client addresses one row per ring coefficient, so any other
+    // row count serves rows it never asked for, and release builds would let an oversized
+    // shard wrap `d - k` inside `inverse_monomial`.
+    if !rows_per_shard_match_ring_dim(entries_per_shard as u64, params.ring_dim) {
         return Err(super::error::PirError::new(format!(
-            "entries_per_shard ({entries_per_shard}) must be <= ring_dim ({}); \
+            "entries_per_shard ({entries_per_shard}) must equal ring_dim ({}); \
              shard_config.shard_size_bytes ({}) / entry_size_bytes ({}) = {} entries per shard, \
-             but the InspiRING packing only supports one entry per ring coefficient. \
+             but the InspiRING packing addresses exactly one entry per ring coefficient. \
              Expected shard_size_bytes = ring_dim * entry_size_bytes = {}.",
             params.ring_dim,
             shard_config.shard_size_bytes,

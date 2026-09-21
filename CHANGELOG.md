@@ -7,7 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `MOD_SWITCH_TARGET_36BIT` (`2^36 - 2^20 + 1`) and `IMPLEMENTED_TARGETS` in
+  `pir::mod_switch`. The 36-bit prime is chosen for `q' mod p = 33`: decryption
+  divides by `floor(q'/p)`, so the residue is a deterministic per-coefficient
+  offset, and the largest 36-bit NTT prime (residue 53,266) keeps 3.3 bits of
+  margin where this one keeps about nine.
+- `ExtractError::UnimplementedResponseModulus`.
+- `served_post_switch_noise_distribution` in `benches/packing_noise_measurement.rs`
+  (needs `mod-switch-response`): the decode margin of the switched, serialized
+  response across 40 sessions.
+
 ### Changed
+
+- `check_mod_switch_noise_budget` also charges `q' mod p`. Tightening only: the
+  shipped targets still pass; a 34-bit prime with residue 53,255 no longer does.
+- `extract_inspiring_mod_switched` reads its modulus off the response, so it now
+  refuses any modulus that is not an implemented target before deriving anything
+  from it (a composite modulus previously sent the NTT root search into an
+  unbounded scan), refuses a limb count it cannot decrypt under instead of
+  panicking, and hands an unswitched response, including a multi-limb one, to
+  `extract_inspiring`.
+- The secret key is re-represented under the target modulus without a branch on,
+  or a division by, a secret coefficient.
+- `decode_response_packed` refuses RIMS frame version 1. No encoder ever emitted it.
 
 - Corrected the security claim throughout the docs. `secure_128_d2048` measures
   **121.5 bits**, not 128, at the shipped `DEFAULT_Q = 2^60 - 2^14 + 1`

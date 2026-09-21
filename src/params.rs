@@ -26,6 +26,8 @@
 //! let delta = params.delta();
 //! ```
 
+use crate::math::gaussian::tailcut_for;
+use crate::math::primality::is_prime;
 use crate::math::NttContext;
 use serde::{Deserialize, Serialize};
 use subtle::{ConditionallySelectable, ConstantTimeGreater};
@@ -352,7 +354,7 @@ impl InspireParams {
     /// Checks that:
     /// - `ring_dim` is a power of two
     /// - `q` is NTT-friendly: q ≡ 1 (mod 2d)
-    /// - `q >= p` for valid scaling
+    /// - `q >= p` for valid scaling, and `floor(q/p)/2` wider than the sampler tailcut
     /// - both gadget lengths span every residue modulo `q`
     ///
     /// # Returns
@@ -401,6 +403,12 @@ impl InspireParams {
             if m % two_n != 1 {
                 return Err("CRT moduli must be congruent to 1 mod 2*ring_dim for the NTT");
             }
+            if !is_prime(m) {
+                return Err(
+                    "CRT moduli must be prime: on a composite the NTT root search never ends, \
+                     or accepts a root of the wrong order and decodes to wrong plaintext",
+                );
+            }
         }
 
         let crt_product: u64 = self.crt_moduli.iter().product();
@@ -431,6 +439,16 @@ impl InspireParams {
             return Err(
                 "p must be > 65535: a column packs two bytes, so a smaller p silently \
                  reduces encoded values",
+            );
+        }
+
+        // A fresh encryption's error reaches the sampler tailcut, so a rounding half-interval
+        // no wider than it decodes a lone ciphertext to a neighbouring plaintext, with no
+        // error. Necessary, not sufficient: a packed response carries far more noise.
+        if self.delta() / 2 <= tailcut_for(self.sigma) as u64 {
+            return Err(
+                "floor(q/p)/2 must exceed the sampler tailcut ceil(6 sigma): at this q and p a \
+                 single encryption's own error already decodes to a neighbouring plaintext",
             );
         }
 
@@ -593,8 +611,9 @@ pub struct AdaptiveDerivation {
 /// The `(q~/q)^2` factor of Theorem 7 (eprint 2025/1352) does not belong here:
 /// this is the pre-mod-switch variance, and `required_q_log2` sizes `q`, not
 /// `q~`. Absent instead is the theorem's additive `d*sigma_chi^2/4` rounding
-/// term, inert while nothing mod-switches and load-bearing once response
-/// modulus switching ships.
+/// term. Responses are mod-switched, so that term is real; it is charged where
+/// the switch happens, at its worst case, by
+/// `pir::mod_switch::check_mod_switch_noise_budget`, not here.
 ///
 /// Derivations at 2^20 x 256 B with paper gamma=[64, 1024, 64] clear the noise
 /// budget with ~0.09-bit slack under this formula.

@@ -4,7 +4,7 @@
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::pir::mod_switch::{
     decode_response_packed, encode_response_packed, extract_inspiring_mod_switched,
-    mod_switch_response_checked, MOD_SWITCH_TARGET_45BIT,
+    mod_switch_response_checked, MOD_SWITCH_TARGET_36BIT, MOD_SWITCH_TARGET_45BIT,
 };
 use raven_inspire::{
     extract_two_packing, query_seeded, respond_seeded_inspiring, setup, InspireParams,
@@ -72,6 +72,20 @@ fn every_16bit_column_round_trips_through_both_extractors() {
                 .expect("mod-switched extract"),
             expected,
             "mod-switched target={target}"
+        );
+
+        // The served form: the 36-bit rung through the response's own serializer. The
+        // residue offset is `m * (q' mod p) / p`, so it has to be swept over every `m`.
+        let served = mod_switch_response_checked(&params, &response, MOD_SWITCH_TARGET_36BIT)
+            .expect("served switch");
+        let served_wire = served.to_binary().expect("served encode");
+        let served_response =
+            raven_inspire::ServerResponse::from_binary(&served_wire).expect("served decode");
+        assert_eq!(
+            extract_inspiring_mod_switched(&crs, &state, &served_response, ENTRY_SIZE)
+                .expect("served extract"),
+            expected,
+            "served 36-bit target={target}"
         );
     }
 }

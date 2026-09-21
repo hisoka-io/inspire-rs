@@ -9,11 +9,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use subtle::{ConditionallySelectable, ConstantTimeGreater};
+
+use crate::math::modular::{ct_sub_if_ge, reduce_by_public_modulus};
 use crate::math::{NttContext, Poly};
 use crate::params::InspireParams;
 use crate::rlwe::{RlweCiphertext, RlweSecretKey};
 
-use super::error::{pir_err, Result};
+use super::error::{pir_err, ExtractError, Result};
 use super::query::{ClientState, PackingMode};
 use super::respond::ServerResponse;
 use super::setup::InspireCrs;
@@ -26,9 +29,23 @@ const SECRET_KEY_TAIL_MULT: f64 = 7.0;
 const ROUND_HALF: f64 = 0.5;
 
 /// 45-bit NTT-friendly prime (`== 1 mod 4096`, so length-2048 negacyclic NTT works).
-/// Six bytes per coefficient instead of eight, but only through
-/// [`encode_response_packed`] - bincode pads every coefficient to 8 bytes.
+/// Six bytes per coefficient through [`encode_response_packed`]; the response serializer
+/// packs the same modulus at 45 bits.
 pub const MOD_SWITCH_TARGET_45BIT: u64 = 35_184_372_060_161;
+
+/// 36-bit NTT-friendly prime (`2^36 - 2^20 + 1`): the served wire rung, 36 bits per
+/// coefficient through the response serializer. Chosen for `q' mod p = 33`, not for size:
+/// [`RlweCiphertext::decrypt`] divides by `floor(q'/p)` while the switched coefficient
+/// carries `m * q'/p`, so every unit of `q' mod p` is a deterministic offset, which
+/// [`check_mod_switch_noise_budget`] charges in full. The largest 36-bit prime has residue
+/// 53,266 and would spend six of nine margin bits on it.
+pub const MOD_SWITCH_TARGET_36BIT: u64 = 68_718_428_161;
+
+/// Post-switch moduli this build can decrypt under. A modulus read off the wire is looked
+/// up here before anything is derived from it: the NTT root search does not terminate for
+/// a composite, and the noise gate only asks whether a modulus is quiet, not whether it
+/// is prime.
+pub const IMPLEMENTED_TARGETS: [u64; 2] = [MOD_SWITCH_TARGET_45BIT, MOD_SWITCH_TARGET_36BIT];
 
 /// 33-bit NTT-friendly prime that fails the shipped noise gate. It is reachable only
 /// through unchecked benchmark and KAT paths until a measured gate proves it safe.
@@ -85,7 +102,11 @@ impl ModSwitchParams {
 /// Reject a switch whose worst-case post-switch noise reaches `q'/(2p)`.
 ///
 /// Bounds rounding noise by `d/2 * |s|_max` and prior noise by `q/(4p)`, i.e. half the
-/// pre-switch budget, which every shipping config leaves free.
+/// pre-switch budget, which every shipping config leaves free. Also charges `q' mod p`:
+/// decrypt divides by `floor(q'/p)` while the switched message sits at `m * q'/p`, so the
+/// message itself lands up to that far off its lattice point. It is deterministic, and
+/// without it two primes of one bit width pass identically while one keeps nine bits of
+/// margin and the other one.
 pub fn check_mod_switch_noise_budget(params: &InspireParams, target_modulus: u64) -> Result<()> {
     let _triple = ModSwitchParams::new(params, target_modulus)?;
     let d = params.ring_dim as f64;
@@ -97,18 +118,20 @@ pub fn check_mod_switch_noise_budget(params: &InspireParams, target_modulus: u64
     let s_max = SECRET_KEY_TAIL_MULT * sigma;
     let round_noise = ROUND_HALF + d * 0.5 * s_max;
     let scaled_old_noise = (q_new / q_old) * (q_old / (4.0 * p));
-    let total_noise = round_noise + scaled_old_noise;
+    let residue_offset = (target_modulus % params.p) as f64;
+    let total_noise = round_noise + scaled_old_noise + residue_offset;
 
     let budget = q_new / (2.0 * p);
 
     if total_noise >= budget {
         return Err(pir_err!(
             "mod-switch noise-budget violation: total_noise={:.0} >= budget={:.0} \
-             (round={:.0}, scaled_old={:.0}, q'={}, q={}, p={}, d={}, sigma={})",
+             (round={:.0}, scaled_old={:.0}, residue={:.0}, q'={}, q={}, p={}, d={}, sigma={})",
             total_noise,
             budget,
             round_noise,
             scaled_old_noise,
+            residue_offset,
             target_modulus,
             params.q,
             params.p,
@@ -207,15 +230,16 @@ fn mod_switch_secret_key(
     let dim = sk.poly.dimension();
     let half_q_old = source_modulus / 2;
     let mut new_coeffs = vec![0u64; dim];
+    // Runs on every client extract, over the secret: no branch on a coefficient, and the
+    // only division is by the public modulus (a 128-bit remainder is a variable-latency
+    // software call on wasm32).
     for (i, slot) in new_coeffs.iter_mut().enumerate() {
         let c = sk.poly.coeff(i);
-        let signed_value = if c > half_q_old {
-            (c as i128) - (source_modulus as i128)
-        } else {
-            c as i128
-        };
-        let mapped = signed_value.rem_euclid(target_modulus as i128) as u64;
-        *slot = mapped;
+        let negative = c.ct_gt(&half_q_old);
+        let magnitude = u64::conditional_select(&c, &source_modulus.wrapping_sub(c), negative);
+        let reduced = reduce_by_public_modulus(magnitude, target_modulus);
+        let negated = ct_sub_if_ge(target_modulus.wrapping_sub(reduced), target_modulus);
+        *slot = u64::conditional_select(&reduced, &negated, negative);
     }
     Ok(RlweSecretKey::from_poly(Poly::from_coeffs(
         new_coeffs,
@@ -223,8 +247,10 @@ fn mod_switch_secret_key(
     )))
 }
 
-/// Serialize a mod-switched response at `ceil(log2(q')/8)` bytes per coefficient,
-/// which is where the wire win actually comes from - bincode pads each to 8.
+/// Serialize a mod-switched response at `ceil(log2(q')/8)` bytes per coefficient.
+/// Not the served wire form: `ServerResponse`'s own serializer packs at the exact bit
+/// width and is smaller at every rung (10,446 B against 11,543 at 36 bits). Kept as the
+/// self-describing standalone codec for KATs and tooling.
 ///
 /// ```text
 ///   magic          : 4 bytes  ("RIMS")
@@ -342,7 +368,7 @@ pub fn decode_response_packed(bytes: &[u8]) -> Result<ServerResponse> {
         ));
     }
     let version = bytes[4];
-    if !matches!(version, 1 | 2) {
+    if version != 2 {
         return Err(pir_err!(
             "decode_response_packed: unsupported version {}",
             version
@@ -397,34 +423,24 @@ pub fn decode_response_packed(bytes: &[u8]) -> Result<ServerResponse> {
             ))
         }
     };
-    if version == 1 && packing_mode.is_some() {
-        return Err(pir_err!(
-            "decode_response_packed: legacy v1 packed modes have no retained-prefix field"
-        ));
-    }
-
-    let (num_columns, retained_b, packed_coefficients) =
-        if version == 1 {
-            (shape, ring_dim, None)
-        } else {
-            match packing_mode {
-                None => (shape, ring_dim, None),
-                Some(_) if shape > 0 && shape <= ring_dim => (
-                    0,
-                    shape,
-                    Some(u32::try_from(shape).map_err(|_| {
-                        pir_err!("decode_response_packed: retained count exceeds u32")
-                    })?),
-                ),
-                Some(_) => {
-                    return Err(pir_err!(
-                        "decode_response_packed: retained count {} outside 1..={}",
-                        shape,
-                        ring_dim
-                    ))
-                }
-            }
-        };
+    let (num_columns, retained_b, packed_coefficients) = match packing_mode {
+        None => (shape, ring_dim, None),
+        Some(_) if shape > 0 && shape <= ring_dim => (
+            0,
+            shape,
+            Some(
+                u32::try_from(shape)
+                    .map_err(|_| pir_err!("decode_response_packed: retained count exceeds u32"))?,
+            ),
+        ),
+        Some(_) => {
+            return Err(pir_err!(
+                "decode_response_packed: retained count {} outside 1..={}",
+                shape,
+                ring_dim
+            ))
+        }
+    };
     let column_coeffs = num_columns
         .checked_mul(2)
         .and_then(|n| n.checked_mul(ring_dim))
@@ -546,6 +562,10 @@ fn write_poly_prefix_packed(
 /// [`crate::pir::extract_inspiring`] against a mod-switched response: delta and the
 /// NTT context come from the response's own modulus, and the secret is re-represented
 /// there first.
+///
+/// The modulus arrives off the wire. A response still on the CRS's own limbs is unswitched
+/// and goes to the unswitched extractor; anything else must be a single limb at one of
+/// [`IMPLEMENTED_TARGETS`], refused before a table is built for it.
 pub fn extract_inspiring_mod_switched(
     crs: &InspireCrs,
     state: &ClientState,
@@ -561,7 +581,26 @@ pub fn extract_inspiring_mod_switched(
         ));
     }
 
+    let params_moduli = crs.params.moduli();
+    if response.ciphertext.a.moduli() == params_moduli
+        && response.ciphertext.b.moduli() == params_moduli
+    {
+        return super::extract::extract_inspiring(crs, state, response, entry_size);
+    }
+
     let target_modulus = response.ciphertext.modulus();
+    let limbs = response
+        .ciphertext
+        .a
+        .crt_count()
+        .max(response.ciphertext.b.crt_count());
+    if limbs != 1 || !IMPLEMENTED_TARGETS.contains(&target_modulus) {
+        return Err(ExtractError::UnimplementedResponseModulus {
+            modulus: target_modulus,
+            limbs,
+        }
+        .into());
+    }
     if response.ciphertext.ring_dim() != crs.params.ring_dim {
         return Err(pir_err!(
             "extract_inspiring_mod_switched response ring_dim {} != expected {}",
@@ -776,8 +815,10 @@ mod tests {
         assert!(encoded.len() + 160 < 18_670);
     }
 
+    /// A v1 frame has no retained-prefix field, so a v2 reader would mis-slice it. It
+    /// never shipped; refusing it keeps one frame layout per schema.
     #[test]
-    fn legacy_v1_unpacked_frame_still_decodes() {
+    fn legacy_v1_frame_is_refused() {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"RIMS");
         bytes.push(1);
@@ -787,10 +828,12 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&[1, 0, 2, 0, 3, 0, 4, 0]);
 
-        let decoded = decode_response_packed(&bytes).unwrap();
+        let err = decode_response_packed(&bytes).unwrap_err();
+        assert!(err.to_string().contains("unsupported version 1"), "{err}");
 
+        bytes[4] = 2;
+        let decoded = decode_response_packed(&bytes).unwrap();
         assert_eq!(decoded.packing_mode, None);
-        assert_eq!(decoded.packed_coefficients, None);
         assert_eq!(decoded.ciphertext.a.coeffs(), &[1, 2]);
         assert_eq!(decoded.ciphertext.b.coeffs(), &[3, 4]);
     }
@@ -900,6 +943,81 @@ mod tests {
         assert_eq!(extracted.as_slice(), expected);
     }
 
+    /// The served rung. The response crosses the wire through `ServerResponse`'s own
+    /// serializer, which already packs at the modulus's tight width; RIMS is byte-aligned
+    /// and would cost five bytes per coefficient where 36 bits need four and a half.
+    #[test]
+    fn production_36bit_switched_response_round_trips_through_bincode() {
+        let params = production_params();
+        let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
+        let entry_size = 512;
+        let num_entries = params.ring_dim;
+        let database: Vec<u8> = (0..(num_entries * entry_size))
+            .map(|i| ((i * 37 + 11) % 256) as u8)
+            .collect();
+
+        let (crs, encoded_db, rlwe_sk) =
+            setup(&params, &database, entry_size, &mut sampler).unwrap();
+
+        let target_index = 17u64;
+        let (state, query) = query_seeded(
+            &crs,
+            target_index,
+            &encoded_db.config,
+            &rlwe_sk,
+            &mut sampler,
+        )
+        .unwrap();
+
+        let response = respond_seeded_inspiring(&crs, &encoded_db, &query).unwrap();
+        let switched =
+            mod_switch_response_checked(&crs.params, &response, MOD_SWITCH_TARGET_36BIT).unwrap();
+        assert_eq!(switched.ciphertext.modulus(), MOD_SWITCH_TARGET_36BIT);
+
+        let wire = switched.to_binary().unwrap();
+        let rims = encode_response_packed(&switched).unwrap();
+        eprintln!(
+            "36-bit: bincode={} rims={} unswitched={}",
+            wire.len(),
+            rims.len(),
+            response.to_binary().unwrap().len()
+        );
+        assert_eq!(wire.len(), 10_446);
+        assert_eq!(rims.len(), 11_543);
+        assert!(wire.len() < rims.len());
+
+        let decoded = ServerResponse::from_binary(&wire).unwrap();
+        assert_eq!(decoded.ciphertext.modulus(), MOD_SWITCH_TARGET_36BIT);
+        let extracted = extract_inspiring_mod_switched(&crs, &state, &decoded, entry_size).unwrap();
+        let expected_start = (target_index as usize) * entry_size;
+        let expected = &database[expected_start..expected_start + entry_size];
+        assert_eq!(extracted.as_slice(), expected);
+    }
+
+    /// Two 34-bit NTT primes, one byte width, one gate ratio before the residue term.
+    /// `2^34 - 19 * 4096 + 1` has residue 53,255 and measures about 1.3 bits of margin.
+    #[test]
+    fn noise_gate_charges_the_residue_of_the_target_modulus() {
+        let params = production_params();
+        let small_residue = (1u64 << 34) - 3 * (1u64 << 16) + 1;
+        let large_residue = (1u64 << 34) - 19 * 4096 + 1;
+        assert_eq!(small_residue % params.p, 8);
+        assert_eq!(large_residue % params.p, 53_255);
+        check_mod_switch_noise_budget(&params, small_residue).expect("small residue passes");
+        let err = check_mod_switch_noise_budget(&params, large_residue).unwrap_err();
+        assert!(err.to_string().contains("residue=53255"), "{err}");
+    }
+
+    #[test]
+    fn production_36bit_target_passes_noise_gate_and_has_small_residue() {
+        let params = production_params();
+        check_mod_switch_noise_budget(&params, MOD_SWITCH_TARGET_36BIT)
+            .expect("36-bit target must pass noise budget at production cell");
+        // The gate charges this term; the constant is chosen to make it negligible.
+        assert_eq!(MOD_SWITCH_TARGET_36BIT % params.p, 33);
+        assert_eq!(MOD_SWITCH_TARGET_36BIT, (1u64 << 36) - (1u64 << 20) + 1);
+    }
+
     #[test]
     fn production_45bit_target_passes_noise_gate() {
         let params = production_params();
@@ -941,8 +1059,12 @@ mod tests {
         maximum
     }
 
+    /// `2^36 - 3 * 4096 + 1`: passes the noise gate at the same ratio as the served
+    /// constant and is the obvious pick. Its residue mod `p` is 53,266.
+    const LARGEST_36BIT_NTT_PRIME: u64 = 68_719_464_449;
+
     #[test]
-    fn production_post_switch_error_kat_at_45_and_33_bits() {
+    fn production_post_switch_error_kat_at_45_36_and_33_bits() {
         let params = production_params();
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0x5002);
         let entry_size = 512;
@@ -976,16 +1098,34 @@ mod tests {
         let response = respond_seeded_inspiring(&crs, &encoded, &query).unwrap();
         let row = &database[target as usize * entry_size..(target as usize + 1) * entry_size];
 
+        let mut measured = Vec::new();
         for (target_modulus, expected_error) in [
             (MOD_SWITCH_TARGET_45BIT, 317_711),
+            (MOD_SWITCH_TARGET_36BIT, 652),
+            (LARGEST_36BIT_NTT_PRIME, 53_503),
             (MOD_SWITCH_TARGET_33BIT, 36_836),
         ] {
             let switched = mod_switch_response_unchecked(&response, target_modulus).unwrap();
             let error = served_post_switch_error(&params, &state, &switched, row, entry_size);
             assert_eq!(error, expected_error);
             assert!(error < target_modulus / (2 * params.p));
+            measured.push((target_modulus, error));
         }
         assert!(check_mod_switch_noise_budget(&params, MOD_SWITCH_TARGET_33BIT).is_err());
+
+        // Same gate verdict, same byte width, six bits apart: 652 is noise, 53,503 is
+        // `m * (q' mod p) / p`. The served constant keeps nine bits under the half step.
+        let margin_holds = |target: u64, bits: u32| {
+            let error = measured
+                .iter()
+                .find(|(modulus, _)| *modulus == target)
+                .map(|(_, error)| *error)
+                .expect("measured above");
+            error << bits < target / (2 * params.p)
+        };
+        assert!(margin_holds(MOD_SWITCH_TARGET_36BIT, 9));
+        assert!(!margin_holds(LARGEST_36BIT_NTT_PRIME, 4));
+        assert!(check_mod_switch_noise_budget(&params, LARGEST_36BIT_NTT_PRIME).is_ok());
     }
 
     #[test]
@@ -1011,6 +1151,53 @@ mod tests {
             result.is_err(),
             "forged tiny target ({real_forged}) MUST trigger noise-budget rejection: {result:?}"
         );
+    }
+
+    /// The branch-free mapping against the arithmetic it replaced, at the wrap point, at
+    /// both ends, and across a spread wider than any secret the sampler can draw.
+    #[test]
+    fn secret_key_re_representation_matches_the_signed_reference() {
+        let q = crate::math::mod_q::DEFAULT_Q;
+        let reference = |c: u64, target: u64| -> u64 {
+            let signed = if c > q / 2 {
+                i128::from(c) - i128::from(q)
+            } else {
+                i128::from(c)
+            };
+            signed.rem_euclid(i128::from(target)) as u64
+        };
+        let mut coefficients = vec![
+            0,
+            1,
+            2,
+            45,
+            q / 2 - 1,
+            q / 2,
+            q / 2 + 1,
+            q - 45,
+            q - 2,
+            q - 1,
+        ];
+        let mut walk = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..4_096 {
+            walk = walk.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            coefficients.push(walk % q);
+        }
+        for target in [MOD_SWITCH_TARGET_36BIT, MOD_SWITCH_TARGET_45BIT, q] {
+            for chunk in coefficients.chunks(256) {
+                let mut padded = chunk.to_vec();
+                padded.resize(256, 0);
+                let sk = RlweSecretKey::from_poly(Poly::from_coeffs(padded.clone(), q));
+                let switched = mod_switch_secret_key(&sk, target, q).unwrap();
+                for (i, &c) in padded.iter().enumerate() {
+                    assert_eq!(
+                        switched.poly.coeff(i),
+                        reference(c, target),
+                        "c={c} q'={target}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

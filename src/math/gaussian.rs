@@ -30,6 +30,12 @@ use subtle::{ConditionallySelectable, ConstantTimeEq, ConstantTimeGreater};
 /// Default Gaussian standard deviation
 pub const DEFAULT_SIGMA: f64 = 3.2;
 
+/// Samples beyond `ceil(6 sigma)` are rejected; `InspireParams::validate` sizes the
+/// rounding interval against the same bound.
+pub(crate) fn tailcut_for(sigma: f64) -> usize {
+    (sigma * 6.0).ceil() as usize
+}
+
 /// The platform entropy source refused to produce a seed.
 #[derive(Debug, Clone)]
 pub struct EntropyUnavailable {
@@ -146,7 +152,7 @@ impl GaussianSampler {
     }
 
     fn build(sigma: f64, rng: ChaCha20Rng) -> Self {
-        let tailcut = (sigma * 6.0).ceil() as usize;
+        let tailcut = tailcut_for(sigma);
         Self {
             sigma,
             tailcut,

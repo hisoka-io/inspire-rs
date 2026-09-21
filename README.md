@@ -181,11 +181,11 @@ Current exact TwoPacking binary sizes at d=2048 and a 512-byte record are:
 |-------|------:|-------|
 | First query | 61,735 | Includes inline packing keys |
 | Registered query | 15,491 | Carries a session handle |
-| Current tight response | 17,358 | Enabled adapter path |
-| Architecture served response | 17,518 | Includes the separately reserved 160-byte addendum |
-| RIMS v2 codec target | 13,847 | Default-off and not wired into the adapter |
+| Served response | 10,446 | Enabled adapter path, mod-switched to a 36-bit modulus and serialized at 36 bits per coefficient (17,358 unswitched) |
+| Served response with sibling addendum | 10,606 | Includes the separate 160-byte addendum a batch slot carries |
+| RIMS codec at 36 bits | 11,543 | Byte-aligned and not on the wire; the tight serializer is 1,097 bytes smaller |
 
-**Production recommendation**: use **InsPIRe^2 (TwoPacking)** with the enabled tight response.
+**Production recommendation**: use **InsPIRe^2 (TwoPacking)** with the mod-switched tight response.
 
 These costs are independent of database size at a fixed record shape.
 

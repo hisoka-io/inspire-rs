@@ -34,9 +34,9 @@ entries at the shipped preset. See Known Limitation 1.
 Query and response sizes are constant regardless of the queried index:
 
 - **Registered query**: 15,491 bytes at d=2048
-- **Current tight response**: 17,358 bytes at a 512-byte record width
-- **Architecture served response**: 17,518 bytes after the separately reserved 160-byte addendum
-- **RIMS v2 target**: 13,847 bytes, default-off and not wired into the adapter
+- **Served response**: 10,446 bytes at a 512-byte record width, mod-switched to a 36-bit modulus and serialized at 36 bits per coefficient (17,358 bytes unswitched)
+- **Served response with sibling addendum**: 10,606 bytes after the separate 160-byte addendum a batch slot carries
+- **RIMS codec**: 11,543 bytes at 36 bits, byte-aligned and not on the wire; the tight serializer is 1,097 bytes smaller
 
 This prevents traffic-analysis attacks that could otherwise infer the queried
 index from message sizes.

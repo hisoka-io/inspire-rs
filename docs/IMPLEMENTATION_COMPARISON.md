@@ -68,7 +68,7 @@ lib.rs
 - InsPIRe^1: `respond_one_packing()` - tree-packed response (uses `automorph_pack`)
 - InsPIRe^2: `query_seeded()` + `respond_seeded_packed()` - seeded + packed
 
-**Production recommendation**: use the enabled InsPIRe^2 seeded-query and bincode packed-response path. The default-off RIMS v2 response codec is not wired into an adapter transport.
+**Production recommendation**: use the enabled InsPIRe^2 seeded-query and bincode packed-response path, with the response mod-switched to `MOD_SWITCH_TARGET_36BIT` before serialization: 10,446 bytes at the 512-byte record width against 17,358 unswitched. The switch sits behind `mod-switch-response`, default-off in this crate and enabled by the adapter and client workspaces. The byte-aligned RIMS v2 response codec is not on the wire; at 36 bits it is 11,543 bytes, 1,097 more than the bincode path.
 
 ---
 
@@ -85,7 +85,7 @@ lib.rs
 | Noise (sigma) | 6.4 | 6.4 |
 | Gadget base | 2^20 | ~2^19-2^20 |
 | Gadget digits | 3 | 3 (t_gsw), varies for t_exp_* |
-| Plaintext modulus (p) | 65536 | Scenario-dependent (2^14-2^16) |
+| Plaintext modulus (p) | 65537 | Scenario-dependent (2^14-2^16) |
 
 ### Key Difference: Modulus Strategy
 
@@ -267,7 +267,7 @@ Based on this comparison, potential future enhancements:
 5. **SimplePIR variant** - For comparison/simpler use cases
 
 Note: Seed expansion was implemented in December 2024, achieving 50% query size reduction (192 KB -> 98 KB).
-The prior modulus-switching query experiment was removed. A checked 45-bit RIMS v2 response codec now exists behind a default-off feature; its 33-bit target fails the conservative noise gate, and no adapter transport calls either target.
+The prior modulus-switching query experiment was removed. A checked 45-bit RIMS v2 response codec now exists behind a default-off feature; its 33-bit target fails the conservative noise gate, and no adapter transport calls either target. The adapter responder instead mod-switches each response to the checked 36-bit target `MOD_SWITCH_TARGET_36BIT` and serializes it through the bincode packed-response path, not RIMS.
 
 ---
 

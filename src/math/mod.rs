@@ -16,6 +16,7 @@ pub mod mod_q;
 pub mod modular;
 pub mod ntt;
 pub mod poly;
+pub(crate) mod primality;
 pub mod sampler;
 pub mod sampling;
 pub mod solinas_redc;

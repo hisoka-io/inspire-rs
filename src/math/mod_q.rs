@@ -2,7 +2,8 @@
 
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
-/// q = 2^60 - 2^14 + 1; prime, q = 1 mod 4096, so NTT supports ring_dim up to 2048.
+/// q = 2^60 - 2^14 + 1; prime. q - 1 = 2^14 * (2^46 - 1), so q = 1 mod 2d holds up to
+/// ring_dim 8192 and no further; `InspireParams::validate` enforces that congruence per limb.
 pub const DEFAULT_Q: u64 = 1152921504606830593;
 
 /// Element of Z_q carrying its own Montgomery constants.

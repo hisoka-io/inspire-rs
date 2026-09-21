@@ -14,6 +14,11 @@
 //! ```
 
 use super::mod_q::DEFAULT_Q;
+use super::primality::is_prime;
+
+/// Far above any prime's least quadratic non-residue, where the root search ends: 11 for
+/// the moduli shipped here, O(ln^2 q) under ERH. Reached only if the primality assert is lost.
+const ROOT_SEARCH_BOUND: u64 = 1 << 16;
 
 /// Twiddle ladders and Montgomery constants for one (dimension, moduli) pair.
 ///
@@ -47,7 +52,7 @@ pub struct NttContext {
 impl NttContext {
     /// # Panics
     ///
-    /// If `n` is not a power of two or `q != 1 mod 2n`.
+    /// If `n` is not a power of two, `q != 1 mod 2n`, or `q` is composite.
     ///
     /// # Example
     ///
@@ -64,7 +69,7 @@ impl NttContext {
 
     /// # Panics
     ///
-    /// If `n` is not a power of two or any modulus violates `q = 1 mod 2n`.
+    /// If `n` is not a power of two, or any modulus is composite or violates `q = 1 mod 2n`.
     pub fn with_moduli(n: usize, moduli: &[u64]) -> Self {
         assert!(n.is_power_of_two(), "n must be a power of two");
         assert!(!moduli.is_empty(), "moduli must be non-empty");
@@ -83,6 +88,9 @@ impl NttContext {
 
         for &q in moduli {
             assert!(q % (2 * n as u64) == 1, "q must be 1 mod 2n");
+            // On a composite the root search never ends, or accepts a square root of 1 that
+            // is not -1 and builds a transform that round-trips while multiplying wrongly.
+            assert!(is_prime(q), "modulus {q} must be prime for the NTT");
 
             let q_inv = Self::compute_q_inv_neg(q);
             let r2 = Self::compute_r_squared(q);
@@ -136,7 +144,7 @@ impl NttContext {
         }
     }
 
-    /// [`Self::new`] against `DEFAULT_Q`, which supports `n` up to 2048.
+    /// [`Self::new`] against `DEFAULT_Q`, which supports `n` up to 8192.
     pub fn with_default_q(n: usize) -> Self {
         Self::new(n, DEFAULT_Q)
     }
@@ -733,21 +741,24 @@ impl NttContext {
         result
     }
 
-    /// Primitive n-th root of unity mod q, by exhaustive search over generators.
+    /// Primitive n-th root of unity mod a prime q, for n a power of two dividing q - 1.
+    ///
+    /// `g^((q-1)/n)` has order exactly n iff g is a quadratic non-residue, so the search
+    /// returns at q's least one.
     #[allow(
         clippy::panic,
-        reason = "unreachable: callers assert q = 1 mod n, which makes the search total"
+        reason = "unreachable: with_moduli asserts q prime and q = 1 mod n, and half the residues of a prime are non-residues"
     )]
     fn find_primitive_root(n: u64, q: u64) -> u64 {
         let exp = (q - 1) / n;
 
-        for g in 2..q {
+        for g in 2..q.min(ROOT_SEARCH_BOUND) {
             let candidate = Self::mod_pow(g, exp, q);
             if Self::mod_pow(candidate, n, q) == 1 && Self::mod_pow(candidate, n / 2, q) != 1 {
                 return candidate;
             }
         }
-        panic!("No primitive root found; modulus may not satisfy q = 1 (mod 2n)");
+        panic!("no primitive {n}-th root mod {q} among the first {ROOT_SEARCH_BOUND} candidates");
     }
 
     /// Twiddle ladder in plain mod-q arithmetic, indexed identically to

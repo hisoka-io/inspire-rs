@@ -17,7 +17,7 @@ pub(crate) fn ct_is_negative(v: i64) -> Choice {
 /// `ct_gt(q-1)` rather than `!ct_lt(q)`: subtle builds `ct_lt` out of five
 /// barriered ops and this sits under every noise coefficient.
 #[inline]
-fn ct_sub_if_ge(v: u64, q: u64) -> u64 {
+pub(crate) fn ct_sub_if_ge(v: u64, q: u64) -> u64 {
     let ge = v.ct_gt(&q.wrapping_sub(1));
     u64::conditional_select(&v, &v.wrapping_sub(q), ge)
 }
@@ -31,7 +31,7 @@ fn ct_sub_if_ge(v: u64, q: u64) -> u64 {
 /// latency on x86-64; `u64::MAX / q` divides by the public modulus and the
 /// widening multiply that replaces it is fixed latency.
 #[inline]
-fn reduce_by_public_modulus(a: u64, q: u64) -> u64 {
+pub(crate) fn reduce_by_public_modulus(a: u64, q: u64) -> u64 {
     let recip = u64::MAX / q;
     let quot = ((u128::from(a) * u128::from(recip)) >> 64) as u64;
     ct_sub_if_ge(a.wrapping_sub(quot.wrapping_mul(q)), q)
