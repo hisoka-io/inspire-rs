@@ -1702,6 +1702,109 @@ mod tests {
         assert!(error.to_string().contains("cap is"), "{error}");
     }
 
+    // Every boundary below is spelled as a literal rather than as
+    // `MAX_TIGHT_COEFFICIENT_BYTES`: a test written in terms of the constant moves with it,
+    // and the constant is the only thing between a forged length prefix and an allocation
+    // the process cannot survive.
+    #[test]
+    fn tight_byte_cap_refuses_one_byte_over_and_still_decodes_exactly_at_the_cap() {
+        let mut over_by_one = 16_777_217u64.to_le_bytes().to_vec();
+        over_by_one.push(0);
+        let error = bincode::deserialize::<TightBytes>(&over_by_one)
+            .expect_err("a declared length one byte over the cap must be refused")
+            .to_string();
+        assert!(error.contains("declares 16777217 bytes"), "{error}");
+        assert!(error.contains("cap is 16777216"), "{error}");
+
+        // The refusal has to hold for the shape a snapshot actually decodes, not just for the
+        // field type. `coeffs` is the first field of the tight wire form, so a forged prefix
+        // is refused before any other field is read.
+        let mut forged_poly = 16_777_217u64.to_le_bytes().to_vec();
+        forged_poly.push(0);
+        let error = bincode::deserialize::<Poly>(&forged_poly)
+            .expect_err("a forged Poly coefficient length must be refused")
+            .to_string();
+        assert!(error.contains("cap is 16777216"), "{error}");
+
+        // Inclusive: the declared-length guard is `>`, and the accumulation guard stops one
+        // past the cap, so exactly 16 MiB is inside the contract and must still decode.
+        let mut at_cap = 16_777_216u64.to_le_bytes().to_vec();
+        at_cap.resize(at_cap.len() + 16_777_216, 0);
+        assert_eq!(
+            bincode::deserialize::<TightBytes>(&at_cap)
+                .expect("a declared length exactly at the cap is inside the contract")
+                .into_vec()
+                .len(),
+            16_777_216
+        );
+
+        assert_eq!(MAX_TIGHT_COEFFICIENT_BYTES, 16_777_216);
+    }
+
+    /// bincode reports the declared length as the seq size hint, so the declared-length guard
+    /// always fires first and the accumulation guard is unreachable through it. Withholding
+    /// the hint is the only way to reach the guard that bounds what a lying hint would admit.
+    struct UnhintedBytes {
+        remaining: usize,
+    }
+
+    impl<'de> serde::Deserializer<'de> for UnhintedBytes {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_seq<V: serde::de::Visitor<'de>>(
+            self,
+            visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            visitor.visit_seq(self)
+        }
+
+        fn deserialize_any<V: serde::de::Visitor<'de>>(
+            self,
+            _visitor: V,
+        ) -> Result<V::Value, Self::Error> {
+            Err(serde::de::Error::custom(
+                "UnhintedBytes yields sequences only",
+            ))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 char str string bytes byte_buf option
+            unit unit_struct newtype_struct tuple tuple_struct map struct enum identifier
+            ignored_any
+        }
+    }
+
+    impl<'de> serde::de::SeqAccess<'de> for UnhintedBytes {
+        type Error = serde::de::value::Error;
+
+        fn size_hint(&self) -> Option<usize> {
+            None
+        }
+
+        fn next_element_seed<T: serde::de::DeserializeSeed<'de>>(
+            &mut self,
+            seed: T,
+        ) -> Result<Option<T::Value>, Self::Error> {
+            if self.remaining == 0 {
+                return Ok(None);
+            }
+            self.remaining -= 1;
+            seed.deserialize(serde::de::IntoDeserializer::into_deserializer(0u8))
+                .map(Some)
+        }
+    }
+
+    #[test]
+    fn tight_byte_cap_bounds_a_stream_that_withholds_its_length() {
+        let error = <TightBytes as serde::Deserialize>::deserialize(UnhintedBytes {
+            remaining: 16_777_217,
+        })
+        .map(|accepted| accepted.into_vec().len())
+        .expect_err("an unhinted stream past the cap must be refused")
+        .to_string();
+        assert!(error.contains("exceeds 16777216-byte cap"), "{error}");
+    }
+
     proptest! {
         #[test]
         fn tight_codec_round_trips_arbitrary_default_q_coefficients(
