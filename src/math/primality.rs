@@ -57,7 +57,7 @@ mod tests {
     use crate::params::{DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT};
 
     fn is_prime_by_trial_division(n: u64) -> bool {
-        n >= 2 && (2..).take_while(|f| f * f <= n).all(|f| n % f != 0)
+        n >= 2 && (2..=n.isqrt()).all(|f| !n.is_multiple_of(f))
     }
 
     #[test]
