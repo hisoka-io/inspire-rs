@@ -58,6 +58,15 @@ impl OracleVerdict {
     }
 }
 
+/// Null-side alpha. A permutation p-value is ~uniform when the null holds, so asserting
+/// "does not reject at 1/20" reds one run in twenty however correct the code is — it did,
+/// at p = 301/8192. At 1/1000 the false-positive rate is ~0.1% and the power is untouched:
+/// the preregistered leak lands at p = 1/8192, which still rejects by a factor of eight.
+const NULL_ALPHA_RECIPROCAL: u64 = 1000;
+
+/// Positive-side alpha. A leak the instrument cannot see at 1/200 is a broken instrument.
+const LEAK_ALPHA_RECIPROCAL: u64 = 200;
+
 #[derive(Clone, Copy, Debug)]
 enum QueryForm {
     Unseeded,
@@ -366,7 +375,10 @@ fn instrument_does_not_reject_the_preregistered_null() {
     let null = synthetic_control(false);
     let verdict = evaluate(&null);
     report("synthetic null", &verdict);
-    assert!(!verdict.rejects_at_reciprocal(20), "{verdict:?}");
+    assert!(
+        !verdict.rejects_at_reciprocal(NULL_ALPHA_RECIPROCAL),
+        "{verdict:?}"
+    );
 }
 
 #[test]
@@ -374,7 +386,10 @@ fn instrument_distinguishes_the_preregistered_partial_byte_leak() {
     let positive = synthetic_control(true);
     let verdict = evaluate(&positive);
     report("synthetic positive", &verdict);
-    assert!(verdict.rejects_at_reciprocal(200), "{verdict:?}");
+    assert!(
+        verdict.rejects_at_reciprocal(LEAK_ALPHA_RECIPROCAL),
+        "{verdict:?}"
+    );
 }
 
 #[test]
@@ -386,9 +401,12 @@ fn same_shard_query_transcript_research_oracle() {
     let positive_verdict = evaluate(&positive);
     report("actual-transcript null", &null_verdict);
     report("actual-transcript positive", &positive_verdict);
-    assert!(!null_verdict.rejects_at_reciprocal(20), "{null_verdict:?}");
     assert!(
-        positive_verdict.rejects_at_reciprocal(200),
+        !null_verdict.rejects_at_reciprocal(NULL_ALPHA_RECIPROCAL),
+        "{null_verdict:?}"
+    );
+    assert!(
+        positive_verdict.rejects_at_reciprocal(LEAK_ALPHA_RECIPROCAL),
         "{positive_verdict:?}"
     );
 
@@ -396,6 +414,9 @@ fn same_shard_query_transcript_research_oracle() {
         let samples = rgsw_samples(form, Challenge::EndpointIndices);
         let verdict = evaluate(&samples);
         report(form.name(), &verdict);
-        assert!(!verdict.rejects_at_reciprocal(200), "{form:?}: {verdict:?}");
+        assert!(
+            !verdict.rejects_at_reciprocal(LEAK_ALPHA_RECIPROCAL),
+            "{form:?}: {verdict:?}"
+        );
     }
 }
