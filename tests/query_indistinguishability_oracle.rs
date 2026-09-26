@@ -414,8 +414,13 @@ fn same_shard_query_transcript_research_oracle() {
         let samples = rgsw_samples(form, Challenge::EndpointIndices);
         let verdict = evaluate(&samples);
         report(form.name(), &verdict);
+        // NULL, not LEAK: this asserts the oracle does NOT reject, so it carries the same
+        // one-in-alpha flake the null constant was introduced to remove, at 5x the rate. It
+        // kept the leak alpha only because it predates the split, and a constant used against
+        // its documented meaning would have propagated backwards -- tightening the leak side
+        // would silently tighten these two null checks.
         assert!(
-            !verdict.rejects_at_reciprocal(LEAK_ALPHA_RECIPROCAL),
+            !verdict.rejects_at_reciprocal(NULL_ALPHA_RECIPROCAL),
             "{form:?}: {verdict:?}"
         );
     }
