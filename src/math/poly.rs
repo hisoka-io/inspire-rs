@@ -10,11 +10,12 @@
 //! let product = a.mul_ntt(&b, &ctx);
 //! ```
 
-use super::crt::{crt_compose_2, crt_decompose_2, crt_modulus, mod_inverse};
+use super::crt::{crt_compose_2, crt_decompose_2, crt_modulus, mod_inverse, CtCrtComposer};
 use super::gaussian::{
     os_seeded_chacha, os_seeded_chacha_or_abort, EntropyUnavailable, GaussianSampler,
 };
 use super::mod_q::{ModQ, DEFAULT_Q};
+use super::modular::ct_sub_if_ge;
 use super::ntt::NttContext;
 use rand::Rng;
 use rand::SeedableRng;
@@ -338,6 +339,13 @@ impl TryFrom<PolyWire> for Poly {
             && w.q == 0
             && w.crt_q0_inv_mod_q1 == 0;
         if is_default {
+            if w.is_ntt {
+                return Err(
+                    "Poly decode refused: an empty polynomial declares the NTT domain, \
+                     which Poly::default() never does"
+                        .to_owned(),
+                );
+            }
             return Ok(Self {
                 coeffs: w.coeffs,
                 moduli: w.moduli,
@@ -425,6 +433,21 @@ impl TryFrom<PolyWire> for Poly {
                  derived from the encoded moduli",
                 w.crt_q0_inv_mod_q1
             ));
+        }
+        // The tight codec already enforces this; the human-readable one does not.
+        for (limb, (&modulus, residues)) in w
+            .moduli
+            .iter()
+            .zip(w.coeffs.chunks(w.dim.max(1)))
+            .enumerate()
+        {
+            if let Some(index) = residues.iter().position(|&c| c >= modulus) {
+                return Err(format!(
+                    "Poly decode refused: limb {limb} coefficient {index} is {}, not canonical \
+                     for modulus {modulus}",
+                    residues[index]
+                ));
+            }
         }
         Ok(Self {
             coeffs: w.coeffs,
@@ -774,18 +797,58 @@ impl Poly {
         &mut self.coeffs
     }
 
-    /// Residue stripe of CRT limb `idx`.
+    /// Residue stripe of CRT limb `modulus_idx`.
     pub fn coeffs_modulus(&self, modulus_idx: usize) -> &[u64] {
         let start = modulus_idx * self.dim;
         let end = start + self.dim;
         &self.coeffs[start..end]
     }
 
-    /// Mutable [`Self::coeffs_at`].
+    /// Mutable [`Self::coeffs_modulus`].
     pub fn coeffs_modulus_mut(&mut self, modulus_idx: usize) -> &mut [u64] {
         let start = modulus_idx * self.dim;
         let end = start + self.dim;
         &mut self.coeffs[start..end]
+    }
+
+    /// `self + rhs` with each reduction selected rather than branched, for sums that
+    /// carry a secret.
+    pub(crate) fn add_ct(&self, rhs: &Self) -> Self {
+        assert_eq!(self.moduli, rhs.moduli, "Moduli must match");
+        assert_eq!(self.is_ntt, rhs.is_ntt, "NTT domains must match");
+
+        let mut coeffs = self.coeffs.clone();
+        for (m, &modulus) in self.moduli.iter().enumerate() {
+            let start = m * self.dim;
+            let end = start + self.dim;
+            for (c, &r) in coeffs[start..end].iter_mut().zip(&rhs.coeffs[start..end]) {
+                *c = ct_sub_if_ge(*c + r, modulus);
+            }
+        }
+
+        Poly {
+            coeffs,
+            moduli: self.moduli.clone(),
+            q: self.q,
+            dim: self.dim,
+            crt_q0_inv_mod_q1: self.crt_q0_inv_mod_q1,
+            is_ntt: self.is_ntt,
+        }
+    }
+
+    /// Every [`Self::coeff`], composed without a branch or divide on a residue.
+    pub(crate) fn coeffs_composed_ct(&self) -> Vec<u64> {
+        assert!(!self.is_ntt, "Cannot access coefficients in NTT domain");
+        if let [q0, q1] = self.moduli[..] {
+            let composer = CtCrtComposer::new(q0, q1, self.crt_q0_inv_mod_q1);
+            let (low, high) = self.coeffs.split_at(self.dim);
+            low.iter()
+                .zip(high)
+                .map(|(&a0, &a1)| composer.compose(a0, a1))
+                .collect()
+        } else {
+            self.coeffs[..self.dim].to_vec()
+        }
     }
 
     /// Reduces every residue into `[0, moduli[m])`.

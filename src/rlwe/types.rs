@@ -45,11 +45,53 @@ impl std::fmt::Debug for RlweSecretKey {
 /// assert_eq!(ct.ring_dim(), 256);
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "RlweCiphertextWire")]
 pub struct RlweCiphertext {
     /// Uniform polynomial in R_q.
     pub a: Poly,
     /// `-a*s + e + delta*m`.
     pub b: Poly,
+}
+
+/// Wire form of [`RlweCiphertext`]: the same two fields, so the bytes are unchanged.
+#[derive(Deserialize)]
+struct RlweCiphertextWire {
+    a: Poly,
+    b: Poly,
+}
+
+impl TryFrom<RlweCiphertextWire> for RlweCiphertext {
+    type Error = String;
+
+    fn try_from(wire: RlweCiphertextWire) -> Result<Self, Self::Error> {
+        require_same_ring("RLWE ciphertext b", &wire.b, "its a", &wire.a)?;
+        Ok(Self {
+            a: wire.a,
+            b: wire.b,
+        })
+    }
+}
+
+/// Refuses a polynomial whose ring dimension or CRT moduli differ from `reference`:
+/// every product and sum over the pair asserts on them. Domain is each container's to
+/// police, since trusted caches legitimately hold NTT-domain values.
+pub(crate) fn require_same_ring(
+    component: &str,
+    poly: &Poly,
+    reference_name: &str,
+    reference: &Poly,
+) -> Result<(), String> {
+    if poly.dimension() == reference.dimension() && poly.moduli() == reference.moduli() {
+        return Ok(());
+    }
+    Err(format!(
+        "wire shape refused: {component} has ring_dim {}, moduli {:?}, but {reference_name} \
+         in the same container has ring_dim {}, moduli {:?}",
+        poly.dimension(),
+        poly.moduli(),
+        reference.dimension(),
+        reference.moduli()
+    ))
 }
 
 impl RlweSecretKey {

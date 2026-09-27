@@ -37,8 +37,13 @@ pub const MOD_SWITCH_TARGET_45BIT: u64 = 35_184_372_060_161;
 /// coefficient through the response serializer. Chosen for `q' mod p = 33`, not for size:
 /// [`RlweCiphertext::decrypt`] divides by `floor(q'/p)` while the switched coefficient
 /// carries `m * q'/p`, so every unit of `q' mod p` is a deterministic offset, which
-/// [`check_mod_switch_noise_budget`] charges in full. The largest 36-bit prime has residue
-/// 53,266 and would spend six of nine margin bits on it.
+/// [`check_mod_switch_noise_budget`] charges in full.
+///
+/// Its margin under the half step `q'/(2p)` has two measures. The gate's worst-case model
+/// clears it by 1.70x (0.77 bits). The measured decode error clears it by 8.88 bits across
+/// 40 sessions (`served_post_switch_noise_distribution` in
+/// `benches/packing_noise_measurement.rs`). The largest 36-bit NTT prime has residue 53,266:
+/// 1.45x at the gate, and at the KAT seed 3.3 measured bits against this prime's 9.7.
 pub const MOD_SWITCH_TARGET_36BIT: u64 = 68_718_428_161;
 
 /// Post-switch moduli this build can decrypt under. A modulus read off the wire is looked
@@ -46,10 +51,6 @@ pub const MOD_SWITCH_TARGET_36BIT: u64 = 68_718_428_161;
 /// a composite, and the noise gate only asks whether a modulus is quiet, not whether it
 /// is prime.
 pub const IMPLEMENTED_TARGETS: [u64; 2] = [MOD_SWITCH_TARGET_45BIT, MOD_SWITCH_TARGET_36BIT];
-
-/// 33-bit NTT-friendly prime that fails the shipped noise gate. It is reachable only
-/// through unchecked benchmark and KAT paths until a measured gate proves it safe.
-pub const MOD_SWITCH_TARGET_33BIT: u64 = 8_589_905_921;
 
 /// Spiral's `(q1, q2, t)` triple in InsPIRe's `(q, q', p)` naming.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -105,8 +106,8 @@ impl ModSwitchParams {
 /// pre-switch budget, which every shipping config leaves free. Also charges `q' mod p`:
 /// decrypt divides by `floor(q'/p)` while the switched message sits at `m * q'/p`, so the
 /// message itself lands up to that far off its lattice point. It is deterministic, and
-/// without it two primes of one bit width pass identically while one keeps nine bits of
-/// margin and the other one.
+/// without it two 36-bit primes get one verdict while their measured margins sit six bits
+/// apart (see [`MOD_SWITCH_TARGET_36BIT`]).
 pub fn check_mod_switch_noise_budget(params: &InspireParams, target_modulus: u64) -> Result<()> {
     let _triple = ModSwitchParams::new(params, target_modulus)?;
     let d = params.ring_dim as f64;
@@ -227,23 +228,26 @@ fn mod_switch_secret_key(
             "mod_switch_secret_key requires coefficient-domain input"
         ));
     }
-    let dim = sk.poly.dimension();
     let half_q_old = source_modulus / 2;
-    let mut new_coeffs = vec![0u64; dim];
     // Runs on every client extract, over the secret: no branch on a coefficient, and the
     // only division is by the public modulus (a 128-bit remainder is a variable-latency
-    // software call on wasm32).
-    for (i, slot) in new_coeffs.iter_mut().enumerate() {
-        let c = sk.poly.coeff(i);
-        let negative = c.ct_gt(&half_q_old);
-        let magnitude = u64::conditional_select(&c, &source_modulus.wrapping_sub(c), negative);
-        let reduced = reduce_by_public_modulus(magnitude, target_modulus);
-        let negated = ct_sub_if_ge(target_modulus.wrapping_sub(reduced), target_modulus);
-        *slot = u64::conditional_select(&reduced, &negated, negative);
-    }
-    Ok(RlweSecretKey::from_poly(Poly::from_coeffs(
+    // software call on wasm32). `coeff` would compose two CRT limbs with both.
+    let new_coeffs = sk
+        .poly
+        .coeffs_composed_ct()
+        .into_iter()
+        .map(|c| {
+            let negative = c.ct_gt(&half_q_old);
+            let magnitude = u64::conditional_select(&c, &source_modulus.wrapping_sub(c), negative);
+            let reduced = reduce_by_public_modulus(magnitude, target_modulus);
+            let negated = ct_sub_if_ge(target_modulus.wrapping_sub(reduced), target_modulus);
+            u64::conditional_select(&reduced, &negated, negative)
+        })
+        .collect();
+    // Every value is already below the target; `from_coeffs` would `%` it again.
+    Ok(RlweSecretKey::from_poly(Poly::from_crt_coeffs_reduced(
         new_coeffs,
-        target_modulus,
+        &[target_modulus],
     )))
 }
 
@@ -601,18 +605,13 @@ pub fn extract_inspiring_mod_switched(
         }
         .into());
     }
-    if response.ciphertext.ring_dim() != crs.params.ring_dim {
-        return Err(pir_err!(
-            "extract_inspiring_mod_switched response ring_dim {} != expected {}",
-            response.ciphertext.ring_dim(),
-            crs.params.ring_dim
-        ));
-    }
-    validate_ciphertext_shape(
-        &response.ciphertext,
-        crs.params.ring_dim,
-        target_modulus,
-        "response",
+    super::extract::require_decryptable(
+        "extract_inspiring_mod_switched",
+        crs,
+        state,
+        &[target_modulus],
+        [&response.ciphertext],
+        |_| "response".to_owned(),
     )?;
     check_mod_switch_noise_budget(&crs.params, target_modulus)?;
     let p = crs.params.p;
@@ -1059,9 +1058,12 @@ mod tests {
         maximum
     }
 
-    /// `2^36 - 3 * 4096 + 1`: passes the noise gate at the same ratio as the served
-    /// constant and is the obvious pick. Its residue mod `p` is 53,266.
+    /// `2^36 - 3 * 4096 + 1`: the obvious pick, and the gate passes it (1.45x). Its
+    /// residue mod `p` is 53,266.
     const LARGEST_36BIT_NTT_PRIME: u64 = 68_719_464_449;
+
+    /// 33-bit NTT-friendly prime the shipped gate rejects (0.57x); kept for the KAT only.
+    const MOD_SWITCH_TARGET_33BIT: u64 = 8_589_905_921;
 
     #[test]
     fn production_post_switch_error_kat_at_45_36_and_33_bits() {
@@ -1134,7 +1136,7 @@ mod tests {
         let result = check_mod_switch_noise_budget(&params, MOD_SWITCH_TARGET_33BIT);
         assert!(
             result.is_err(),
-            "33-bit target sits on the conservative-gate boundary; the gate MUST reject \
+            "33-bit target is below the conservative gate (0.57x); the gate MUST reject \
              it under the 7-sigma tail bound. Operators who want this target must opt \
              out explicitly via `mod_switch_response_unchecked`: {result:?}"
         );
@@ -1157,7 +1159,12 @@ mod tests {
     /// both ends, and across a spread wider than any secret the sampler can draw.
     #[test]
     fn secret_key_re_representation_matches_the_signed_reference() {
-        let q = crate::math::mod_q::DEFAULT_Q;
+        assert_secret_key_switch_matches(&[crate::math::mod_q::DEFAULT_Q]);
+        assert_secret_key_switch_matches(&[268_369_921, 249_561_089]);
+    }
+
+    fn assert_secret_key_switch_matches(moduli: &[u64]) {
+        let q: u64 = moduli.iter().product();
         let reference = |c: u64, target: u64| -> u64 {
             let signed = if c > q / 2 {
                 i128::from(c) - i128::from(q)
@@ -1187,7 +1194,7 @@ mod tests {
             for chunk in coefficients.chunks(256) {
                 let mut padded = chunk.to_vec();
                 padded.resize(256, 0);
-                let sk = RlweSecretKey::from_poly(Poly::from_coeffs(padded.clone(), q));
+                let sk = RlweSecretKey::from_poly(Poly::from_coeffs_moduli(padded.clone(), moduli));
                 let switched = mod_switch_secret_key(&sk, target, q).unwrap();
                 for (i, &c) in padded.iter().enumerate() {
                     assert_eq!(

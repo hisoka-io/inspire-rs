@@ -42,6 +42,18 @@ fn forge_ntt_flag(poly: &Poly) -> Poly {
     bincode::deserialize(&bytes).expect("generic Poly codec also carries trusted NTT caches")
 }
 
+/// The decoder refuses first; the responder guard behind it is then driven with the
+/// in-memory forgery, which never crossed a decoder.
+fn assert_decode_refused<T: serde::de::DeserializeOwned>(wire: &[u8], needle: &str) {
+    let Err(refusal) = bincode::deserialize::<T>(wire) else {
+        panic!("the decoder accepted a forgery it must refuse ({needle})");
+    };
+    assert!(
+        refusal.to_string().contains(needle),
+        "wrong decode refusal: {refusal}"
+    );
+}
+
 #[test]
 fn wire_seeded_rgsw_b_ntt_flag_is_refused_before_expansion() {
     let params = params();
@@ -78,22 +90,23 @@ fn wire_seeded_rgsw_b_ntt_flag_is_refused_before_expansion() {
         1,
         "only one domain flag byte may differ"
     );
-    let decoded: SeededClientQuery =
-        bincode::deserialize(&forged_wire).expect("decode forged query for boundary check");
+    assert_decode_refused::<SeededClientQuery>(
+        &forged_wire,
+        "coefficient-domain RGSW row 0 b required",
+    );
 
-    let error = match respond_seeded_inspiring_cached_with_session(
-        &crs, &encoded, &decoded, &cache, None,
-    ) {
-        Ok(response) => {
-            let row = extract_two_packing(&crs, &state, &response, entry_size)
-                .expect("accepted forged response must extract for the negative control");
-            panic!(
-                "forged RGSW domain flag returned Ok; plaintext matched independent row: {}",
-                row.as_slice() == expected_row
-            );
-        }
-        Err(error) => error,
-    };
+    let error =
+        match respond_seeded_inspiring_cached_with_session(&crs, &encoded, &forged, &cache, None) {
+            Ok(response) => {
+                let row = extract_two_packing(&crs, &state, &response, entry_size)
+                    .expect("accepted forged response must extract for the negative control");
+                panic!(
+                    "forged RGSW domain flag returned Ok; plaintext matched independent row: {}",
+                    row.as_slice() == expected_row
+                );
+            }
+            Err(error) => error,
+        };
     assert!(
         error.to_string().starts_with(
             "respond_seeded_inspiring_cached_with_session: coefficient-domain RGSW row 0 b"
@@ -128,9 +141,8 @@ fn wire_unseeded_rgsw_a_ntt_flag_is_refused_before_respond() {
             .count(),
         1
     );
-    let decoded: ClientQuery =
-        bincode::deserialize(&forged_wire).expect("decode forged unseeded query");
-    let Err(error) = respond(&crs, &encoded, &decoded) else {
+    assert_decode_refused::<ClientQuery>(&forged_wire, "coefficient-domain RGSW row 0 a required");
+    let Err(error) = respond(&crs, &encoded, &forged) else {
         panic!("forged unseeded RGSW a domain flag returned Ok");
     };
     assert!(
@@ -170,11 +182,13 @@ fn wire_packing_key_ntt_flag_is_refused_before_cached_respond() {
             .count(),
         1
     );
-    let decoded: SeededClientQuery =
-        bincode::deserialize(&forged_wire).expect("decode forged query for boundary check");
+    assert_decode_refused::<SeededClientQuery>(
+        &forged_wire,
+        "coefficient-domain packing-key y_body[0] required",
+    );
 
     let Err(error) =
-        respond_inspiring_cached_with_session(&crs, &encoded, &decoded.expand(), &cache, None)
+        respond_inspiring_cached_with_session(&crs, &encoded, &query.expand(), &cache, None)
     else {
         panic!("forged packing-key domain flag returned Ok");
     };
@@ -204,12 +218,13 @@ fn wire_packing_key_ntt_flag_is_refused_before_session_registration() {
         .expect("query carries inline packing keys");
     keys.y_body[0] = forge_ntt_flag(&keys.y_body[0]);
     let wire = bincode::serialize(&keys).expect("serialize forged session keys");
-    let decoded: ClientPackingKeys =
-        bincode::deserialize(&wire).expect("decode forged session keys");
+    assert_decode_refused::<ClientPackingKeys>(
+        &wire,
+        "coefficient-domain packing-key y_body[0] required",
+    );
 
     let store = ServerSessionStore::new();
-    let Err(error) =
-        store.register_server_side(decoded, cache.pack_params(), &params.ntt_context())
+    let Err(error) = store.register_server_side(keys, cache.pack_params(), &params.ntt_context())
     else {
         panic!("forged session packing key was registered");
     };
@@ -238,11 +253,13 @@ fn direct_store_refuses_ntt_flag_in_wire_z_body() {
         .expect("query carries inline packing keys");
     keys.z_body.push(forge_ntt_flag(&keys.y_body[0]));
     let wire = bincode::serialize(&keys).expect("serialize forged session keys");
-    let decoded: ClientPackingKeys =
-        bincode::deserialize(&wire).expect("decode forged session keys");
+    assert_decode_refused::<ClientPackingKeys>(
+        &wire,
+        "coefficient-domain packing-key z_body[0] required",
+    );
 
     let store = ServerSessionStore::new();
-    let Err(error) = store.register(decoded) else {
+    let Err(error) = store.register(keys) else {
         panic!("forged z_body polynomial was registered");
     };
     assert!(
@@ -272,11 +289,13 @@ fn inline_packing_key_with_wrong_dimension_is_refused_before_respond() {
         .expect("query carries inline packing keys");
     keys.y_body[0] = Poly::from_coeffs_moduli(vec![2u64; 1024], params.moduli());
     let wire = bincode::serialize(&query).expect("serialize forged query");
-    let decoded: SeededClientQuery =
-        bincode::deserialize(&wire).expect("self-consistent forged polynomial must decode");
+    assert_decode_refused::<SeededClientQuery>(
+        &wire,
+        "but packing-key y_body[0] in the same container has ring_dim 1024",
+    );
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        respond_seeded_inspiring_cached_with_session(&crs, &encoded, &decoded, &cache, None)
+        respond_seeded_inspiring_cached_with_session(&crs, &encoded, &query, &cache, None)
     }));
     let Ok(Err(error)) = outcome else {
         panic!("wrong-dimension inline packing key must return a typed error");
@@ -307,12 +326,14 @@ fn registered_packing_key_with_wrong_modulus_is_refused_before_derivation() {
         .expect("query carries inline packing keys");
     keys.y_body[0] = Poly::from_coeffs_moduli(vec![2u64; params.ring_dim], &[12_289]);
     let wire = bincode::serialize(&keys).expect("serialize forged packing keys");
-    let decoded: ClientPackingKeys =
-        bincode::deserialize(&wire).expect("self-consistent forged polynomial must decode");
+    assert_decode_refused::<ClientPackingKeys>(
+        &wire,
+        "but packing-key y_body[0] in the same container has ring_dim 256, moduli [12289]",
+    );
 
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         ServerSessionStore::new().register_server_side(
-            decoded,
+            keys,
             cache.pack_params(),
             &params.ntt_context(),
         )
@@ -345,11 +366,10 @@ fn registered_z_body_with_wrong_dimension_is_refused_before_derivation() {
     keys.z_body
         .push(Poly::from_coeffs_moduli(vec![2u64; 1024], params.moduli()));
     let wire = bincode::serialize(&keys).expect("serialize forged packing keys");
-    let decoded: ClientPackingKeys =
-        bincode::deserialize(&wire).expect("self-consistent forged polynomial must decode");
+    assert_decode_refused::<ClientPackingKeys>(&wire, "packing-key z_body[0] has ring_dim 1024");
 
     let Err(error) = ServerSessionStore::new().register_server_side(
-        decoded,
+        keys,
         cache.pack_params(),
         &params.ntt_context(),
     ) else {

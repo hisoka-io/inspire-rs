@@ -1,7 +1,7 @@
 //! Key-switching matrix generation.
 
 use crate::math::{GaussianSampler, NttContext, Poly};
-use crate::rgsw::GadgetVector;
+use crate::rgsw::{require_gadget_rows, GadgetVector};
 use crate::rlwe::{apply_automorphism, RlweCiphertext, RlweSecretKey};
 use serde::{Deserialize, Serialize};
 
@@ -11,11 +11,36 @@ fn sample_error_poly(dim: usize, moduli: &[u64], sampler: &mut GaussianSampler) 
 
 /// Rows `K[i] = RLWE_{s'}(s * z^i)` carrying s from key s to key s'.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "KeySwitchingMatrixWire")]
 pub struct KeySwitchingMatrix {
     /// One row per gadget power.
     pub rows: Vec<RlweCiphertext>,
     /// Decomposition base and length.
     pub gadget: GadgetVector,
+}
+
+#[derive(Deserialize)]
+struct KeySwitchingMatrixWire {
+    rows: Vec<RlweCiphertext>,
+    gadget: GadgetVector,
+}
+
+impl TryFrom<KeySwitchingMatrixWire> for KeySwitchingMatrix {
+    type Error = String;
+
+    /// Key switching decomposes against the gadget and indexes one row per digit, so a
+    /// short matrix would switch to wrong values rather than fail.
+    fn try_from(wire: KeySwitchingMatrixWire) -> Result<Self, Self::Error> {
+        require_gadget_rows(
+            "key-switching matrix",
+            &wire.gadget,
+            wire.rows.iter().map(|row| &row.a),
+        )?;
+        Ok(Self {
+            rows: wire.rows,
+            gadget: wire.gadget,
+        })
+    }
 }
 
 impl KeySwitchingMatrix {

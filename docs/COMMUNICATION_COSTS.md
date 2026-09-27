@@ -266,8 +266,8 @@ The production-cell regression
 respond, switch, serialize, deserialize, and extract path and pins 10,446
 serialized bytes against 11,543 for the byte-aligned RIMS codec, which is why
 RIMS is not on the wire. The 45-bit RIMS regression still pins 13,847 codec
-bytes. The exported 33-bit target remains unwired; it fails the conservative
-noise gate at 0.833x.
+bytes. The 33-bit prime fails the conservative noise gate at 0.57x; it is not
+exported and survives only in a test-only KAT.
 
 ## Why Generic Compression Won't Help
 

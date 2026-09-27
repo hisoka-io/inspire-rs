@@ -284,6 +284,13 @@ impl<'de> Deserialize<'de> for ServerResponse {
                             )));
                         }
                     }
+                    crate::rlwe::require_same_ring(
+                        &format!("column ciphertext[{column_index}]"),
+                        &column.a,
+                        "the full response",
+                        &ciphertext.a,
+                    )
+                    .map_err(D::Error::custom)?;
                 }
                 (ciphertext, None)
             }
@@ -340,6 +347,14 @@ impl<'de> Deserialize<'de> for ServerResponse {
                     let prefix = b_prefix
                         .get(prefix_start..prefix_end)
                         .ok_or_else(|| D::Error::custom("packed b prefix shape mismatch"))?;
+                    let modulus = a.moduli()[limb];
+                    if let Some(index) = prefix.iter().position(|&c| c >= modulus) {
+                        return Err(D::Error::custom(format!(
+                            "packed b prefix limb {limb} coefficient {index} is {}, not \
+                             canonical for modulus {modulus}",
+                            prefix[index]
+                        )));
+                    }
                     let output = b_coeffs
                         .get_mut(output_start..output_end)
                         .ok_or_else(|| D::Error::custom("packed b output shape mismatch"))?;
@@ -662,6 +677,7 @@ pub fn respond_one_packing(
     use crate::inspiring::automorph_pack::pack_lwes;
 
     require_crs_rgsw_gadget("respond_one_packing", crs, query)?;
+    crs.require_galois_keys("respond_one_packing")?;
     let _d = crs.ring_dim();
     let _q = crs.modulus();
     let ctx = crs.params.ntt_context();

@@ -21,6 +21,7 @@ fn sample_error_poly(dim: usize, moduli: &[u64], sampler: &mut GaussianSampler) 
 /// assert_eq!(gadget.len, 3);
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "GadgetVectorWire")]
 pub struct GadgetVector {
     /// Base z.
     pub base: u64,
@@ -28,6 +29,74 @@ pub struct GadgetVector {
     pub len: usize,
     /// Ciphertext modulus q.
     pub q: u64,
+}
+
+#[derive(Deserialize)]
+struct GadgetVectorWire {
+    base: u64,
+    len: usize,
+    q: u64,
+}
+
+impl TryFrom<GadgetVectorWire> for GadgetVector {
+    type Error = String;
+
+    /// [`GadgetVector::new`]'s preconditions, plus `q >= 2`: [`GadgetVector::powers`]
+    /// reduces mod `q`.
+    fn try_from(wire: GadgetVectorWire) -> Result<Self, Self::Error> {
+        if wire.base < 2 || wire.len == 0 || wire.q < 2 {
+            return Err(format!(
+                "wire shape refused: gadget base {} len {} q {} needs base >= 2, len >= 1, \
+                 q >= 2",
+                wire.base, wire.len, wire.q
+            ));
+        }
+        Ok(Self {
+            base: wire.base,
+            len: wire.len,
+            q: wire.q,
+        })
+    }
+}
+
+/// One row per gadget digit, every row on one ring, and that ring's modulus the one
+/// the gadget decomposes against.
+pub(crate) fn require_gadget_rows<'a>(
+    container: &str,
+    gadget: &GadgetVector,
+    rows: impl ExactSizeIterator<Item = &'a Poly>,
+) -> Result<(), String> {
+    if rows.len() != gadget.len {
+        return Err(format!(
+            "wire shape refused: {container} carries {} rows for a {}-digit gadget",
+            rows.len(),
+            gadget.len
+        ));
+    }
+    let mut reference: Option<&Poly> = None;
+    for (index, poly) in rows.enumerate() {
+        match reference {
+            None => {
+                if poly.modulus() != gadget.q {
+                    return Err(format!(
+                        "wire shape refused: {container} row modulus {} differs from gadget q {}",
+                        poly.modulus(),
+                        gadget.q
+                    ));
+                }
+                reference = Some(poly);
+            }
+            Some(first) => {
+                crate::rlwe::require_same_ring(
+                    &format!("{container} row {index}"),
+                    poly,
+                    "row 0",
+                    first,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl GadgetVector {
@@ -79,11 +148,30 @@ impl GadgetVector {
 /// [ Row 0..ell-1: RLWE encryptions that decrypt to m*z^i ]
 /// ```
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "RgswCiphertextWire")]
 pub struct RgswCiphertext {
     /// One RLWE row per gadget digit.
     pub rows: Vec<RlweCiphertext>,
     /// Decomposition base and length.
     pub gadget: GadgetVector,
+}
+
+#[derive(Deserialize)]
+struct RgswCiphertextWire {
+    rows: Vec<RlweCiphertext>,
+    gadget: GadgetVector,
+}
+
+impl TryFrom<RgswCiphertextWire> for RgswCiphertext {
+    type Error = String;
+
+    fn try_from(wire: RgswCiphertextWire) -> Result<Self, Self::Error> {
+        require_gadget_rows("RGSW", &wire.gadget, wire.rows.iter().map(|row| &row.a))?;
+        Ok(Self {
+            rows: wire.rows,
+            gadget: wire.gadget,
+        })
+    }
 }
 
 impl RgswCiphertext {
@@ -195,11 +283,30 @@ impl RgswCiphertext {
 
 /// [`RgswCiphertext`] carrying each row's `a` as a 32-byte seed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "SeededRgswCiphertextWire")]
 pub struct SeededRgswCiphertext {
     /// One seeded RLWE row per gadget digit.
     pub rows: Vec<SeededRlweCiphertext>,
     /// Decomposition base and length.
     pub gadget: GadgetVector,
+}
+
+#[derive(Deserialize)]
+struct SeededRgswCiphertextWire {
+    rows: Vec<SeededRlweCiphertext>,
+    gadget: GadgetVector,
+}
+
+impl TryFrom<SeededRgswCiphertextWire> for SeededRgswCiphertext {
+    type Error = String;
+
+    fn try_from(wire: SeededRgswCiphertextWire) -> Result<Self, Self::Error> {
+        require_gadget_rows("RGSW", &wire.gadget, wire.rows.iter().map(|row| &row.b))?;
+        Ok(Self {
+            rows: wire.rows,
+            gadget: wire.gadget,
+        })
+    }
 }
 
 impl SeededRgswCiphertext {

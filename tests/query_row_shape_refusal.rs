@@ -25,7 +25,9 @@ fn params() -> InspireParams {
     }
 }
 
-fn assert_forged_row_refused(forged_b: Poly, expected_error: &str) {
+/// `decode_refusal` names the decoder refusal a forgery inconsistent with its own gadget
+/// meets; the responder guard is then driven with the in-memory forgery.
+fn assert_forged_row_refused(forged_b: Poly, expected_error: &str, decode_refusal: Option<&str>) {
     let params = params();
     let entry_size = 32usize;
     let target = 5u64;
@@ -49,8 +51,18 @@ fn assert_forged_row_refused(forged_b: Poly, expected_error: &str) {
     let mut forged = query;
     forged.rgsw_ciphertext.rows[0].b = forged_b;
     let wire = bincode::serialize(&forged).expect("serialize forged query");
-    let decoded: SeededClientQuery =
-        bincode::deserialize(&wire).expect("self-consistent forged polynomial must decode");
+    let decoded: SeededClientQuery = match (bincode::deserialize(&wire), decode_refusal) {
+        (Ok(decoded), None) => decoded,
+        (Err(refusal), Some(needle)) => {
+            assert!(
+                refusal.to_string().contains(needle),
+                "wrong decode refusal: {refusal}"
+            );
+            forged
+        }
+        (Ok(_), Some(needle)) => panic!("the decoder accepted a forgery it must refuse: {needle}"),
+        (Err(refusal), None) => panic!("self-consistent forgery must decode: {refusal}"),
+    };
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         respond_seeded_inspiring_cached_with_session(&crs, &encoded, &decoded, &cache, None)
     }));
@@ -68,12 +80,16 @@ fn assert_forged_row_refused(forged_b: Poly, expected_error: &str) {
 fn wire_rgsw_row_with_wrong_dimension_is_refused_before_expansion() {
     let params = params();
     let forged_b = Poly::from_coeffs_moduli(vec![2u64; 1024], params.moduli());
-    assert_forged_row_refused(forged_b, "RGSW row 0 b dimension 1024");
+    assert_forged_row_refused(forged_b, "RGSW row 0 b dimension 1024", None);
 }
 
 #[test]
 fn wire_rgsw_row_with_wrong_modulus_is_refused_before_expansion() {
     let params = params();
     let forged_b = Poly::from_coeffs_moduli(vec![2u64; params.ring_dim], &[12_289]);
-    assert_forged_row_refused(forged_b, "RGSW row 0 b moduli");
+    assert_forged_row_refused(
+        forged_b,
+        "RGSW row 0 b moduli",
+        Some("RGSW row modulus 12289 differs from gadget q"),
+    );
 }

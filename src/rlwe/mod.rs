@@ -11,4 +11,5 @@ pub use galois::{
     apply_automorphism, automorphism_ciphertext, automorphism_order, compose_automorphisms,
     galois_generators, inverse_automorphism, is_valid_galois_element, try_inverse_automorphism,
 };
+pub(crate) use types::require_same_ring;
 pub use types::{RlweCiphertext, RlweSecretKey, SeededRlweCiphertext};

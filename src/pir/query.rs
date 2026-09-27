@@ -101,6 +101,7 @@ pub struct ServerSessionHandle(pub u64);
 /// Privacy caveat: `shard_id` travels in cleartext, so the anonymity set is one
 /// shard rather than the whole database. See PRIVACY.md.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "ClientQueryWire")]
 pub struct ClientQuery {
     /// Target shard, unencrypted.
     pub shard_id: u32,
@@ -120,6 +121,7 @@ pub struct ClientQuery {
 /// `ClientQuery` carrying seeds in place of the `a` polynomials, roughly halving
 /// query bytes; the server expands before processing.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "SeededClientQueryWire")]
 pub struct SeededClientQuery {
     /// Target shard, unencrypted.
     pub shard_id: u32,
@@ -134,6 +136,88 @@ pub struct SeededClientQuery {
     /// Reference to pre-uploaded packing keys; see [`ClientQuery::session_handle`].
     #[serde(default)]
     pub session_handle: Option<ServerSessionHandle>,
+}
+
+#[derive(Deserialize)]
+struct ClientQueryWire {
+    shard_id: u32,
+    rgsw_ciphertext: RgswCiphertext,
+    #[serde(default)]
+    packing_mode: PackingMode,
+    #[serde(default)]
+    inspiring_packing_keys: Option<ClientPackingKeys>,
+    #[serde(default)]
+    session_handle: Option<ServerSessionHandle>,
+}
+
+#[derive(Deserialize)]
+struct SeededClientQueryWire {
+    shard_id: u32,
+    rgsw_ciphertext: SeededRgswCiphertext,
+    #[serde(default)]
+    packing_mode: PackingMode,
+    #[serde(default)]
+    inspiring_packing_keys: Option<ClientPackingKeys>,
+    #[serde(default)]
+    session_handle: Option<ServerSessionHandle>,
+}
+
+/// Query rows are encrypted in the coefficient domain; the responder transforms them
+/// itself, so a row flagged NTT would be multiplied as if it were already transformed.
+fn require_coefficient_rows<'a>(
+    rows: impl Iterator<Item = (usize, &'static str, &'a crate::math::Poly)>,
+) -> Result<()> {
+    for (row, component, poly) in rows {
+        if poly.is_ntt() {
+            return Err(pir_err!(
+                "coefficient-domain RGSW row {row} {component} required; client query \
+                 declares NTT domain. Rebuild the query from the current CRS"
+            ));
+        }
+    }
+    Ok(())
+}
+
+impl TryFrom<ClientQueryWire> for ClientQuery {
+    type Error = super::error::PirError;
+
+    fn try_from(wire: ClientQueryWire) -> Result<Self> {
+        require_coefficient_rows(
+            wire.rgsw_ciphertext
+                .rows
+                .iter()
+                .enumerate()
+                .flat_map(|(index, row)| [(index, "a", &row.a), (index, "b", &row.b)]),
+        )?;
+        Ok(Self {
+            shard_id: wire.shard_id,
+            rgsw_ciphertext: wire.rgsw_ciphertext,
+            packing_mode: wire.packing_mode,
+            inspiring_packing_keys: wire.inspiring_packing_keys,
+            session_handle: wire.session_handle,
+        })
+    }
+}
+
+impl TryFrom<SeededClientQueryWire> for SeededClientQuery {
+    type Error = super::error::PirError;
+
+    fn try_from(wire: SeededClientQueryWire) -> Result<Self> {
+        require_coefficient_rows(
+            wire.rgsw_ciphertext
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| (index, "b", &row.b)),
+        )?;
+        Ok(Self {
+            shard_id: wire.shard_id,
+            rgsw_ciphertext: wire.rgsw_ciphertext,
+            packing_mode: wire.packing_mode,
+            inspiring_packing_keys: wire.inspiring_packing_keys,
+            session_handle: wire.session_handle,
+        })
+    }
 }
 
 impl SeededClientQuery {

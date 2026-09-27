@@ -147,6 +147,9 @@ impl ServerCrs {
         self.params
             .validate()
             .map_err(|e| pir_err!("ServerCrs carries invalid InspireParams: {e}"))?;
+        if !self.galois_keys.is_empty() {
+            self.require_galois_keys("ServerCrs")?;
+        }
         if self.inspiring_num_columns == 0 {
             return Ok(());
         }
@@ -161,6 +164,43 @@ impl ServerCrs {
                     PackParams::legal_widths(self.params.ring_dim)
                 )
             })
+    }
+
+    /// One key per tree level, each on the CRS ring. The published CRS strips the keys,
+    /// so only the automorphism-packing responder demands them.
+    pub(crate) fn require_galois_keys(&self, operation: &str) -> Result<()> {
+        let levels = self.params.ring_dim.trailing_zeros() as usize;
+        if self.galois_keys.len() != levels {
+            return Err(pir_err!(
+                "{operation}: {} galois keys, but ring_dim {} packs through {levels} tree \
+                 levels; this CRS cannot drive automorphism packing",
+                self.galois_keys.len(),
+                self.params.ring_dim
+            ));
+        }
+        for (index, key) in self.galois_keys.iter().enumerate() {
+            if key.rows.len() != key.gadget.len {
+                return Err(pir_err!(
+                    "{operation}: galois key {index} carries {} rows for a {}-digit gadget",
+                    key.rows.len(),
+                    key.gadget.len
+                ));
+            }
+            for poly in key.rows.iter().flat_map(|row| [&row.a, &row.b]) {
+                if poly.dimension() != self.params.ring_dim || poly.moduli() != self.params.moduli()
+                {
+                    return Err(pir_err!(
+                        "{operation}: galois key {index} is on ring_dim {}, moduli {:?}, but \
+                         the CRS ring is ring_dim {}, moduli {:?}",
+                        poly.dimension(),
+                        poly.moduli(),
+                        self.params.ring_dim,
+                        self.params.moduli()
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Deserialize a [`to_versioned_bytes`](Self::to_versioned_bytes) blob,

@@ -72,6 +72,24 @@ pub enum ExtractError {
         /// CRT limbs the response carried.
         limbs: usize,
     },
+    /// A response ciphertext or the secret key is not in the shape the CRS decrypts:
+    /// a dimension or CRT modulus set the NTT would assert on, or NTT-domain values.
+    ShapeMismatch {
+        /// Extractor that rejected the input.
+        operation: &'static str,
+        /// Which polynomial, e.g. `response.a` or `secret key`.
+        component: String,
+        /// Ring dimension received.
+        dimension: usize,
+        /// Ring dimension required.
+        expected_dimension: usize,
+        /// CRT moduli received.
+        moduli: Vec<u64>,
+        /// CRT moduli required.
+        expected_moduli: Vec<u64>,
+        /// Whether the polynomial declared the NTT domain.
+        ntt: bool,
+    },
     /// The TwoPacking extractor received a tree-packed or untagged response.
     TwoPackingModeMismatch {
         /// Decoded semantic mode.
@@ -112,6 +130,20 @@ impl fmt::Display for ExtractError {
                 f,
                 "response modulus {modulus} ({limbs} limb(s)) is neither the CRS modulus nor an \
                  implemented mod-switch target; refusing before deriving anything from it"
+            ),
+            Self::ShapeMismatch {
+                operation,
+                component,
+                dimension,
+                expected_dimension,
+                moduli,
+                expected_moduli,
+                ntt,
+            } => write!(
+                f,
+                "{operation}: {component} has ring_dim {dimension}, moduli {moduli:?}, \
+                 ntt={ntt}; decryption requires ring_dim {expected_dimension}, moduli \
+                 {expected_moduli:?} in the coefficient domain. Refusing before decrypting"
             ),
             Self::TwoPackingModeMismatch {
                 mode,

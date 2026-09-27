@@ -267,7 +267,7 @@ Based on this comparison, potential future enhancements:
 5. **SimplePIR variant** - For comparison/simpler use cases
 
 Note: Seed expansion was implemented in December 2024, achieving 50% query size reduction (192 KB -> 98 KB).
-The prior modulus-switching query experiment was removed. A checked 45-bit RIMS v2 response codec now exists behind a default-off feature; its 33-bit target fails the conservative noise gate, and no adapter transport calls either target. The adapter responder instead mod-switches each response to the checked 36-bit target `MOD_SWITCH_TARGET_36BIT` and serializes it through the bincode packed-response path, not RIMS.
+The prior modulus-switching query experiment was removed. A checked 45-bit RIMS v2 response codec now exists behind a default-off feature; a 33-bit prime fails the conservative noise gate and is kept only in a test-only KAT, and no adapter transport calls the RIMS codec. The adapter responder instead mod-switches each response to the checked 36-bit target `MOD_SWITCH_TARGET_36BIT` and serializes it through the bincode packed-response path, not RIMS.
 
 ---
 

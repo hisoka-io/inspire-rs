@@ -265,9 +265,9 @@ impl InspireParams {
     /// The lattice-estimator run that measured `secure_128_d2048` at 121.5 bits
     /// did not cover this ring dimension, so its level is unmeasured.
     ///
-    /// These parameters provide more noise margin than d=2048, suitable for
-    /// applications requiring additional homomorphic operations or higher
-    /// noise tolerance.
+    /// At the same q as d=2048 the wider ring grows mod-switch rounding and packing
+    /// noise, so these parameters carry less noise margin, not more: the 36-bit
+    /// mod-switch gate clears 1.70x at d=2048 and 1.48x here.
     ///
     /// # Returns
     ///
@@ -467,34 +467,11 @@ impl InspireParams {
             );
         }
 
-        // Documentation-only note (no runtime rejection):
-        //
-        // `pir::extract::extract_packed` computes `mod_inverse(d, p)`.
-        // Under p=65537 (Fermat F4, shipping config) + d=2048, gcd
-        // is 1 and the inverse exists. Under legacy test params
-        // (p=65536, Google's default) gcd is 256 and the inverse
-        // does not exist, so `extract_packed` returns the typed
-        // `ExtractError::DegreeNotInvertible` error rather than
-        // silently producing garbage plaintext. (Pre-fork code used
-        // `.unwrap_or(1)` here; that fallback was removed.)
-        //
-        // A strict rejection was removed from `validate()` because
-        // it broke 15 pre-existing unit tests using the p=65536
-        // fixture. The strict version is available for callers who
-        // want to opt in:
-        //   InspireParams::validate_strict_tree_packed()
-        //
-        // CORRECTION 2026-09-06: this block used to end by claiming the
-        // shipping TwoPacking + InspiRING path does not reach
-        // extract_packed's d_inv branch, so the invariant was "not load
-        // bearing". That was measured false. `extract_two_packing`
-        // dispatches on `response.packing_mode`, which is a byte decoded
-        // from the SERVER's response, and routes both `Some(Tree)` and
-        // `None` into extract_packed. Both shipping client entry points
-        // go through it. At d=2048/p=65537 gcd is 1, so the
-        // DegreeNotInvertible guard above never fires, and the packed
-        // path returns wrong bytes with an Ok status. Reachability here
-        // is server-controlled, not a local choice.
+        // gcd(ring_dim, p) == 1 is not required here: the p = 65536 fixtures exercise the
+        // non-tree paths. Only a caller-chosen OnePacking extract needs d^{-1} mod p, and
+        // it refuses a non-invertible d with ExtractError::DegreeNotInvertible;
+        // extract_two_packing refuses every non-Inspiring mode, so a server cannot route a
+        // response there. validate_strict_tree_packed opts in to the check.
         Ok(())
     }
 
@@ -561,7 +538,8 @@ impl Default for InspireParams {
 // kernels would produce garbage coefficients; under this derivation they
 // are drop-in compatible.
 //
-// See the noise-budget proof documentation for the cryptographer-review gate.
+// Theorem 7's `(q~/q)^2` factor was reviewed and does not belong in `get_variance`; the
+// mod-switch rounding term is charged by `check_mod_switch_noise_budget` instead.
 // ===========================================================================
 
 /// Inputs to the adaptive derivation. Same shape as Google's function.
@@ -654,7 +632,7 @@ pub fn derive_medium_payload(inputs: &AdaptiveInputs) -> AdaptiveDerivation {
     // The noise formula's `p^2` term changes from 65536^2 to 65537^2 - a
     // delta of ~3.05e-5 bits in log space, well below the 0.01-bit
     // measurement floor. Variance bound is identical to the ported
-    // derivation. See the noise-budget analysis for the proof.
+    // derivation.
     let p: u64 = 65537;
 
     let q2_bits: usize = 28;

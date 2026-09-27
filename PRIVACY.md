@@ -169,6 +169,22 @@ floor must not use this preset as shipped.
 reopen the noise failure this modulus was raised to fix, so the two constraints
 are in direct tension and the tradeoff is unresolved.
 
+### 7. Extraction Binds Nothing to the Queried Index
+
+`extract`, `extract_inspiring`, `extract_two_packing`, `extract_inspiring_mod_switched`
+and every wrapper over them, including a client's `extract_response`, decrypt whatever
+ciphertext arrives under the session key. None of them reads `ClientState::index`,
+`shard_id` or `local_index`, and nothing in the response names the row it answers. A
+response for another index, from another shard, or from an earlier query of the same
+session decrypts to a well-formed record of the right width and returns `Ok`.
+
+**Impact**: a server that answers the wrong row, by fault or by intent, is not detected
+here. Query privacy is unaffected; integrity is not provided.
+
+**Mitigation**: none in-protocol. An application that needs the row it asked for must
+bind it itself, for example by checking a commitment carried in the record against a
+root it trusts independently of the server.
+
 ## Threat Model
 
 ### In Scope

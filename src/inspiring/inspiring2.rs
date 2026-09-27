@@ -619,6 +619,7 @@ impl OfflinePackingKeys {
 /// Client-side packing keys shipped with a query. Only `y_body` and `z_body` cross the
 /// wire; the rotations are derived on both sides.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "ClientPackingKeysWire")]
 pub struct ClientPackingKeys {
     /// `y_body[k] = tau_g(s)*g^k - s*w_mask[k] + error`.
     pub y_body: Vec<Poly>,
@@ -644,6 +645,62 @@ pub struct ClientPackingKeys {
     pub full_key: bool,
     /// gamma.
     pub num_to_pack: usize,
+}
+
+/// The serialized fields of [`ClientPackingKeys`], in order, so the bytes are unchanged.
+#[derive(Deserialize)]
+struct ClientPackingKeysWire {
+    y_body: Vec<Poly>,
+    #[serde(default)]
+    z_body: Vec<Poly>,
+    full_key: bool,
+    num_to_pack: usize,
+}
+
+impl TryFrom<ClientPackingKeysWire> for ClientPackingKeys {
+    type Error = String;
+
+    /// Bodies are generated in the coefficient domain on one ring; the server rotates
+    /// them, so a forged NTT flag or a stray ring would pack wrong values.
+    fn try_from(wire: ClientPackingKeysWire) -> Result<Self, Self::Error> {
+        let bodies = wire
+            .y_body
+            .iter()
+            .enumerate()
+            .map(|(index, poly)| ("y_body", index, poly))
+            .chain(
+                wire.z_body
+                    .iter()
+                    .enumerate()
+                    .map(|(index, poly)| ("z_body", index, poly)),
+            );
+        let mut reference: Option<(String, &Poly)> = None;
+        for (body, index, poly) in bodies {
+            if poly.is_ntt() {
+                return Err(format!(
+                    "coefficient-domain packing-key {body}[{index}] required; client material \
+                     declares NTT domain. Rebuild the keys from the current CRS"
+                ));
+            }
+            let name = format!("packing-key {body}[{index}]");
+            match &reference {
+                None => reference = Some((name, poly)),
+                Some((first_name, first)) => {
+                    crate::rlwe::require_same_ring(&name, poly, first_name, first)?;
+                }
+            }
+        }
+        Ok(Self {
+            y_body: wire.y_body,
+            z_body: wire.z_body,
+            y_all: Vec::new(),
+            y_all_ntt: Vec::new(),
+            y_bar_all: Vec::new(),
+            y_bar_all_ntt: Vec::new(),
+            full_key: wire.full_key,
+            num_to_pack: wire.num_to_pack,
+        })
+    }
 }
 
 impl ClientPackingKeys {

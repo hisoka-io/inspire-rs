@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offset, and the largest 36-bit NTT prime (residue 53,266) keeps 3.3 bits of
   margin where this one keeps about nine.
 - `ExtractError::UnimplementedResponseModulus`.
+- `ExtractError::ShapeMismatch`: every extractor refuses a response ciphertext or secret
+  key off the CRS ring, CRT moduli or coefficient domain instead of asserting in the NTT.
 - `PackParamsError::AutomorphTablesUnderivable`, returned when the NTT over the first
   modulus does not evaluate at n distinct roots of X^n + 1. No parameter set that
   `NttContext` accepts reaches it.
@@ -39,8 +41,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panicking, and hands an unswitched response, including a multi-limb one, to
   `extract_inspiring`.
 - The secret key is re-represented under the target modulus without a branch on,
-  or a division by, a secret coefficient.
+  or a division by, a secret coefficient, including the CRT composition of a two-limb
+  key.
 - `decode_response_packed` refuses RIMS frame version 1. No encoder ever emitted it.
+- Decoding refuses malformed nested shapes that previously decoded `Ok`: an RLWE
+  ciphertext whose `a` and `b` differ in ring or moduli; an RGSW or key-switching matrix
+  whose row count differs from its gadget length, whose rows differ in ring, or whose
+  gadget `q` is not the rows' modulus; a gadget with `base < 2`, `len == 0` or `q < 2`;
+  packing-key bodies on different rings or in the NTT domain; NTT-domain query rows;
+  unpacked response columns off the response ring; an empty polynomial flagged NTT; and,
+  on the human-readable codec, a non-canonical coefficient or packed `b` prefix. Domain
+  is checked per container (query rows, packing-key bodies, response ciphertexts, CRS
+  galois keys), not on a bare `RlweCiphertext`. Every encoding a correct client or server
+  produces decodes as before, byte for byte.
+- `ServerCrs::validate` refuses galois keys unless there are none (the published CRS
+  strips them) or exactly one per tree level, each on the CRS ring; `respond_one_packing`
+  refuses a CRS without them instead of panicking.
+- `ClientSession::from_residue` validates the residue's CRS and refuses a secret key
+  flagged NTT or on other CRT moduli, and packing keys off the CRS ring, instead of
+  panicking or accepting them.
+- Past its NTT product, `RlweCiphertext::decrypt` performs no division, branch or table
+  index on the noisy message: the rounding divides only public constants and corrects
+  by selection, the sum and CRT composition select their reductions, and the output
+  polynomial is built without a further reduction. Outputs are unchanged: the rounding
+  is checked against the divide exhaustively below the served 36-bit modulus and at
+  every quotient step of the shipped moduli. The NTT product itself is not covered: its
+  butterflies spell `if u + v >= q` and are branch-free only because the compiler emits
+  a select.
 
 - Corrected the security claim throughout the docs. `secure_128_d2048` measures
   **121.5 bits**, not 128, at the shipped `DEFAULT_Q = 2^60 - 2^14 + 1`
@@ -51,6 +78,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Corrected current-facing parameter documentation to the shipped single-prime
   `DEFAULT_Q = 2^60 - 2^14 + 1` and `p = 65537`. The 0.1.2 two-CRT entry below is
   retained as release history, not as the current default.
+
+### Removed
+
+- `pir::mod_switch::MOD_SWITCH_TARGET_33BIT`. It fails the shipped noise gate (0.57x);
+  the KAT that pins its measured error keeps a test-only copy.
 
 ## [0.2.0] - 2026-02-13
 

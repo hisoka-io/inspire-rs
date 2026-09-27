@@ -288,14 +288,22 @@ fn server_crs_skipped_fields_none_after_roundtrip() {
 // coefficient content; payload fidelity is additionally pinned by
 // poly_wire_shape_refusal.rs and the respond_byte_identity_kat golden.
 
+/// One well-formed coefficient-domain polynomial: decoding refuses a query whose row
+/// count differs from its gadget, so the fixture carries the one row a query has.
+fn zero_row_json() -> serde_json::Value {
+    let params = test_params();
+    serde_json::to_value(raven_inspire::math::Poly::zero(params.ring_dim, params.q)).unwrap()
+}
+
 #[test]
 fn client_query_packing_mode_defaults_to_inspiring() {
+    let row = zero_row_json();
     let mut value = serde_json::json!({
         "shard_id": 0,
         "packing_mode": "tree",
         "rgsw_ciphertext": {
-            "rows": [],
-            "gadget": {"base": 1048576u64, "len": 3u64, "q": 1152921504606830593u64}
+            "rows": [{"a": row, "b": row}],
+            "gadget": {"base": 1048576u64, "len": 1u64, "q": 1152921504606830593u64}
         }
     });
     value.as_object_mut().unwrap().remove("packing_mode");
@@ -311,8 +319,8 @@ fn seeded_client_query_packing_mode_defaults_to_inspiring() {
         "shard_id": 0,
         "packing_mode": "tree",
         "rgsw_ciphertext": {
-            "rows": [],
-            "gadget": {"base": 1048576u64, "len": 3u64, "q": 1152921504606830593u64}
+            "rows": [{"seed": vec![0u8; 32], "b": zero_row_json()}],
+            "gadget": {"base": 1048576u64, "len": 1u64, "q": 1152921504606830593u64}
         }
     });
     value.as_object_mut().unwrap().remove("packing_mode");

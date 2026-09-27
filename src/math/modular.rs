@@ -32,7 +32,12 @@ pub(crate) fn ct_sub_if_ge(v: u64, q: u64) -> u64 {
 /// widening multiply that replaces it is fixed latency.
 #[inline]
 pub(crate) fn reduce_by_public_modulus(a: u64, q: u64) -> u64 {
-    let recip = u64::MAX / q;
+    reduce_by_public_reciprocal(a, q, u64::MAX / q)
+}
+
+/// [`reduce_by_public_modulus`] with `recip = u64::MAX / q` hoisted out of a loop.
+#[inline]
+pub(crate) fn reduce_by_public_reciprocal(a: u64, q: u64, recip: u64) -> u64 {
     let quot = ((u128::from(a) * u128::from(recip)) >> 64) as u64;
     ct_sub_if_ge(a.wrapping_sub(quot.wrapping_mul(q)), q)
 }

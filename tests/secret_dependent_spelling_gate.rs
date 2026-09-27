@@ -36,6 +36,9 @@ const LWE_ENC_SRC: &str = include_str!("../src/lwe/enc.rs");
 const QUERY_SRC: &str = include_str!("../src/pir/query.rs");
 const SESSION_SRC: &str = include_str!("../src/pir/session.rs");
 const PARAMS_SRC: &str = include_str!("../src/params.rs");
+const RLWE_ENC_SRC: &str = include_str!("../src/rlwe/enc.rs");
+const CRT_SRC: &str = include_str!("../src/math/crt.rs");
+const MOD_SWITCH_SRC: &str = include_str!("../src/pir/mod_switch.rs");
 
 /// Body of the item introduced by `header`, brace-matched so an item nested in
 /// an `impl` block ends at its own closing brace and not the block's.
@@ -192,6 +195,20 @@ fn reduction_divides_only_by_the_public_modulus() {
         "reduce_by_public_modulus",
         &["u64::MAX / q"],
         "Barrett's only divide takes a constant over the public modulus",
+    );
+
+    let helper = item_source(MODULAR_SRC, "fn reduce_by_public_reciprocal");
+    deny(
+        helper,
+        "reduce_by_public_reciprocal",
+        &[" / ", " % ", "if "],
+        "a is secret; only the caller's public reciprocal may come from a divide",
+    );
+    require(
+        helper,
+        "reduce_by_public_reciprocal",
+        &["u128::from(a) * u128::from(recip)", "ct_sub_if_ge("],
+        "the estimate must be a multiply and the correction a selection",
     );
 }
 
@@ -417,6 +434,128 @@ fn automorphism_key_setup_reuses_the_hardened_transform() {
     );
 }
 
+/// The noisy message `a*s + b` is the plaintext row plus noise; it may reach a
+/// multiply, never a divider, a branch or an index.
+#[test]
+fn the_extract_key_switch_composes_the_secret_without_a_residue_divide() {
+    let body = item_source(MOD_SWITCH_SRC, "fn mod_switch_secret_key");
+    deny(
+        body,
+        "mod_switch_secret_key",
+        &[".coeff(", "from_coeffs(", " % ", "if c "],
+        "the key is secret; `coeff` composes two CRT limbs with a branch and a u128 remainder",
+    );
+    require(
+        body,
+        "mod_switch_secret_key",
+        &[
+            ".coeffs_composed_ct()",
+            "reduce_by_public_modulus(",
+            "Poly::from_crt_coeffs_reduced(",
+        ],
+        "composition, reduction and output must take the selected paths",
+    );
+}
+
+#[test]
+fn decryption_divides_only_public_values() {
+    let body = item_source(RLWE_ENC_SRC, "pub fn decrypt");
+    deny(
+        body,
+        "RlweCiphertext::decrypt",
+        &[
+            "/ delta",
+            "% p",
+            "as u128 /",
+            ".coeff(",
+            "&a_s + &self.b",
+            "from_coeffs(",
+        ],
+        "the noisy message is secret and a u128 divide is a software call on wasm32",
+    );
+    require(
+        body,
+        "RlweCiphertext::decrypt",
+        &[
+            ".add_ct(&self.b)",
+            ".coeffs_composed_ct()",
+            "rounding.round(",
+            "Poly::from_crt_coeffs_reduced(coeffs, &[p])",
+        ],
+        "the sum, the CRT composition, the rounding and the output must take the selected paths",
+    );
+
+    let setup = item_source(RLWE_ENC_SRC, "fn new(delta: u64, p: u64)");
+    require(
+        setup,
+        "PlaintextRounding::new",
+        &["u64::MAX / delta", "u64::MAX / p"],
+        "the only divides take a constant over the public scale and modulus",
+    );
+    let rounding = item_source(RLWE_ENC_SRC, "fn round(&self, noisy: u64)");
+    deny(
+        rounding,
+        "PlaintextRounding::round",
+        &[" / ", " % ", "if ", "match "],
+        "the noisy coefficient must reach only multiplies and selection",
+    );
+    require(
+        rounding,
+        "PlaintextRounding::round",
+        &[
+            ".ct_gt(&(self.delta - 1))",
+            "u128::conditional_select",
+            "reduce_by_public_reciprocal(",
+        ],
+        "the quotient correction must go through subtle's barrier",
+    );
+
+    let add = item_source(POLY_SRC, "pub(crate) fn add_ct");
+    deny(
+        add,
+        "Poly::add_ct",
+        &["if sum", ">= modulus {"],
+        "a secret sum must not steer a branch",
+    );
+    require(
+        add,
+        "Poly::add_ct",
+        &["ct_sub_if_ge("],
+        "the reduction must be selected",
+    );
+
+    let composed = item_source(POLY_SRC, "pub(crate) fn coeffs_composed_ct");
+    deny(
+        composed,
+        "Poly::coeffs_composed_ct",
+        &["crt_compose_2(", ".coeff(", " % "],
+        "the branching, dividing composition must not return here",
+    );
+    require(
+        composed,
+        "Poly::coeffs_composed_ct",
+        &["composer.compose("],
+        "composition must go through the constant-time composer",
+    );
+
+    let compose = item_source(CRT_SRC, "pub(crate) fn compose");
+    deny(
+        compose,
+        "CtCrtComposer::compose",
+        &[" / ", " % ", "if "],
+        "the residues are secret",
+    );
+    require(
+        compose,
+        "CtCrtComposer::compose",
+        &[
+            "reduce_by_public_reciprocal(a0, self.q1, self.q1_reciprocal)",
+            "ct_sub_if_ge(",
+        ],
+        "reduction and correction must be Barrett and selection",
+    );
+}
+
 // --------------------------------------------------------- extractor
 
 /// A gate whose extractor returns nothing passes every `deny` above. Each test
@@ -431,6 +570,7 @@ fn the_extractor_returns_whole_item_bodies() {
         (MODULAR_SRC, "pub fn from_signed"),
         (MODULAR_SRC, "fn ct_sub_if_ge"),
         (MODULAR_SRC, "fn reduce_by_public_modulus"),
+        (MODULAR_SRC, "fn reduce_by_public_reciprocal"),
         (POLY_SRC, "pub fn sample_gaussian_moduli"),
         (ENCODE_DB_SRC, "fn reduce_exponent_by_public_ring"),
         (ENCODE_DB_SRC, "pub fn inverse_monomial"),
@@ -441,6 +581,12 @@ fn the_extractor_returns_whole_item_bodies() {
         (GALOIS_SRC, "fn ct_mod_sub"),
         (PARAMS_SRC, "fn div_rem_by_public_divisor"),
         (PARAMS_SRC, "pub fn try_index_to_shard"),
+        (RLWE_ENC_SRC, "pub fn decrypt"),
+        (RLWE_ENC_SRC, "fn new(delta: u64, p: u64)"),
+        (RLWE_ENC_SRC, "fn round(&self, noisy: u64)"),
+        (POLY_SRC, "pub(crate) fn add_ct"),
+        (POLY_SRC, "pub(crate) fn coeffs_composed_ct"),
+        (CRT_SRC, "pub(crate) fn compose"),
     ];
     for (src, header) in cases {
         let body = item_source(src, header);

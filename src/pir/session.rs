@@ -309,17 +309,40 @@ impl ClientSession {
     /// [`register_with_server_derivation`](Self::register_with_server_derivation).
     /// Mismatched CRS and secret-key shapes are rejected here rather than at a
     /// later query.
+    ///
+    /// # Errors
+    /// The residue's CRS fails [`ServerCrs::validate`], its secret key is not a
+    /// coefficient-domain polynomial on the CRS ring, or its packing keys are off that ring.
     pub fn from_residue(residue: SessionResidue) -> Result<Self> {
-        if residue.crs.ring_dim() != residue.rlwe_sk.ring_dim()
-            || residue.crs.modulus() != residue.rlwe_sk.modulus()
-        {
+        residue
+            .crs
+            .validate()
+            .map_err(|e| pir_err!("inconsistent SessionResidue: {e}"))?;
+        let sk = &residue.rlwe_sk.poly;
+        if residue.crs.ring_dim() != sk.dimension() || residue.crs.params.moduli() != sk.moduli() {
             return Err(pir_err!(
-                "inconsistent SessionResidue: CRS (ring_dim {}, modulus {}) != secret key (ring_dim {}, modulus {})",
+                "inconsistent SessionResidue: CRS (ring_dim {}, moduli {:?}) != secret key \
+                 (ring_dim {}, moduli {:?})",
                 residue.crs.ring_dim(),
-                residue.crs.modulus(),
-                residue.rlwe_sk.ring_dim(),
-                residue.rlwe_sk.modulus()
+                residue.crs.params.moduli(),
+                sk.dimension(),
+                sk.moduli()
             ));
+        }
+        // `LweSecretKey::from_rlwe` reads coefficients, which asserts on the NTT flag.
+        if sk.is_ntt() {
+            return Err(pir_err!(
+                "inconsistent SessionResidue: the secret key declares the NTT domain; a \
+                 captured key is always in the coefficient domain"
+            ));
+        }
+        if let Some(keys) = residue.packing_keys.as_ref() {
+            require_wire_packing_body_shape(
+                keys,
+                residue.crs.ring_dim(),
+                residue.crs.params.moduli(),
+            )
+            .map_err(|e| pir_err!("inconsistent SessionResidue: {e}"))?;
         }
         let lwe_sk = LweSecretKey::from_rlwe(&residue.rlwe_sk);
         Ok(Self {

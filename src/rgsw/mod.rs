@@ -9,4 +9,5 @@ pub use external_product::{
     external_product, external_product_with_ntt_rgsw, gadget_decompose, gadget_reconstruct,
     rgsw_rows_to_ntt, ExternalProductError, RgswRowsNtt,
 };
+pub(crate) use types::require_gadget_rows;
 pub use types::{GadgetVector, RgswCiphertext, SeededRgswCiphertext};

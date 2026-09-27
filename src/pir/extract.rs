@@ -2,7 +2,9 @@
 
 use super::error::{ExtractError, Result};
 
+use crate::math::Poly;
 use crate::params::InspireVariant;
+use crate::rlwe::RlweCiphertext;
 
 use super::encode_db::reconstruct_entry;
 use super::query::ClientState;
@@ -17,6 +19,14 @@ pub fn extract(
     entry_size: usize,
 ) -> Result<Vec<u8>> {
     let num_columns = validate_unpacked_response_columns("extract", response, entry_size)?;
+    require_decryptable(
+        "extract",
+        crs,
+        state,
+        crs.params.moduli(),
+        &response.column_ciphertexts,
+        |column| format!("column ciphertext[{column}]"),
+    )?;
     let p = crs.params.p;
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
@@ -90,6 +100,61 @@ fn validate_unpacked_response_columns(
     Ok(expected)
 }
 
+/// Refuses what [`RlweCiphertext::decrypt`] would assert on or misread: the secret key
+/// must carry the CRS shape, and every ciphertext polynomial the CRS ring dimension,
+/// `moduli`, and coefficient-domain values.
+pub(crate) fn require_decryptable<'a>(
+    operation: &'static str,
+    crs: &InspireCrs,
+    state: &ClientState,
+    moduli: &[u64],
+    ciphertexts: impl IntoIterator<Item = &'a RlweCiphertext>,
+    label: impl Fn(usize) -> String,
+) -> Result<()> {
+    let ring_dim = crs.params.ring_dim;
+    require_poly_shape(
+        operation,
+        || "secret key".to_owned(),
+        &state.rlwe_secret_key.poly,
+        ring_dim,
+        crs.params.moduli(),
+    )?;
+    for (index, ciphertext) in ciphertexts.into_iter().enumerate() {
+        for (component, poly) in [("a", &ciphertext.a), ("b", &ciphertext.b)] {
+            require_poly_shape(
+                operation,
+                || format!("{}.{component}", label(index)),
+                poly,
+                ring_dim,
+                moduli,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn require_poly_shape(
+    operation: &'static str,
+    component: impl FnOnce() -> String,
+    poly: &Poly,
+    ring_dim: usize,
+    moduli: &[u64],
+) -> Result<()> {
+    if poly.dimension() == ring_dim && poly.moduli() == moduli && !poly.is_ntt() {
+        return Ok(());
+    }
+    Err(ExtractError::ShapeMismatch {
+        operation,
+        component: component(),
+        dimension: poly.dimension(),
+        expected_dimension: ring_dim,
+        moduli: poly.moduli().to_vec(),
+        expected_moduli: moduli.to_vec(),
+        ntt: poly.is_ntt(),
+    }
+    .into())
+}
+
 pub(crate) fn validate_packed_response_coefficients(
     operation: &'static str,
     response: &ServerResponse,
@@ -128,6 +193,14 @@ fn extract_packed(
 
     let num_columns = crate::num_columns(entry_size);
     validate_packed_response_coefficients("extract_packed", response, num_columns)?;
+    require_decryptable(
+        "extract_packed",
+        crs,
+        state,
+        crs.params.moduli(),
+        [&response.ciphertext],
+        |_| "response".to_owned(),
+    )?;
 
     let decrypted = response
         .ciphertext
@@ -163,6 +236,14 @@ pub fn extract_inspiring(
 
     let num_columns = crate::num_columns(entry_size);
     validate_packed_response_coefficients("extract_inspiring", response, num_columns)?;
+    require_decryptable(
+        "extract_inspiring",
+        crs,
+        state,
+        crs.params.moduli(),
+        [&response.ciphertext],
+        |_| "response".to_owned(),
+    )?;
 
     let decrypted = response
         .ciphertext
@@ -208,6 +289,14 @@ pub fn extract_with_tolerance(
 ) -> Result<Vec<u8>> {
     let num_columns =
         validate_unpacked_response_columns("extract_with_tolerance", response, entry_size)?;
+    require_decryptable(
+        "extract_with_tolerance",
+        crs,
+        state,
+        crs.params.moduli(),
+        &response.column_ciphertexts,
+        |column| format!("column ciphertext[{column}]"),
+    )?;
     let p = crs.params.p;
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
@@ -235,15 +324,19 @@ pub fn extract_with_tolerance(
 
 /// Decrypt and return the constant term alone.
 #[allow(dead_code)]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "uniform Result shape across the extract family; the sibling entry points are genuinely fallible"
-)]
 pub fn extract_single_coeff(
     crs: &InspireCrs,
     state: &ClientState,
     response: &ServerResponse,
 ) -> Result<u64> {
+    require_decryptable(
+        "extract_single_coeff",
+        crs,
+        state,
+        crs.params.moduli(),
+        [&response.ciphertext],
+        |_| "response".to_owned(),
+    )?;
     let p = crs.params.p;
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
@@ -257,15 +350,19 @@ pub fn extract_single_coeff(
 
 /// Decrypt and return every coefficient.
 #[allow(dead_code)]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "uniform Result shape across the extract family; the sibling entry points are genuinely fallible"
-)]
 pub fn extract_raw(
     crs: &InspireCrs,
     state: &ClientState,
     response: &ServerResponse,
 ) -> Result<Vec<u64>> {
+    require_decryptable(
+        "extract_raw",
+        crs,
+        state,
+        crs.params.moduli(),
+        [&response.ciphertext],
+        |_| "response".to_owned(),
+    )?;
     let p = crs.params.p;
     let delta = crs.params.delta();
     let ctx = crs.params.ntt_context();
