@@ -490,7 +490,8 @@ mod decrypt_differential {
     /// Every value below the served rung, old against new. About 7e10 evaluations, so
     /// run on demand: `cargo test --release --lib -- --ignored exhaustive`.
     #[test]
-    #[ignore = "exhaustive over 2^36 values; minutes on all cores"]
+    #[ignore = "exhaustive over 2^36 values, minutes on all cores. Trigger: changing \
+                PlaintextRounding, the decrypt rounding or the served 36-bit modulus."]
     fn rounding_matches_the_divide_exhaustively_below_the_served_rung() {
         let delta = SERVED_36_BIT / P;
         let rounding = PlaintextRounding::new(delta, P);
