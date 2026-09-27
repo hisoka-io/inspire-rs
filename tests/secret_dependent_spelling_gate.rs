@@ -1,23 +1,20 @@
-//! Spelling gate over the sites that touch a secret, NOT a timing proof. Two
-//! halves, both able to fail.
+//! Source-text gate over the sites that touch a secret, NOT a timing proof. It
+//! reads the source as text and fails on the spellings it lists; it never
+//! looks at codegen.
 //!
-//! The pins hold the branch-free form of the sites that already have one, so a
-//! revert to a secret-indexed load, a secret-conditioned jump or a primitive
-//! comparison has to be deliberate. `from_signed` is pinned here on purpose:
-//! the codegen gate next door states it cannot see a sign fold reverted to
-//! `if val >= 0`, and this closes that half.
-//!
-//! The ledger holds the sites that are still secret-dependent, recorded so a
-//! new one cannot appear unnoticed. A ledger entry fails in both directions -
-//! when the recorded shape changes, and when the site is fixed - because a fix
-//! must be proved byte-identical (tests/inverse_monomial_ct_rewrite_kat.rs)
-//! and then moved into the pins above. Failing on a fix is the cost of having
-//! the open sites enumerated anywhere at all.
+//! Each pin extracts one item body by its header and denies or requires
+//! literal substrings in it, so a revert to a secret-indexed load, a
+//! secret-conditioned jump, a divide or a primitive comparison has to be
+//! deliberate. `from_signed` is pinned on purpose: the codegen gate next door
+//! cannot see a sign fold reverted to `if val >= 0`.
 //!
 //! Renaming a gated item reddens rather than escapes: the extractor panics on
-//! a header it cannot find. What does escape is the same defect spelled a way
-//! the patterns do not name, and offending code moved out of a gated item into
-//! a helper the gate has never heard of. That is the limit of the form.
+//! a header it cannot find. Every pinned body is also scanned for the
+//! correction spellings a per-site list tends to miss, and a body pinned but
+//! left out of that scan fails the gate, keyed by source and header so the
+//! twins that share a header are counted apart. What still escapes is a
+//! defect spelled a way none of that names, and offending code moved out of a
+//! gated item into a helper the gate has never heard of.
 
 #![allow(
     clippy::expect_used,
@@ -41,6 +38,8 @@ const CRT_SRC: &str = include_str!("../src/math/crt.rs");
 const MOD_SWITCH_SRC: &str = include_str!("../src/pir/mod_switch.rs");
 const NTT_SRC: &str = include_str!("../src/math/ntt.rs");
 const SOLINAS_SRC: &str = include_str!("../src/math/solinas_redc.rs");
+const RGSW_TYPES_SRC: &str = include_str!("../src/rgsw/types.rs");
+const EXTRACT_SRC: &str = include_str!("../src/pir/extract.rs");
 
 /// Body of the item introduced by `header`, brace-matched so an item nested in
 /// an `impl` block ends at its own closing brace and not the block's.
@@ -90,6 +89,173 @@ fn require(body: &str, site: &str, needed: &[&str], why: &str) {
             "{site} no longer contains `{pattern}`; {why}:\n{body}"
         );
     }
+}
+
+const COMPARISONS: [&str; 6] = [" < ", " > ", " <= ", " >= ", " == ", " != "];
+
+fn has_comparison(text: &str) -> bool {
+    COMPARISONS.iter().any(|op| text.contains(op))
+}
+
+/// The parenthesised group whose `(` sits at byte `open`.
+fn group_after(body: &str, open: usize) -> &str {
+    let mut depth = 0usize;
+    for (offset, ch) in body[open..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &body[open..=open + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    &body[open..]
+}
+
+/// The parenthesised group whose `)` sits at byte `close`.
+fn group_before(body: &str, close: usize) -> &str {
+    let mut depth = 0usize;
+    for (offset, ch) in body[..=close].char_indices().rev() {
+        match ch {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &body[offset..=close];
+                }
+            }
+            _ => {}
+        }
+    }
+    &body[..=close]
+}
+
+/// Comparisons turned into integers, `u64::from(x >= q)` or `(x >= q) as u64`:
+/// the multiply-by-bool correction, which LLVM rebuilds into a select and then,
+/// in a hot loop, into a jump.
+fn bool_to_integer_spellings(body: &str) -> Vec<String> {
+    const INTEGERS: [&str; 12] = [
+        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+    ];
+    let mut hits = Vec::new();
+    for ty in INTEGERS {
+        let from = format!("{ty}::from(");
+        for (at, _) in body.match_indices(&from) {
+            let group = group_after(body, at + from.len() - 1);
+            if has_comparison(group) {
+                hits.push(format!("{ty}::from{group}"));
+            }
+        }
+        let cast = format!(") as {ty}");
+        for (at, _) in body.match_indices(&cast) {
+            let group = group_before(body, at);
+            if has_comparison(group) {
+                hits.push(format!("{group} as {ty}"));
+            }
+        }
+    }
+    hits
+}
+
+/// The correction spellings a per-site deny list tends to miss.
+fn deny_hidden_corrections(body: &str, site: &str) {
+    deny(
+        body,
+        site,
+        &[
+            "checked_sub(",
+            "checked_add(",
+            ".unwrap_or(",
+            ".unwrap_or_else(",
+            ".unwrap_or_default(",
+            "then_some(",
+            ".then(",
+            ".min(",
+            ".max(",
+            "} else {",
+            "else if ",
+        ],
+        "a correction on secret data must not hide behind a fallback, a bool or an else arm",
+    );
+    let casts = bool_to_integer_spellings(body);
+    assert!(
+        casts.is_empty(),
+        "{site} turns a comparison into an integer ({casts:?}); a correction on secret data \
+         must come from a borrow or a pinned helper:\n{body}"
+    );
+}
+
+/// For the small arithmetic helpers: no comparison at all, so a correction
+/// cannot come back as a boolean held in a `let`.
+fn deny_comparisons(body: &str, site: &str) {
+    deny(
+        body,
+        site,
+        &COMPARISONS,
+        "operands here are secret; compare only through a borrow or subtle",
+    );
+}
+
+/// The query bodies hold the secret index and leave all arithmetic on it to
+/// pinned callees, so the divide, widening, correction, loop, index and
+/// comparison tokens below, none of which they need today, are denied outright;
+/// an alias of the index escapes a per-name pattern but not these. The one
+/// `match` is on the public session handle.
+fn deny_query_body(body: &str, site: &str) {
+    deny(
+        body,
+        site,
+        &[
+            "/",
+            "%",
+            "div",
+            "rem",
+            "euclid",
+            "128",
+            "into(",
+            "from(",
+            "wrapping_",
+            "overflowing_",
+            "checked_",
+            "saturating_",
+            ".coeff(",
+            "set_coeff(",
+            "coeffs_mut(",
+            "if ",
+            "while ",
+            "for ",
+            "loop",
+            "[",
+            ".get(",
+            "nth(",
+            "skip(",
+            "split_at(",
+            "clamp(",
+            "matches!",
+            "select",
+            "then",
+            "min(",
+            "max(",
+            "cmp(",
+            ".lt(",
+            ".le(",
+            ".gt(",
+            ".ge(",
+            ".eq(",
+            ".ne(",
+        ],
+        "the query body holds the secret index and must leave its arithmetic to \
+         the pinned callees",
+    );
+    deny_comparisons(body, site);
+    assert_eq!(
+        body.matches("match ").count(),
+        body.matches("match self.session_handle {").count(),
+        "{site} matches on something other than the public session handle:\n{body}"
+    );
 }
 
 // ---------------------------------------------------------------- pins
@@ -220,14 +386,18 @@ fn sample_extraction_key_negation_is_selected_not_branched() {
     deny(
         body,
         "LweSecretKey::from_rlwe",
-        &["if s_i == 0", "if s_i != 0"],
-        "the RLWE coefficient is secret; modular negation must be selected",
+        &["if s_i == 0", "if s_i != 0", ".coeff(", " % "],
+        "the RLWE coefficient is secret; composition and negation must not branch or divide",
     );
     require(
         body,
         "LweSecretKey::from_rlwe",
-        &["u64::conditional_select", "s_i.ct_eq(&0)"],
-        "zero must be selected through subtle's barrier",
+        &[
+            ".coeffs_composed_ct()",
+            "u64::conditional_select",
+            "s_i.ct_eq(&0)",
+        ],
+        "limbs must compose without a divide and zero must be selected through subtle",
     );
 }
 
@@ -246,6 +416,10 @@ fn the_query_path_neither_branches_on_nor_indexes_by_the_local_index() {
             "{path} no longer reaches inverse_monomial with the local index; the gate \
              is watching a path that moved"
         );
+        assert!(
+            body.contains("inv_mono.scalar_mul(") && !body.contains("% modulus"),
+            "{path} must scale the secret monomial through the pinned `Poly::scalar_mul`"
+        );
         deny(
             body,
             path,
@@ -263,6 +437,38 @@ fn the_query_path_neither_branches_on_nor_indexes_by_the_local_index() {
              or address memory here",
         );
     }
+
+    // Item-level, so arithmetic on an alias of the index cannot hide in a body
+    // the whole-file patterns above do not name. The bodies need none of these
+    // tokens today, so each is denied wholesale rather than by spelling.
+    let bodies = [
+        (QUERY_SRC, "fn seeded_query_with_gadget"),
+        (QUERY_SRC, "pub fn query("),
+        (SESSION_SRC, "pub fn query("),
+        (SESSION_SRC, "pub fn query_seeded("),
+    ];
+    for (src, header) in bodies {
+        let body = item_source(src, header);
+        require(
+            body,
+            header,
+            &[
+                "index_to_shard(global_index)",
+                "inverse_monomial(local_index as usize",
+                "inv_mono.scalar_mul(",
+            ],
+            "the index must reach the monomial only through the pinned callees",
+        );
+        deny_query_body(body, header);
+    }
+    let wrapper = item_source(QUERY_SRC, "pub fn query_seeded(");
+    deny_query_body(wrapper, "query_seeded");
+    require(
+        wrapper,
+        "query_seeded",
+        &["seeded_query_with_gadget(crs, global_index, shard_config, rlwe_sk, sampler)"],
+        "the seeded query must stay a forward to the pinned body",
+    );
 }
 
 #[test]
@@ -465,21 +671,14 @@ fn decryption_divides_only_public_values() {
     deny(
         body,
         "RlweCiphertext::decrypt",
-        &[
-            "/ delta",
-            "% p",
-            "as u128 /",
-            ".coeff(",
-            "&a_s + &self.b",
-            "from_coeffs(",
-        ],
+        &["/ delta", "% p", "as u128 /", ".coeff(", "from_coeffs("],
         "the noisy message is secret and a u128 divide is a software call on wasm32",
     );
     require(
         body,
         "RlweCiphertext::decrypt",
         &[
-            ".add_ct(&self.b)",
+            "&a_s + &self.b",
             ".coeffs_composed_ct()",
             "rounding.round(",
             "Poly::from_crt_coeffs_reduced(coeffs, &[p])",
@@ -510,20 +709,6 @@ fn decryption_divides_only_public_values() {
             "reduce_by_public_reciprocal(",
         ],
         "the quotient correction must go through subtle's barrier",
-    );
-
-    let add = item_source(POLY_SRC, "pub(crate) fn add_ct");
-    deny(
-        add,
-        "Poly::add_ct",
-        &["if sum", ">= modulus {"],
-        "a secret sum must not steer a branch",
-    );
-    require(
-        add,
-        "Poly::add_ct",
-        &["ct_sub_if_ge("],
-        "the reduction must be selected",
     );
 
     let composed = item_source(POLY_SRC, "pub(crate) fn coeffs_composed_ct");
@@ -597,23 +782,36 @@ fn ntt_corrections_are_branch_free() {
     }
 
     let tails = [
-        (NTT_SRC, "fn montgomery_mul_at"),
-        (NTT_SRC, "fn to_montgomery("),
-        (NTT_SRC, "fn shoup_mul_at"),
-        (SOLINAS_SRC, "pub fn solinas_mont_mul_default_q"),
+        (NTT_SRC, "fn montgomery_mul_at", "csubq("),
+        (NTT_SRC, "fn to_montgomery(", "csubq("),
+        (
+            NTT_SRC,
+            "fn shoup_mul_at",
+            "mul_mod_shoup(a, b, b_shoup, q)",
+        ),
+        (MODULAR_SRC, "fn mul_mod_shoup(", "csubq("),
+        (SOLINAS_SRC, "pub fn solinas_mont_mul_default_q", "csubq("),
     ];
-    for (src, header) in tails {
+    for (src, header, correction) in tails {
         let body = item_source(src, header);
         deny(
             body,
             header,
-            &["if ", "match ", ">= q", ">= Q", "conditional_select"],
+            &[
+                "if ",
+                "match ",
+                ">= q",
+                ">= Q",
+                "conditional_select",
+                " % ",
+                " / ",
+            ],
             "the reduction tail sees a secret product",
         );
         require(
             body,
             header,
-            &["csubq("],
+            &[correction],
             "the final subtraction must be branch-free",
         );
     }
@@ -799,6 +997,524 @@ fn ntt_entry_points_correct_only_through_the_pinned_helpers() {
     }
 }
 
+/// The ring arithmetic every client operation on a secret goes through: the
+/// scalar product that scales the query monomial and the key, the sum,
+/// difference and negation that assemble a ciphertext, and the residue
+/// reduction behind every constructor.
+#[test]
+fn client_ring_arithmetic_is_branch_and_divide_free() {
+    let elementwise = [
+        ("impl Add for &Poly", "csubq(*c + r, modulus)"),
+        ("impl Sub for &Poly", "sub_mod_branchless(*c, b, modulus)"),
+        ("impl Neg for &Poly", "sub_mod_branchless(0, *c, modulus)"),
+        ("pub fn add_ntt_domain", "csubq(*c + o, modulus)"),
+        (
+            "pub fn add_assign_ntt_domain",
+            "csubq(self.coeffs[i] + other.coeffs[i], modulus)",
+        ),
+    ];
+    for (header, correction) in elementwise {
+        let body = item_source(POLY_SRC, header);
+        deny(
+            body,
+            header,
+            &["if ", "match ", " % ", " / ", "conditional_select"],
+            "coefficients are secret on the client; correct without a branch or divide",
+        );
+        deny_comparisons(body, header);
+        require(
+            body,
+            header,
+            &[correction],
+            "the correction must be the pinned helper",
+        );
+    }
+
+    let scale = item_source(POLY_SRC, "fn scale_residues");
+    let dispatch = "if modulus <= SHOUP_NARROW_MAX_MODULUS {";
+    assert_eq!(
+        (
+            scale.matches("if ").count(),
+            scale.matches(dispatch).count()
+        ),
+        (1, 1),
+        "scale_residues may branch only on the public modulus width:\n{scale}"
+    );
+    assert_eq!(
+        scale.matches(" % ").count(),
+        1,
+        "scale_residues may divide only the public scalar:\n{scale}"
+    );
+    deny(
+        scale,
+        "scale_residues",
+        &["*c %", "c as u128", "as u128 %", "modulus as u128"],
+        "the residue is secret and a 128-bit remainder is a variable-time software call",
+    );
+    require(
+        scale,
+        "scale_residues",
+        &[
+            "let scalar = scalar % modulus;",
+            "shoup_precompute(scalar, modulus)",
+            "mul_mod_shoup(*c, scalar, scalar_shoup, modulus)",
+            "mul_mod_shoup_wide(*c, scalar, scalar_shoup, modulus)",
+        ],
+        "every residue must take a Shoup product",
+    );
+
+    for (src, header) in [
+        (POLY_SRC, "pub fn scalar_mul("),
+        (POLY_SRC, "pub fn scalar_mul_assign"),
+    ] {
+        let body = item_source(src, header);
+        deny(body, header, &[" % ", "as u128"], "the residues are secret");
+    }
+    require(
+        item_source(POLY_SRC, "pub fn scalar_mul("),
+        "Poly::scalar_mul",
+        &["scalar_mul_assign(scalar)"],
+        "the copying form must share the pinned loop",
+    );
+    require(
+        item_source(POLY_SRC, "pub fn scalar_mul_assign"),
+        "Poly::scalar_mul_assign",
+        &["scale_residues("],
+        "every limb must go through the Shoup product",
+    );
+
+    let reduce = item_source(POLY_SRC, "fn reduce_residues");
+    deny(
+        reduce,
+        "reduce_residues",
+        &["%=", "*c %", "if "],
+        "the residues are secret",
+    );
+    deny_comparisons(reduce, "reduce_residues");
+    require(
+        reduce,
+        "reduce_residues",
+        &[
+            "u64::MAX / modulus",
+            "u128::from(*c) * u128::from(reciprocal)",
+            "csubq(c.wrapping_sub(quotient.wrapping_mul(modulus)), modulus)",
+        ],
+        "only the public reciprocal may come from a divide",
+    );
+    for header in ["fn reduce(&mut self)", "pub fn from_coeffs_moduli"] {
+        let body = item_source(POLY_SRC, header);
+        deny(
+            body,
+            header,
+            &[" % ", "%=", "crt_decompose_2(", "if "],
+            "the coefficients can be secret; reduce through the pinned Barrett loop",
+        );
+        require(
+            body,
+            header,
+            &["reduce_residues("],
+            "reduction must be Barrett",
+        );
+    }
+
+    let wide = item_source(MODULAR_SRC, "fn mul_mod_shoup_wide");
+    deny(
+        wide,
+        "mul_mod_shoup_wide",
+        &["if ", "match ", " % ", " / "],
+        "the multiplicand is secret",
+    );
+    deny_comparisons(wide, "mul_mod_shoup_wide");
+    require(
+        wide,
+        "mul_mod_shoup_wide",
+        &["u128::conditional_select(", ".ct_gt(&(q - 1))"],
+        "the 128-bit remainder must be corrected through subtle",
+    );
+    deny_comparisons(
+        item_source(MODULAR_SRC, "fn mul_mod_shoup("),
+        "mul_mod_shoup",
+    );
+}
+
+/// Encryption, key-switching setup and packing-key generation handle the secret
+/// key and the secret monomial; they may reach it only through the pinned ring
+/// arithmetic above, never with arithmetic of their own.
+#[test]
+fn client_encryption_reaches_only_the_pinned_arithmetic() {
+    let (plain_rgsw, seeded_rgsw) = rgsw_impls();
+    let sites = [
+        (
+            RLWE_ENC_SRC,
+            "pub fn encrypt(",
+            "message_poly.scalar_mul(delta)",
+        ),
+        (
+            RLWE_ENC_SRC,
+            "pub fn encrypt_with_crs(",
+            "message_poly.scalar_mul(delta)",
+        ),
+        (
+            plain_rgsw,
+            "pub fn encrypt_with_rng<",
+            "message.scalar_mul(power)",
+        ),
+        (
+            seeded_rgsw,
+            "pub fn encrypt_with_rng<",
+            "message.scalar_mul(power)",
+        ),
+        (
+            KS_SETUP_SRC,
+            "pub fn generate_ks_matrix",
+            "from_key.poly.scalar_mul(power)",
+        ),
+        (
+            INSPIRING_SRC,
+            "fn generate_ksk_body",
+            "tau_s.scalar_mul(gadget_power)",
+        ),
+    ];
+    for (src, header, scaling) in sites {
+        let body = item_source(src, header);
+        deny(
+            body,
+            header,
+            &[
+                " % ",
+                ".coeff(",
+                "set_coeff(",
+                "coeffs_mut(",
+                "as u128",
+                "wrapping_",
+            ],
+            "secret-key arithmetic must go through the pinned Poly operations",
+        );
+        require(
+            body,
+            header,
+            &[scaling],
+            "the scaling must be the pinned scalar product",
+        );
+    }
+
+    let packed = item_source(EXTRACT_SRC, "fn extract_packed");
+    deny(
+        packed,
+        "extract_packed",
+        &["% p", "as u128"],
+        "the decrypted value is the record; a 128-bit remainder divides it",
+    );
+    require(
+        packed,
+        "extract_packed",
+        &["mul_mod_shoup_wide(scaled_value, d_inv, d_inv_shoup, p)"],
+        "the unscaling must be a Shoup product by the public inverse",
+    );
+}
+
+/// The plain and seeded RGSW impls share the header `encrypt_with_rng<`.
+fn rgsw_impls() -> (&'static str, &'static str) {
+    RGSW_TYPES_SRC
+        .split_once("impl SeededRgswCiphertext {")
+        .expect("RGSW types must keep the seeded impl")
+}
+
+/// Every pinned body without a public branch, scanned as written.
+fn dispatch_free_bodies() -> Vec<(&'static str, &'static str)> {
+    let (plain_rgsw, seeded_rgsw) = rgsw_impls();
+    vec![
+        (MODULAR_SRC, "pub fn from_signed"),
+        (MODULAR_SRC, "fn ct_sub_if_ge"),
+        (MODULAR_SRC, "fn reduce_by_public_modulus"),
+        (MODULAR_SRC, "fn reduce_by_public_reciprocal"),
+        (MODULAR_SRC, "fn sub_mod_branchless"),
+        (MODULAR_SRC, "fn sub_mod_mask"),
+        (MODULAR_SRC, "fn csubq"),
+        (MODULAR_SRC, "fn mul_mod_shoup("),
+        (MODULAR_SRC, "fn mul_mod_shoup_wide"),
+        (GAUSSIAN_SRC, "fn accept_threshold_bits"),
+        (GAUSSIAN_SRC, "fn sample_rejection"),
+        (GAUSSIAN_SRC, "pub fn sample_centered"),
+        (POLY_SRC, "pub fn sample_gaussian_moduli"),
+        (LWE_ENC_SRC, "pub fn from_rlwe"),
+        (ENCODE_DB_SRC, "pub fn inverse_monomial"),
+        (ENCODE_DB_SRC, "fn reduce_exponent_by_public_ring"),
+        (PARAMS_SRC, "pub fn try_index_to_shard"),
+        (PARAMS_SRC, "fn div_rem_by_public_divisor"),
+        (GALOIS_SRC, "fn ct_mod_add"),
+        (GALOIS_SRC, "fn ct_mod_sub"),
+        (KS_SETUP_SRC, "pub fn generate_automorphism_ks_matrix"),
+        (MOD_SWITCH_SRC, "fn mod_switch_secret_key"),
+        (RLWE_ENC_SRC, "pub fn decrypt"),
+        (RLWE_ENC_SRC, "fn new(delta: u64, p: u64)"),
+        (RLWE_ENC_SRC, "fn round(&self, noisy: u64)"),
+        (CRT_SRC, "pub(crate) fn compose"),
+        (POLY_SRC, "fn reduce_residues"),
+        (POLY_SRC, "fn reduce(&mut self)"),
+        (POLY_SRC, "pub fn from_coeffs_moduli"),
+        (POLY_SRC, "pub fn scalar_mul("),
+        (POLY_SRC, "pub fn scalar_mul_assign"),
+        (POLY_SRC, "impl Add for &Poly"),
+        (POLY_SRC, "impl Sub for &Poly"),
+        (POLY_SRC, "impl Neg for &Poly"),
+        (POLY_SRC, "pub fn add_ntt_domain"),
+        (POLY_SRC, "pub fn add_assign_ntt_domain"),
+        (NTT_SRC, "fn forward_inplace_at"),
+        (NTT_SRC, "fn inverse_inplace_at"),
+        (NTT_SRC, "fn forward_inplace_shoup_at"),
+        (NTT_SRC, "fn inverse_inplace_shoup_at"),
+        (NTT_SRC, "fn forward_inplace_solinas_at"),
+        (NTT_SRC, "fn inverse_inplace_solinas_at"),
+        (NTT_SRC, "fn montgomery_mul_at"),
+        (NTT_SRC, "fn to_montgomery("),
+        (NTT_SRC, "fn to_montgomery_at("),
+        (NTT_SRC, "fn shoup_mul_at"),
+        (NTT_SRC, "pub fn forward("),
+        (NTT_SRC, "pub fn forward_inplace("),
+        (NTT_SRC, "pub fn inverse("),
+        (NTT_SRC, "pub fn inverse_inplace("),
+        (NTT_SRC, "pub fn forward_shoup("),
+        (NTT_SRC, "pub fn inverse_shoup("),
+        (NTT_SRC, "pub fn forward_solinas("),
+        (NTT_SRC, "pub fn inverse_solinas("),
+        (NTT_SRC, "pub fn pointwise_mul("),
+        (NTT_SRC, "pub fn pointwise_mul_single("),
+        (NTT_SRC, "pub fn pointwise_mul_single_at("),
+        (NTT_SRC, "pub fn pointwise_mul_shoup("),
+        (NTT_SRC, "pub fn pointwise_mul_solinas("),
+        (NTT_SRC, "pub fn to_mont("),
+        (NTT_SRC, "pub fn from_mont("),
+        (SOLINAS_SRC, "pub fn solinas_mont_mul_default_q"),
+        (SOLINAS_SRC, "pub fn pointwise_solinas_mont_mul("),
+        (RLWE_ENC_SRC, "pub fn encrypt("),
+        (RLWE_ENC_SRC, "pub fn encrypt_with_crs("),
+        (plain_rgsw, "pub fn encrypt_with_rng<"),
+        (seeded_rgsw, "pub fn encrypt_with_rng<"),
+        (KS_SETUP_SRC, "pub fn generate_ks_matrix"),
+        (EXTRACT_SRC, "fn extract_packed"),
+        (QUERY_SRC, "fn seeded_query_with_gadget"),
+        (QUERY_SRC, "pub fn query("),
+        (QUERY_SRC, "pub fn query_seeded("),
+        (SESSION_SRC, "pub fn query("),
+        (SESSION_SRC, "pub fn query_seeded("),
+    ]
+}
+
+/// Each pinned body with one public branch, lifted out before the scan: the
+/// modulus width, the limb count, the automorphism's destination (a function of
+/// `g` and the position) and the gadget row count.
+const PUBLIC_BRANCHES: [(&str, &str, &str); 4] = [
+    (
+        POLY_SRC,
+        "fn scale_residues",
+        "if modulus <= SHOUP_NARROW_MAX_MODULUS {",
+    ),
+    (
+        POLY_SRC,
+        "pub(crate) fn coeffs_composed_ct",
+        "if let [q0, q1] = self.moduli[..] {",
+    ),
+    (GALOIS_SRC, "pub fn apply_automorphism", "if new_idx < d {"),
+    (
+        INSPIRING_SRC,
+        "fn generate_ksk_body",
+        "if k < w_mask.len() {",
+    ),
+];
+
+/// The per-site lists above name the spellings each site once had. This runs
+/// the spellings they missed over every pinned body.
+#[test]
+fn pinned_bodies_hide_no_correction_spellings() {
+    for (src, header) in dispatch_free_bodies() {
+        deny_hidden_corrections(item_source(src, header), header);
+    }
+    for (src, header, branch) in PUBLIC_BRANCHES {
+        let body = item_source(src, header);
+        assert_eq!(
+            body.matches(branch).count(),
+            1,
+            "{header} lost its public branch"
+        );
+        let lifted = body.replacen(branch, "", 1).replacen("} else {", "", 1);
+        deny_hidden_corrections(&lifted, header);
+    }
+}
+
+/// The gated sources by the names this file uses for them. The RGSW file is
+/// listed as its two impls, which is how every pin reads it.
+fn named_sources() -> Vec<(&'static str, &'static str)> {
+    let (plain_rgsw, seeded_rgsw) = rgsw_impls();
+    vec![
+        ("GAUSSIAN_SRC", GAUSSIAN_SRC),
+        ("MODULAR_SRC", MODULAR_SRC),
+        ("POLY_SRC", POLY_SRC),
+        ("ENCODE_DB_SRC", ENCODE_DB_SRC),
+        ("INSPIRING_SRC", INSPIRING_SRC),
+        ("GALOIS_SRC", GALOIS_SRC),
+        ("KS_SETUP_SRC", KS_SETUP_SRC),
+        ("LWE_ENC_SRC", LWE_ENC_SRC),
+        ("QUERY_SRC", QUERY_SRC),
+        ("SESSION_SRC", SESSION_SRC),
+        ("PARAMS_SRC", PARAMS_SRC),
+        ("RLWE_ENC_SRC", RLWE_ENC_SRC),
+        ("CRT_SRC", CRT_SRC),
+        ("MOD_SWITCH_SRC", MOD_SWITCH_SRC),
+        ("NTT_SRC", NTT_SRC),
+        ("SOLINAS_SRC", SOLINAS_SRC),
+        ("EXTRACT_SRC", EXTRACT_SRC),
+        ("plain_rgsw", plain_rgsw),
+        ("seeded_rgsw", seeded_rgsw),
+        ("rgsw_impls().0", plain_rgsw),
+        ("rgsw_impls().1", seeded_rgsw),
+    ]
+}
+
+/// By content: a const `&str` has no guaranteed single address.
+fn same_source(a: &str, b: &str) -> bool {
+    a == b
+}
+
+/// The source a header literal at byte `at` is pinned against: the name
+/// written just before it (`(NAME, "header"` or `item_source(NAME, "header"`),
+/// else the one gated source that contains the header. A header two sources
+/// share must name its source, so a twin is never counted as the other.
+fn source_of_literal(gate: &str, at: usize, header: &str) -> &'static str {
+    let before = gate[..at].trim_end();
+    if let Some(before) = before.strip_suffix(',') {
+        let before = before.trim_end();
+        for (name, src) in named_sources() {
+            let bounded = before.strip_suffix(name).is_some_and(|rest| {
+                !rest
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+            if bounded {
+                return src;
+            }
+        }
+    }
+    let holders: Vec<&'static str> = named_sources()
+        .into_iter()
+        .filter(|(name, _)| !name.starts_with("rgsw_impls"))
+        .map(|(_, src)| src)
+        .filter(|src| src.contains(header))
+        .collect();
+    assert_eq!(
+        holders.len(),
+        1,
+        "`{header}` is in {} gated sources; the pin must name its source",
+        holders.len()
+    );
+    holders[0]
+}
+
+/// A body pinned above but left out of the scan would make the scan's claim
+/// false with every test green, so this reads the headers this file names and
+/// the source each is pinned against.
+#[test]
+fn every_pinned_body_is_scanned() {
+    const GATE_SRC: &str = include_str!("secret_dependent_spelling_gate.rs");
+    let scanned: Vec<(&str, &str)> = dispatch_free_bodies()
+        .into_iter()
+        .chain(
+            PUBLIC_BRANCHES
+                .iter()
+                .map(|&(src, header, _)| (src, header)),
+        )
+        .collect();
+    let is_scanned = |src: &str, header: &str| {
+        scanned
+            .iter()
+            .any(|&(s, h)| same_source(s, src) && h == header)
+    };
+    let mut named = Vec::new();
+    for (at, _) in GATE_SRC.match_indices('\u{22}') {
+        let rest = &GATE_SRC[at + 1..];
+        let Some(end) = rest.find('\u{22}') else {
+            continue;
+        };
+        let literal = &rest[..end];
+        let is_header = ["fn ", "pub fn ", "pub(crate) fn ", "impl "]
+            .iter()
+            .any(|prefix| literal.len() > prefix.len() && literal.starts_with(prefix));
+        if is_header && !literal.contains('{') {
+            named.push((source_of_literal(GATE_SRC, at, literal), literal));
+        }
+    }
+    let (_, seeded_rgsw) = rgsw_impls();
+    let found = |src: &str, header: &str| {
+        named
+            .iter()
+            .any(|&(s, h)| same_source(s, src) && h == header)
+    };
+    assert!(
+        found(POLY_SRC, "pub fn scalar_mul(")
+            && found(SESSION_SRC, "pub fn query(")
+            && found(seeded_rgsw, "pub fn encrypt_with_rng<"),
+        "the header reader missed a pin; it would pass every omission"
+    );
+    for (src, header) in named {
+        assert!(
+            is_scanned(src, header),
+            "`{header}` is pinned but not scanned for hidden corrections in {}",
+            named_sources()
+                .iter()
+                .find(|&&(_, s)| same_source(s, src))
+                .map_or("an unnamed source", |&(name, _)| name)
+        );
+    }
+}
+
+/// The scan must see each spelling it names, or it passes everything.
+#[test]
+fn the_hidden_correction_scan_sees_each_spelling() {
+    let plants = [
+        "let s = u + v; s.checked_sub(q).unwrap_or(s)",
+        "a.wrapping_sub(b).wrapping_add(q * u64::from(a < b))",
+        "x - q * ((x >= q) as u64)",
+        "if x >= q { x - q } else { x }",
+        "(x >= q).then_some(q).unwrap_or(0)",
+        "x.min(x.wrapping_sub(q))",
+    ];
+    for plant in plants {
+        let body = format!("fn planted(x: u64) -> u64 {{ {plant} }}");
+        let caught = std::panic::catch_unwind(|| deny_hidden_corrections(&body, "planted"));
+        assert!(caught.is_err(), "the scan missed `{plant}`");
+    }
+    let clean = "fn clean(a: u64, b: u64) -> u64 { let (d, borrow) = a.overflowing_sub(b); \
+                 d.wrapping_add(q & 0u64.wrapping_sub(u64::from(borrow))) }";
+    deny_hidden_corrections(clean, "clean");
+    assert!(bool_to_integer_spellings("(u128::from(a) * u128::from(r)) >> 64) as u64").is_empty());
+}
+
+/// Arithmetic on an alias of the index, which the per-name patterns miss.
+#[test]
+fn the_query_body_scan_sees_each_spelling() {
+    let plants = [
+        "let i = local_index.rem_euclid(bound);",
+        "let w: u128 = local_index.into();",
+        "let w = widen(local_index.into());",
+        "let mut i = local_index; if bound <= i { i -= bound; }",
+        "let ge = local_index >= bound; let i = local_index - bound * u64::from(ge);",
+        "let ge = local_index.ge(&bound); let i = local_index - bound * (ge as u64);",
+        "let i = local_index; match i { 0 => a, _ => b }",
+    ];
+    for plant in plants {
+        let body =
+            format!("pub fn query(&self) {{ {plant} match self.session_handle {{ _ => () }} }}");
+        let caught = std::panic::catch_unwind(|| deny_query_body(&body, "planted"));
+        assert!(caught.is_err(), "the query body scan missed `{plant}`");
+    }
+    deny_query_body(
+        "pub fn query(&self) { let x = f(local_index as usize); \
+         match self.session_handle { Some(h) => (None, Some(h)), None => (x, None) } }",
+        "clean",
+    );
+}
+
 // --------------------------------------------------------- extractor
 
 /// A gate whose extractor returns nothing passes every `deny` above. Each test
@@ -827,7 +1543,6 @@ fn the_extractor_returns_whole_item_bodies() {
         (RLWE_ENC_SRC, "pub fn decrypt"),
         (RLWE_ENC_SRC, "fn new(delta: u64, p: u64)"),
         (RLWE_ENC_SRC, "fn round(&self, noisy: u64)"),
-        (POLY_SRC, "pub(crate) fn add_ct"),
         (POLY_SRC, "pub(crate) fn coeffs_composed_ct"),
         (CRT_SRC, "pub(crate) fn compose"),
         (NTT_SRC, "fn forward_inplace_at"),
@@ -860,6 +1575,31 @@ fn the_extractor_returns_whole_item_bodies() {
         (NTT_SRC, "pub fn from_mont("),
         (NTT_SRC, "fn to_montgomery_at("),
         (SOLINAS_SRC, "pub fn pointwise_solinas_mont_mul("),
+        (MODULAR_SRC, "fn mul_mod_shoup("),
+        (MODULAR_SRC, "fn mul_mod_shoup_wide"),
+        (POLY_SRC, "fn scale_residues"),
+        (POLY_SRC, "fn reduce_residues"),
+        (POLY_SRC, "fn reduce(&mut self)"),
+        (POLY_SRC, "pub fn from_coeffs_moduli"),
+        (POLY_SRC, "pub fn scalar_mul("),
+        (POLY_SRC, "pub fn scalar_mul_assign"),
+        (POLY_SRC, "impl Add for &Poly"),
+        (POLY_SRC, "impl Sub for &Poly"),
+        (POLY_SRC, "impl Neg for &Poly"),
+        (POLY_SRC, "pub fn add_ntt_domain"),
+        (POLY_SRC, "pub fn add_assign_ntt_domain"),
+        (RLWE_ENC_SRC, "pub fn encrypt("),
+        (RLWE_ENC_SRC, "pub fn encrypt_with_crs("),
+        (KS_SETUP_SRC, "pub fn generate_ks_matrix"),
+        (INSPIRING_SRC, "fn generate_ksk_body"),
+        (EXTRACT_SRC, "fn extract_packed"),
+        (QUERY_SRC, "fn seeded_query_with_gadget"),
+        (QUERY_SRC, "pub fn query("),
+        (QUERY_SRC, "pub fn query_seeded("),
+        (SESSION_SRC, "pub fn query("),
+        (SESSION_SRC, "pub fn query_seeded("),
+        (rgsw_impls().0, "pub fn encrypt_with_rng<"),
+        (rgsw_impls().1, "pub fn encrypt_with_rng<"),
     ];
     for (src, header) in cases {
         let body = item_source(src, header);

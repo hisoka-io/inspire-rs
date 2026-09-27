@@ -115,6 +115,11 @@ mod-switch-response = []
 proptest = "1.4"
 
 [[bench]]
+name = "query_latency_bench"
+path = "benches/query_latency_bench.rs"
+harness = false
+
+[[bench]]
 name = "spiral_mod_switch_bench"
 path = "benches/spiral_mod_switch_bench.rs"
 required-features = ["mod-switch-response"]

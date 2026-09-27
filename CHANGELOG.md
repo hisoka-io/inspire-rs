@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   modulus does not evaluate at n distinct roots of X^n + 1. No parameter set that
   `NttContext` accepts reaches it.
 - `benches/pack_params_build_bench.rs`: the d=2048 `PackParams::try_new` build time.
+- `benches/query_latency_bench.rs`: the d=2048 client query generation time.
 - `served_post_switch_noise_distribution` in `benches/packing_noise_measurement.rs`
   (needs `mod-switch-response`): the decode margin of the switched, serialized
   response across 40 sessions.
@@ -83,6 +84,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is within noise (median of 7 sequential runs 232.1 -> 231.1 ms; median of 5 parallel
   runs 85.5 -> 82.7 ms), and the d=2048 Solinas forward NTT microbench goes from 22.2 to
   20.6 us.
+- The client's ring arithmetic neither branches on nor divides a coefficient. `Poly`
+  addition, subtraction and negation (`+`, `-`, unary `-`, `add_ntt_domain`,
+  `add_assign_ntt_domain`) correct through the NTT's helper. `Poly::scalar_mul` and
+  `scalar_mul_assign` take a Shoup product with the public scalar per residue instead of a
+  128-bit remainder, which the query path took on the secret-index monomial and key
+  switching setup on the secret key; above a `2^63` modulus the remainder is held in 128
+  bits and corrected through `subtle`. Residue reduction in `from_coeffs_moduli`,
+  `from_crt_coeffs` and every constructor that reduces is Barrett over the public modulus.
+  `LweSecretKey::from_rlwe` composes a two-limb key without a branch or divide, and the
+  tree-packed extractor unscales the record by a Shoup product. Query generation,
+  encryption, key-switching setup and packing-key generation now reach the secret key and
+  index only through these, the NTT, the automorphism and public-table permutations;
+  SECURITY.md lists what remains outside. Outputs are unchanged: digests of the secret
+  key, the LWE key, the scaled monomial, the seeded query and a three-row RGSW at six
+  indices from 0 to d-1, an RLWE encryption and the packing keys, recorded before the
+  change from fixed seeds, hold at the single prime and all three two-prime sets, and an
+  old-vs-new differential covers each rewritten function at every shipped modulus and
+  mod-switch target over edge and random inputs. The spelling gate, a source-text check
+  that catches only the spellings it lists, pins the new forms and denies the query bodies
+  every `/`, `%`, `[`, `if `, `for `, `while `, `loop` and spaced comparison operator and
+  the substrings `div`, `rem`, `euclid`, `128`, `into(` and `from(`, among others that
+  SECURITY.md lists, none of which they contain today. It scans every body it pins, the
+  RGSW encryptions and the query bodies included, for the correction spellings it used to
+  miss (`checked_sub` or an `unwrap_or` fallback, a spaced comparison inside `T::from(...)` or
+  `(...) as T`, `} else {`, `.min(`/`.max(`, `then_some`); a pinned body left out of that
+  scan fails the gate, matched by source and header so that dropping either of two items
+  sharing a header fails too. Outside the query bodies, a bare `if` or a comparison held
+  in a `let` passes wherever a site's own pin does not deny it, as does a spelling moved
+  into a helper the gate does not pin; the codegen inspection in SECURITY.md is the
+  stronger evidence, and it is not gated. Measured interleaved against the previous code
+  on one loaded x86-64 host at d=2048 (medians): a seeded session query 2.30 -> 2.12 ms
+  (15 runs of 200), the scaled inverse monomial 10.9 -> 9.3 us, cached `respond` with
+  512-byte rows 300.3 -> 299.4 ms sequential (7 runs) and 119.2 -> 111.7 ms parallel (5
+  runs), uncached 483 -> 463 ms and 273 -> 250 ms. A reduction corrected through `subtle`
+  had cost the uncached `respond` 4%; the `csubq` correction removes it.
 
 - Corrected the security claim throughout the docs. `secure_128_d2048` measures
   **121.5 bits**, not 128, at the shipped `DEFAULT_Q = 2^60 - 2^14 + 1`

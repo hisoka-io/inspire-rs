@@ -30,12 +30,11 @@ impl LweSecretKey {
         let d = rlwe_sk.ring_dim();
         let q = rlwe_sk.modulus();
 
-        let mut coeffs = vec![0u64; d];
-        coeffs[0] = rlwe_sk.poly.coeff(0);
-        for (i, coeff) in coeffs.iter_mut().enumerate().take(d).skip(1) {
-            let s_i = rlwe_sk.poly.coeff(i);
-            let negated = q - s_i;
-            *coeff = u64::conditional_select(&negated, &0, s_i.ct_eq(&0));
+        // `coeff` composes two CRT limbs with a branch and a 128-bit remainder.
+        let mut coeffs = rlwe_sk.poly.coeffs_composed_ct();
+        for s_i in coeffs.iter_mut().take(d).skip(1) {
+            let negated = q.wrapping_sub(*s_i);
+            *s_i = u64::conditional_select(&negated, &0, s_i.ct_eq(&0));
         }
 
         Self { coeffs, dim: d, q }

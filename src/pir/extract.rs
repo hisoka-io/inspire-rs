@@ -2,6 +2,7 @@
 
 use super::error::{ExtractError, Result};
 
+use crate::math::modular::{mul_mod_shoup_wide, shoup_precompute};
 use crate::math::Poly;
 use crate::params::InspireVariant;
 use crate::rlwe::RlweCiphertext;
@@ -211,11 +212,12 @@ fn extract_packed(
     let d_inv =
         mod_inverse(d as u64, p).ok_or(ExtractError::DegreeNotInvertible { d: d as u64, p })?;
 
+    // The decrypted value is the record: a Shoup product by the public inverse, not a divide.
+    let d_inv_shoup = shoup_precompute(d_inv, p);
     let mut column_values = Vec::with_capacity(num_columns);
     for col in 0..num_columns {
         let scaled_value = decrypted.coeff(col);
-        let value = (scaled_value as u128 * d_inv as u128 % p as u128) as u64;
-        column_values.push(value);
+        column_values.push(mul_mod_shoup_wide(scaled_value, d_inv, d_inv_shoup, p));
     }
 
     let entry = reconstruct_entry(&column_values, entry_size);

@@ -14,7 +14,7 @@
 //! ```
 
 use super::mod_q::DEFAULT_Q;
-use super::modular::{csubq, sub_mod_branchless};
+use super::modular::{csubq, mul_mod_shoup, shoup_precompute, sub_mod_branchless};
 use super::primality::is_prime;
 
 /// Far above any prime's least quadratic non-residue, where the root search ends: 11 for
@@ -784,18 +784,14 @@ impl NttContext {
     /// `floor(b * 2^64 / q)`, the Shoup twin of a fixed multiplicand.
     #[inline]
     fn shoup_precompute(b: u64, q: u64) -> u64 {
-        (((b as u128) << 64) / (q as u128)) as u64
+        shoup_precompute(b, q)
     }
 
     /// `a * b mod q` in standard form, requiring `a, b` in `[0, q)` and
     /// `b_shoup = shoup_precompute(b, q)`.
     #[inline]
     fn shoup_mul_at(a: u64, b: u64, b_shoup: u64, q: u64) -> u64 {
-        let q_est = ((a as u128) * (b_shoup as u128)) >> 64;
-        let r = ((a as u128)
-            .wrapping_mul(b as u128)
-            .wrapping_sub(q_est.wrapping_mul(q as u128))) as u64;
-        csubq(r, q)
+        mul_mod_shoup(a, b, b_shoup, q)
     }
 
     fn compute_twiddle_factors(

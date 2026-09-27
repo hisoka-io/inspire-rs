@@ -15,7 +15,10 @@ use super::gaussian::{
     os_seeded_chacha, os_seeded_chacha_or_abort, EntropyUnavailable, GaussianSampler,
 };
 use super::mod_q::{ModQ, DEFAULT_Q};
-use super::modular::ct_sub_if_ge;
+use super::modular::{
+    csubq, mul_mod_shoup, mul_mod_shoup_wide, shoup_precompute, sub_mod_branchless,
+    SHOUP_NARROW_MAX_MODULUS,
+};
 use super::ntt::NttContext;
 use rand::Rng;
 use rand::SeedableRng;
@@ -508,41 +511,26 @@ impl Poly {
     }
 
     /// From coefficients modulo the composite modulus, split into CRT residues.
-    #[allow(
-        clippy::needless_pass_by_value,
-        reason = "owned Vec is the established shape across ~60 call sites"
-    )]
     #[must_use]
     pub fn from_coeffs_moduli(coeffs: Vec<u64>, moduli: &[u64]) -> Self {
         let dim = coeffs.len();
         let (moduli_vec, q, inv) = Self::init_moduli(moduli);
-        let crt_count = moduli_vec.len();
-        let mut crt_coeffs = vec![0u64; dim * crt_count];
-
-        if crt_count == 2 {
-            let q0 = moduli_vec[0];
-            let q1 = moduli_vec[1];
-            for (i, &c) in coeffs.iter().enumerate() {
-                let (c0, c1) = crt_decompose_2(c, q0, q1);
-                crt_coeffs[i] = c0;
-                crt_coeffs[i + dim] = c1;
-            }
-        } else {
-            for (i, &c) in coeffs.iter().enumerate() {
-                crt_coeffs[i] = c % moduli_vec[0];
-            }
+        let mut crt_coeffs = coeffs;
+        for _ in 1..moduli_vec.len() {
+            crt_coeffs.extend_from_within(..dim);
+        }
+        for (limb, &modulus) in moduli_vec.iter().enumerate() {
+            reduce_residues(&mut crt_coeffs[limb * dim..(limb + 1) * dim], modulus);
         }
 
-        let mut p = Self {
+        Self {
             coeffs: crt_coeffs,
             moduli: moduli_vec,
             q,
             dim,
             crt_q0_inv_mod_q1: inv,
             is_ntt: false,
-        };
-        p.reduce();
-        p
+        }
     }
 
     /// From residues concatenated by modulus, length `dim * crt_count`.
@@ -811,31 +799,6 @@ impl Poly {
         &mut self.coeffs[start..end]
     }
 
-    /// `self + rhs` with each reduction selected rather than branched, for sums that
-    /// carry a secret.
-    pub(crate) fn add_ct(&self, rhs: &Self) -> Self {
-        assert_eq!(self.moduli, rhs.moduli, "Moduli must match");
-        assert_eq!(self.is_ntt, rhs.is_ntt, "NTT domains must match");
-
-        let mut coeffs = self.coeffs.clone();
-        for (m, &modulus) in self.moduli.iter().enumerate() {
-            let start = m * self.dim;
-            let end = start + self.dim;
-            for (c, &r) in coeffs[start..end].iter_mut().zip(&rhs.coeffs[start..end]) {
-                *c = ct_sub_if_ge(*c + r, modulus);
-            }
-        }
-
-        Poly {
-            coeffs,
-            moduli: self.moduli.clone(),
-            q: self.q,
-            dim: self.dim,
-            crt_q0_inv_mod_q1: self.crt_q0_inv_mod_q1,
-            is_ntt: self.is_ntt,
-        }
-    }
-
     /// Every [`Self::coeff`], composed without a branch or divide on a residue.
     pub(crate) fn coeffs_composed_ct(&self) -> Vec<u64> {
         assert!(!self.is_ntt, "Cannot access coefficients in NTT domain");
@@ -856,9 +819,7 @@ impl Poly {
         for (m, &modulus) in self.moduli.iter().enumerate() {
             let start = m * self.dim;
             let end = start + self.dim;
-            for c in &mut self.coeffs[start..end] {
-                *c %= modulus;
-            }
+            reduce_residues(&mut self.coeffs[start..end], modulus);
         }
     }
 
@@ -904,35 +865,17 @@ impl Poly {
 
     /// Scalar product.
     pub fn scalar_mul(&self, scalar: u64) -> Self {
-        let mut coeffs = self.coeffs.clone();
-        for (m, &modulus) in self.moduli.iter().enumerate() {
-            let scalar_mod = scalar % modulus;
-            let start = m * self.dim;
-            let end = start + self.dim;
-            for c in &mut coeffs[start..end] {
-                *c = ((*c as u128 * scalar_mod as u128) % modulus as u128) as u64;
-            }
-        }
-
-        Self {
-            coeffs,
-            moduli: self.moduli.clone(),
-            q: self.q,
-            dim: self.dim,
-            crt_q0_inv_mod_q1: self.crt_q0_inv_mod_q1,
-            is_ntt: self.is_ntt,
-        }
+        let mut result = self.clone();
+        result.scalar_mul_assign(scalar);
+        result
     }
 
     /// In-place scalar product.
     pub fn scalar_mul_assign(&mut self, scalar: u64) {
         for (m, &modulus) in self.moduli.iter().enumerate() {
-            let scalar_mod = scalar % modulus;
             let start = m * self.dim;
             let end = start + self.dim;
-            for c in &mut self.coeffs[start..end] {
-                *c = ((*c as u128 * scalar_mod as u128) % modulus as u128) as u64;
-            }
+            scale_residues(&mut self.coeffs[start..end], scalar, modulus);
         }
     }
 
@@ -1010,8 +953,7 @@ impl Poly {
             let start = m * self.dim;
             let end = start + self.dim;
             for (c, &o) in coeffs[start..end].iter_mut().zip(&other.coeffs[start..end]) {
-                let sum = *c + o;
-                *c = if sum >= modulus { sum - modulus } else { sum };
+                *c = csubq(*c + o, modulus);
             }
         }
 
@@ -1037,8 +979,7 @@ impl Poly {
             let start = m * self.dim;
             let end = start + self.dim;
             for i in start..end {
-                let sum = self.coeffs[i] + other.coeffs[i];
-                self.coeffs[i] = if sum >= modulus { sum - modulus } else { sum };
+                self.coeffs[i] = csubq(self.coeffs[i] + other.coeffs[i], modulus);
             }
         }
     }
@@ -1201,6 +1142,35 @@ impl Poly {
     }
 }
 
+/// Residues may be secret, so each is reduced by Barrett over the public
+/// modulus rather than divided. The estimate is `reduce_by_public_reciprocal`'s;
+/// the correction is `csubq`, not subtle's out-of-line select, because the
+/// uncached respond's `PackParams` build runs this loop over millions of residues.
+fn reduce_residues(residues: &mut [u64], modulus: u64) {
+    let reciprocal = u64::MAX / modulus;
+    for c in residues {
+        let quotient = ((u128::from(*c) * u128::from(reciprocal)) >> 64) as u64;
+        *c = csubq(c.wrapping_sub(quotient.wrapping_mul(modulus)), modulus);
+    }
+}
+
+/// `c * scalar mod modulus` over one residue stripe, `scalar` and `modulus`
+/// public: a Shoup product per residue, never a divide. The one branch picks the
+/// remainder width from the public modulus.
+fn scale_residues(residues: &mut [u64], scalar: u64, modulus: u64) {
+    let scalar = scalar % modulus;
+    let scalar_shoup = shoup_precompute(scalar, modulus);
+    if modulus <= SHOUP_NARROW_MAX_MODULUS {
+        for c in residues {
+            *c = mul_mod_shoup(*c, scalar, scalar_shoup, modulus);
+        }
+    } else {
+        for c in residues {
+            *c = mul_mod_shoup_wide(*c, scalar, scalar_shoup, modulus);
+        }
+    }
+}
+
 impl PartialEq for Poly {
     fn eq(&self, other: &Self) -> bool {
         self.q == other.q
@@ -1233,8 +1203,7 @@ impl Add for &Poly {
             let start = m * self.dim;
             let end = start + self.dim;
             for (c, &r) in coeffs[start..end].iter_mut().zip(&rhs.coeffs[start..end]) {
-                let sum = *c + r;
-                *c = if sum >= modulus { sum - modulus } else { sum };
+                *c = csubq(*c + r, modulus);
             }
         }
 
@@ -1281,8 +1250,7 @@ impl Sub for &Poly {
             let start = m * self.dim;
             let end = start + self.dim;
             for (c, &b) in coeffs[start..end].iter_mut().zip(&rhs.coeffs[start..end]) {
-                let a = *c;
-                *c = if a >= b { a - b } else { modulus - b + a };
+                *c = sub_mod_branchless(*c, b, modulus);
             }
         }
 
@@ -1326,7 +1294,7 @@ impl Neg for &Poly {
             let start = m * self.dim;
             let end = start + self.dim;
             for c in &mut coeffs[start..end] {
-                *c = if *c == 0 { 0 } else { modulus - *c };
+                *c = sub_mod_branchless(0, *c, modulus);
             }
         }
 
@@ -1361,6 +1329,9 @@ impl MulAssign for Poly {
         *self = self.clone() * rhs;
     }
 }
+
+#[cfg(test)]
+mod branchless_arith_kat;
 
 #[cfg(test)]
 mod tests {

@@ -92,7 +92,7 @@ impl RlweCiphertext {
         let d = self.ring_dim();
 
         let a_s = self.a.mul_ntt(&sk.poly, ctx);
-        let noisy_msg = a_s.add_ct(&self.b);
+        let noisy_msg = &a_s + &self.b;
 
         let rounding = PlaintextRounding::new(delta, p);
         let coeffs = noisy_msg

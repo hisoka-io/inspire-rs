@@ -72,6 +72,38 @@ pub(crate) fn csubq(x: u64, q: u64) -> u64 {
     sub_mod_branchless(x, q, q)
 }
 
+/// Largest modulus whose Shoup remainder, below `2q`, still fits a `u64`.
+pub(crate) const SHOUP_NARROW_MAX_MODULUS: u64 = 1 << 63;
+
+/// `floor(b * 2^64 / q)`, the Shoup companion of a public `b < q`.
+#[inline]
+pub(crate) fn shoup_precompute(b: u64, q: u64) -> u64 {
+    ((u128::from(b) << 64) / u128::from(q)) as u64
+}
+
+/// `a * b mod q` for a secret `a` and a public `b < q` with companion `b_shoup`.
+///
+/// `b_shoup` is short of `b * 2^64 / q` by less than one, so for every
+/// `a < 2^64` the quotient estimate is at most one short and the remainder
+/// lands in `[0, 2q)`: one branch-free subtraction finishes it, where
+/// `(a * b) % q` would divide the secret product (a software call on both
+/// x86-64 and wasm32 at 128 bits). Needs `q <= SHOUP_NARROW_MAX_MODULUS`.
+#[inline]
+pub(crate) fn mul_mod_shoup(a: u64, b: u64, b_shoup: u64, q: u64) -> u64 {
+    let estimate = ((u128::from(a) * u128::from(b_shoup)) >> 64) as u64;
+    csubq(a.wrapping_mul(b).wrapping_sub(estimate.wrapping_mul(q)), q)
+}
+
+/// [`mul_mod_shoup`] for any `q`: the remainder is held in 128 bits, where
+/// `2q` cannot overflow.
+#[inline]
+pub(crate) fn mul_mod_shoup_wide(a: u64, b: u64, b_shoup: u64, q: u64) -> u64 {
+    let estimate = (u128::from(a) * u128::from(b_shoup)) >> 64;
+    let q = u128::from(q);
+    let rem = (u128::from(a) * u128::from(b)).wrapping_sub(estimate * q);
+    u128::conditional_select(&rem, &rem.wrapping_sub(q), rem.ct_gt(&(q - 1))) as u64
+}
+
 /// `a mod q` with the only division taken on the public modulus.
 ///
 /// Barrett with a 2^64 radix. Writing `m = floor((2^64-1)/q)`, the estimate
