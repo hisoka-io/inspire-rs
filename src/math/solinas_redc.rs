@@ -6,6 +6,7 @@
 //! DEFAULT_Q (`tests/solinas_montgomery_kat.rs`) and stays in Montgomery form.
 
 use super::mod_q::DEFAULT_Q;
+use super::modular::csubq;
 
 /// `a * b * R^{-1} mod DEFAULT_Q`, R = 2^64, for `a, b` in `[0, DEFAULT_Q)`.
 #[inline]
@@ -17,12 +18,7 @@ pub fn solinas_mont_mul_default_q(a: u64, b: u64, q_inv_neg: u64) -> u64 {
     let mq = ((m as u128) << 60)
         .wrapping_sub((m as u128) << 14)
         .wrapping_add(m as u128);
-    let t = (ab.wrapping_add(mq) >> 64) as u64;
-    if t >= Q {
-        t - Q
-    } else {
-        t
-    }
+    csubq((ab.wrapping_add(mq) >> 64) as u64, Q)
 }
 
 /// [`solinas_mont_mul_default_q`] over slices; Montgomery form in and out.

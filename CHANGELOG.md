@@ -65,9 +65,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by selection, the sum and CRT composition select their reductions, and the output
   polynomial is built without a further reduction. Outputs are unchanged: the rounding
   is checked against the divide exhaustively below the served 36-bit modulus and at
-  every quotient step of the shipped moduli. The NTT product itself is not covered: its
-  butterflies spell `if u + v >= q` and are branch-free only because the compiler emits
-  a select.
+  every quotient step of the shipped moduli.
+- The NTT and the products built on it correct without a branch: the forward and inverse
+  butterflies on every path (Montgomery, Solinas at `DEFAULT_Q`, Shoup), the Montgomery,
+  Solinas and Shoup reduction tails, and the pointwise products over them share one
+  helper, a compare and `cmov` written in `asm!` on x86-64 and the borrow mask of the
+  lattice reference code elsewhere. A plain mask is not enough: LLVM folds it back into
+  a select, and on x86-64 (rustc 1.98) its cmov conversion had already compiled the
+  Montgomery and Shoup butterflies to jumps on the coefficient: at d=2048 the previous
+  Shoup forward transform and the two-CRT Montgomery forward transform ran 5.9 to 6.5
+  times slower on random input than on all-zero input, where both now differ by 0.1%.
+  A mask held opaque by an empty `asm!` block avoids that but made `respond` about 15%
+  slower. Outputs are
+  unchanged: an old-vs-new differential covers every rewritten function at `DEFAULT_Q`
+  and both two-CRT moduli sets, over edge and random inputs. Measured interleaved
+  against the previous code on one x86-64 host, `respond` at d=2048 with 512-byte rows
+  is within noise (median of 7 sequential runs 232.1 -> 231.1 ms; median of 5 parallel
+  runs 85.5 -> 82.7 ms), and the d=2048 Solinas forward NTT microbench goes from 22.2 to
+  20.6 us.
 
 - Corrected the security claim throughout the docs. `secure_128_d2048` measures
   **121.5 bits**, not 128, at the shipped `DEFAULT_Q = 2^60 - 2^14 + 1`

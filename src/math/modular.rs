@@ -22,6 +22,56 @@ pub(crate) fn ct_sub_if_ge(v: u64, q: u64) -> u64 {
     u64::conditional_select(&v, &v.wrapping_sub(q), ge)
 }
 
+/// `a - b`, plus `q` when that borrows: `(a - b) mod q` for `a, b` in `[0, q)`.
+///
+/// The NTT's correction, on client secrets and in the server's inner loop, so
+/// neither a branch nor subtle's volatile barrier. LLVM folds a borrow mask
+/// back into a select, and x86-64 cmov conversion turns selects in the
+/// Montgomery and Shoup loops into jumps; a mask held opaque by an empty asm
+/// block stops that but measured slower on respond. So x86-64 gets its `cmov`
+/// written out. Elsewhere it is the borrow mask of the lattice reference code,
+/// which wasm32 emits as `select`.
+#[inline]
+pub(crate) fn sub_mod_branchless(a: u64, b: u64, q: u64) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut out = a.wrapping_sub(b);
+        let fixed = out.wrapping_add(q);
+        // SAFETY: registers only: one compare and one conditional move.
+        unsafe {
+            core::arch::asm!(
+                "cmp {a}, {b}",
+                "cmovb {out}, {fixed}",
+                a = in(reg) a,
+                b = in(reg) b,
+                fixed = in(reg) fixed,
+                out = inout(reg) out,
+                options(pure, nomem, nostack)
+            );
+        }
+        out
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        sub_mod_mask(a, b, q)
+    }
+}
+
+/// [`sub_mod_branchless`] off x86-64; built in tests so x86-64 checks it too.
+#[cfg(any(test, not(target_arch = "x86_64")))]
+#[inline]
+pub(crate) fn sub_mod_mask(a: u64, b: u64, q: u64) -> u64 {
+    let (diff, borrow) = a.overflowing_sub(b);
+    let mask = 0u64.wrapping_sub(u64::from(borrow));
+    diff.wrapping_add(q & mask)
+}
+
+/// `x - q` when `x >= q`, else `x`, through [`sub_mod_branchless`].
+#[inline]
+pub(crate) fn csubq(x: u64, q: u64) -> u64 {
+    sub_mod_branchless(x, q, q)
+}
+
 /// `a mod q` with the only division taken on the public modulus.
 ///
 /// Barrett with a 2^64 radix. Writing `m = floor((2^64-1)/q)`, the estimate

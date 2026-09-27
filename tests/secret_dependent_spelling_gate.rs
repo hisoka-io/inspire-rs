@@ -39,6 +39,8 @@ const PARAMS_SRC: &str = include_str!("../src/params.rs");
 const RLWE_ENC_SRC: &str = include_str!("../src/rlwe/enc.rs");
 const CRT_SRC: &str = include_str!("../src/math/crt.rs");
 const MOD_SWITCH_SRC: &str = include_str!("../src/pir/mod_switch.rs");
+const NTT_SRC: &str = include_str!("../src/math/ntt.rs");
+const SOLINAS_SRC: &str = include_str!("../src/math/solinas_redc.rs");
 
 /// Body of the item introduced by `header`, brace-matched so an item nested in
 /// an `impl` block ends at its own closing brace and not the block's.
@@ -556,6 +558,247 @@ fn decryption_divides_only_public_values() {
     );
 }
 
+/// The NTT multiplies the secret key on the client and runs every respond on
+/// the server. Its corrections are a written-out `cmov` on x86-64 and a borrow
+/// mask elsewhere, not subtle selects, so this pin is what stops a `>= q`
+/// branch coming back.
+#[test]
+fn ntt_corrections_are_branch_free() {
+    let butterflies = [
+        "fn forward_inplace_at",
+        "fn inverse_inplace_at",
+        "fn forward_inplace_shoup_at",
+        "fn inverse_inplace_shoup_at",
+        "fn forward_inplace_solinas_at",
+        "fn inverse_inplace_solinas_at",
+    ];
+    for header in butterflies {
+        let body = item_source(NTT_SRC, header);
+        deny(
+            body,
+            header,
+            &[
+                "if ",
+                "match ",
+                ">= q",
+                "< q",
+                "u >= v",
+                "u < v",
+                "conditional_select",
+            ],
+            "butterfly operands are secret on the client; correct without a branch",
+        );
+        require(
+            body,
+            header,
+            &["csubq(u + v, q)", "sub_mod_branchless(u, v, q)"],
+            "the sum and the difference must both take the branch-free correction",
+        );
+    }
+
+    let tails = [
+        (NTT_SRC, "fn montgomery_mul_at"),
+        (NTT_SRC, "fn to_montgomery("),
+        (NTT_SRC, "fn shoup_mul_at"),
+        (SOLINAS_SRC, "pub fn solinas_mont_mul_default_q"),
+    ];
+    for (src, header) in tails {
+        let body = item_source(src, header);
+        deny(
+            body,
+            header,
+            &["if ", "match ", ">= q", ">= Q", "conditional_select"],
+            "the reduction tail sees a secret product",
+        );
+        require(
+            body,
+            header,
+            &["csubq("],
+            "the final subtraction must be branch-free",
+        );
+    }
+
+    // A plain mask is not enough on x86-64: LLVM rebuilds the select and its
+    // cmov conversion turns it into a jump in the Montgomery and Shoup loops,
+    // as it did before this form landed.
+    let helper = item_source(MODULAR_SRC, "fn sub_mod_branchless");
+    deny(
+        helper,
+        "sub_mod_branchless",
+        &[
+            "if ",
+            "match ",
+            "conditional_select",
+            ">= ",
+            " < b",
+            "a < b",
+        ],
+        "the correction must come from the borrow, not a source comparison",
+    );
+    require(
+        helper,
+        "sub_mod_branchless",
+        &[
+            "#[cfg(target_arch = \"x86_64\")]",
+            "\"cmp {a}, {b}\"",
+            "\"cmovb {out}, {fixed}\"",
+            "options(pure, nomem, nostack)",
+            "#[cfg(not(target_arch = \"x86_64\"))]",
+            "sub_mod_mask(a, b, q)",
+        ],
+        "x86-64 must move conditionally in asm and the rest must mask the borrow",
+    );
+    let mask = item_source(MODULAR_SRC, "fn sub_mod_mask");
+    deny(
+        mask,
+        "sub_mod_mask",
+        &["if ", "match ", "conditional_select", ">= ", "a < b"],
+        "the mask must come from the borrow, not a comparison",
+    );
+    require(
+        mask,
+        "sub_mod_mask",
+        &[
+            "a.overflowing_sub(b)",
+            "0u64.wrapping_sub(u64::from(borrow))",
+            "q & mask",
+        ],
+        "the borrow must widen to a mask over q",
+    );
+    require(
+        item_source(MODULAR_SRC, "fn csubq"),
+        "csubq",
+        &["sub_mod_branchless(x, q, q)"],
+        "the one-sided correction must share the branch-free path",
+    );
+}
+
+/// The public transforms and products carry a lift or strip loop and the
+/// pointwise loops of their own, so the pin above does not reach them. Their
+/// only permitted branch is the public modulus dispatch.
+#[test]
+fn ntt_entry_points_correct_only_through_the_pinned_helpers() {
+    let entries = [
+        (
+            NTT_SRC,
+            "pub fn forward(",
+            &["to_montgomery_at(", "forward_inplace_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn forward_inplace(",
+            &["forward_inplace_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn inverse(",
+            &["montgomery_mul_at(*c, 1, idx)"][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn inverse_inplace(",
+            &["inverse_inplace_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn forward_shoup(",
+            &["forward_inplace_shoup_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn inverse_shoup(",
+            &["inverse_inplace_shoup_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn forward_solinas(",
+            &["Self::to_montgomery(*c"][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn inverse_solinas(",
+            &["montgomery_mul_at(*c, 1, 0)"][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn pointwise_mul(",
+            &["solinas_mont_mul_default_q(", "montgomery_mul_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn pointwise_mul_single(",
+            &["montgomery_mul_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn pointwise_mul_single_at(",
+            &["solinas_mont_mul_default_q(", "montgomery_mul_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn pointwise_mul_shoup(",
+            &["Self::shoup_mul_at("][..],
+        ),
+        (
+            NTT_SRC,
+            "pub fn pointwise_mul_solinas(",
+            &["solinas_mont_mul_default_q("][..],
+        ),
+        (NTT_SRC, "pub fn to_mont(", &["Self::to_montgomery("][..]),
+        (
+            NTT_SRC,
+            "pub fn from_mont(",
+            &["montgomery_mul_at(a, 1, 0)"][..],
+        ),
+        (
+            NTT_SRC,
+            "fn to_montgomery_at(",
+            &["Self::to_montgomery("][..],
+        ),
+        (
+            SOLINAS_SRC,
+            "pub fn pointwise_solinas_mont_mul(",
+            &["solinas_mont_mul_default_q("][..],
+        ),
+    ];
+    for (src, header, helpers) in entries {
+        let body = item_source(src, header);
+        deny(
+            body,
+            header,
+            &[
+                "=>",
+                ">= ",
+                "< q",
+                "> q",
+                "- q",
+                "- Q",
+                "DEFAULT_Q {",
+                "- self.moduli",
+                "wrapping_sub",
+                "overflowing_sub",
+                "select",
+                ".min(",
+                "then_some(",
+                " % ",
+            ],
+            "the coefficients are secret; a correction belongs in a pinned helper",
+        );
+        let branches = body.matches("if ").count();
+        let dispatches = body.matches("if self.is_solinas_default_q() {").count();
+        assert_eq!(
+            branches, dispatches,
+            "{header} branches on something other than the public modulus dispatch:\n{body}"
+        );
+        require(
+            body,
+            header,
+            helpers,
+            "the product must reach its correction through a pinned helper",
+        );
+    }
+}
+
 // --------------------------------------------------------- extractor
 
 /// A gate whose extractor returns nothing passes every `deny` above. Each test
@@ -587,6 +830,36 @@ fn the_extractor_returns_whole_item_bodies() {
         (POLY_SRC, "pub(crate) fn add_ct"),
         (POLY_SRC, "pub(crate) fn coeffs_composed_ct"),
         (CRT_SRC, "pub(crate) fn compose"),
+        (NTT_SRC, "fn forward_inplace_at"),
+        (NTT_SRC, "fn inverse_inplace_at"),
+        (NTT_SRC, "fn forward_inplace_shoup_at"),
+        (NTT_SRC, "fn inverse_inplace_shoup_at"),
+        (NTT_SRC, "fn forward_inplace_solinas_at"),
+        (NTT_SRC, "fn inverse_inplace_solinas_at"),
+        (NTT_SRC, "fn montgomery_mul_at"),
+        (NTT_SRC, "fn to_montgomery("),
+        (NTT_SRC, "fn shoup_mul_at"),
+        (SOLINAS_SRC, "pub fn solinas_mont_mul_default_q"),
+        (MODULAR_SRC, "fn sub_mod_branchless"),
+        (MODULAR_SRC, "fn csubq"),
+        (MODULAR_SRC, "fn sub_mod_mask"),
+        (NTT_SRC, "pub fn forward("),
+        (NTT_SRC, "pub fn forward_inplace("),
+        (NTT_SRC, "pub fn inverse("),
+        (NTT_SRC, "pub fn inverse_inplace("),
+        (NTT_SRC, "pub fn forward_shoup("),
+        (NTT_SRC, "pub fn inverse_shoup("),
+        (NTT_SRC, "pub fn forward_solinas("),
+        (NTT_SRC, "pub fn inverse_solinas("),
+        (NTT_SRC, "pub fn pointwise_mul("),
+        (NTT_SRC, "pub fn pointwise_mul_single("),
+        (NTT_SRC, "pub fn pointwise_mul_single_at("),
+        (NTT_SRC, "pub fn pointwise_mul_shoup("),
+        (NTT_SRC, "pub fn pointwise_mul_solinas("),
+        (NTT_SRC, "pub fn to_mont("),
+        (NTT_SRC, "pub fn from_mont("),
+        (NTT_SRC, "fn to_montgomery_at("),
+        (SOLINAS_SRC, "pub fn pointwise_solinas_mont_mul("),
     ];
     for (src, header) in cases {
         let body = item_source(src, header);

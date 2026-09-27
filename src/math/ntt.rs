@@ -14,6 +14,7 @@
 //! ```
 
 use super::mod_q::DEFAULT_Q;
+use super::modular::{csubq, sub_mod_branchless};
 use super::primality::is_prime;
 
 /// Far above any prime's least quadratic non-residue, where the root search ends: 11 for
@@ -262,8 +263,8 @@ impl NttContext {
                     let u = coeffs[j];
                     let v = self.montgomery_mul_at(coeffs[j + t], w, idx);
 
-                    coeffs[j] = if u + v >= q { u + v - q } else { u + v };
-                    coeffs[j + t] = if u >= v { u - v } else { q - v + u };
+                    coeffs[j] = csubq(u + v, q);
+                    coeffs[j + t] = sub_mod_branchless(u, v, q);
                 }
             }
             m <<= 1;
@@ -334,8 +335,8 @@ impl NttContext {
                     let u = coeffs[j];
                     let v = coeffs[j + t];
 
-                    coeffs[j] = if u + v >= q { u + v - q } else { u + v };
-                    let diff = if u >= v { u - v } else { q - v + u };
+                    coeffs[j] = csubq(u + v, q);
+                    let diff = sub_mod_branchless(u, v, q);
                     coeffs[j + t] = self.montgomery_mul_at(diff, w, idx);
                 }
             }
@@ -457,8 +458,8 @@ impl NttContext {
                     let u = coeffs[j];
                     let v = Self::shoup_mul_at(coeffs[j + t], w, w_shoup, q);
 
-                    coeffs[j] = if u + v >= q { u + v - q } else { u + v };
-                    coeffs[j + t] = if u >= v { u - v } else { q - v + u };
+                    coeffs[j] = csubq(u + v, q);
+                    coeffs[j + t] = sub_mod_branchless(u, v, q);
                 }
             }
             m <<= 1;
@@ -486,8 +487,8 @@ impl NttContext {
                     let u = coeffs[j];
                     let v = coeffs[j + t];
 
-                    coeffs[j] = if u + v >= q { u + v - q } else { u + v };
-                    let diff = if u >= v { u - v } else { q - v + u };
+                    coeffs[j] = csubq(u + v, q);
+                    let diff = sub_mod_branchless(u, v, q);
                     coeffs[j + t] = Self::shoup_mul_at(diff, w, w_shoup, q);
                 }
             }
@@ -581,7 +582,7 @@ impl NttContext {
         let psi_powers = &self.psi_powers[idx];
 
         // Scalar, not SIMD: hand-vectorized and unrolled butterflies both measured
-        // flat-to-regressed here; LLVM already pipelines the REDC + cmov chain.
+        // flat-to-regressed here; LLVM already pipelines the REDC and the corrections.
         let mut t = n;
         let mut m = 1;
         while m < n {
@@ -598,8 +599,8 @@ impl NttContext {
                         w,
                         q_inv_neg,
                     );
-                    coeffs[j] = if u + v >= q { u + v - q } else { u + v };
-                    coeffs[j + t] = if u >= v { u - v } else { q - v + u };
+                    coeffs[j] = csubq(u + v, q);
+                    coeffs[j + t] = sub_mod_branchless(u, v, q);
                 }
             }
             m <<= 1;
@@ -624,8 +625,8 @@ impl NttContext {
                 for j in j2..(j2 + t) {
                     let u = coeffs[j];
                     let v = coeffs[j + t];
-                    coeffs[j] = if u + v >= q { u + v - q } else { u + v };
-                    let diff = if u >= v { u - v } else { q - v + u };
+                    coeffs[j] = csubq(u + v, q);
+                    let diff = sub_mod_branchless(u, v, q);
                     coeffs[j + t] =
                         super::solinas_redc::solinas_mont_mul_default_q(diff, w, q_inv_neg);
                 }
@@ -690,23 +691,13 @@ impl NttContext {
         let q_inv_neg = self.q_inv_neg[idx];
         let ab = (a as u128) * (b as u128);
         let m = ((ab as u64).wrapping_mul(q_inv_neg)) as u128;
-        let t = ((ab + m * (q as u128)) >> 64) as u64;
-        if t >= q {
-            t - q
-        } else {
-            t
-        }
+        csubq(((ab + m * (q as u128)) >> 64) as u64, q)
     }
 
     fn to_montgomery(a: u64, q: u64, r_squared: u64, q_inv_neg: u64) -> u64 {
         let ab = (a as u128) * (r_squared as u128);
         let m = ((ab as u64).wrapping_mul(q_inv_neg)) as u128;
-        let t = ((ab + m * (q as u128)) >> 64) as u64;
-        if t >= q {
-            t - q
-        } else {
-            t
-        }
+        csubq(((ab + m * (q as u128)) >> 64) as u64, q)
     }
 
     #[inline]
@@ -804,11 +795,7 @@ impl NttContext {
         let r = ((a as u128)
             .wrapping_mul(b as u128)
             .wrapping_sub(q_est.wrapping_mul(q as u128))) as u64;
-        if r >= q {
-            r - q
-        } else {
-            r
-        }
+        csubq(r, q)
     }
 
     fn compute_twiddle_factors(
@@ -850,6 +837,9 @@ impl NttContext {
         factors
     }
 }
+
+#[cfg(test)]
+mod branchless_correction_kat;
 
 #[cfg(test)]
 mod tests {
