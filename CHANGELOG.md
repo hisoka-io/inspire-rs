@@ -15,12 +15,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offset, and the largest 36-bit NTT prime (residue 53,266) keeps 3.3 bits of
   margin where this one keeps about nine.
 - `ExtractError::UnimplementedResponseModulus`.
+- `PackParamsError::AutomorphTablesUnderivable`, returned when the NTT over the first
+  modulus does not evaluate at n distinct roots of X^n + 1. No parameter set that
+  `NttContext` accepts reaches it.
+- `benches/pack_params_build_bench.rs`: the d=2048 `PackParams::try_new` build time.
 - `served_post_switch_noise_distribution` in `benches/packing_noise_measurement.rs`
   (needs `mod-switch-response`): the decode margin of the switched, serialized
   response across 40 sessions.
 
 ### Changed
 
+- `PackParams::try_new` derives the automorphism tables from the NTT of X^k in
+  O(n^2) instead of searching with random polynomials in O(n^3). The tables are
+  bit-identical (checked against the old search for every odd t at d <= 256 per push
+  and at d = 2048 on demand), and a d=2048 build drops from about 3.1 s to about
+  0.13 s. The build no longer draws OS entropy.
 - `check_mod_switch_noise_budget` also charges `q' mod p`. Tightening only: the
   shipped targets still pass; a 34-bit prime with residue 53,255 no longer does.
 - `extract_inspiring_mod_switched` reads its modulus off the response, so it now

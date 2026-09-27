@@ -76,6 +76,12 @@ pub enum PackParamsError {
         /// Ciphertext modulus.
         modulus: u64,
     },
+    /// The NTT over the first CRT modulus does not evaluate at the n distinct roots of
+    /// X^n + 1, so no automorphism permutation exists.
+    AutomorphTablesUnderivable {
+        /// Ring dimension of the rejected parameters.
+        ring_dim: usize,
+    },
 }
 
 impl std::fmt::Display for PackParamsError {
@@ -108,6 +114,12 @@ impl std::fmt::Display for PackParamsError {
                 f,
                 "InspiRING packing width {num_to_pack} has no inverse mod q = {modulus}; \
                  the 1/gamma rescaling in the offline phase is undefined"
+            ),
+            Self::AutomorphTablesUnderivable { ring_dim } => write!(
+                f,
+                "InspiRING automorphism tables are undefined at ring_dim {ring_dim}: the NTT \
+                 over the first CRT modulus does not evaluate at {ring_dim} distinct roots of \
+                 X^n + 1"
             ),
         }
     }
@@ -219,7 +231,8 @@ impl PackParams {
 
         let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
 
-        let automorph_tables = generate_automorph_tables(n, &moduli, &ctx);
+        let automorph_tables = derive_automorph_tables(&monomials_ntt, &moduli)
+            .ok_or(PackParamsError::AutomorphTablesUnderivable { ring_dim: n })?;
 
         Ok(Self {
             num_to_pack,
@@ -256,55 +269,60 @@ impl PackParams {
 /// Permutation tables satisfying `NTT(tau_t(poly))[i] = NTT(poly)[table[i]]` for every
 /// odd t in [1, 2n), which turns an automorphism into an O(n) index shuffle.
 ///
-/// Recovered by matching NTT coefficients of a random polynomial against its
-/// automorphed image, retrying whenever a value is not unique.
-fn generate_automorph_tables(n: usize, moduli: &[u64], ctx: &NttContext) -> Vec<Vec<usize>> {
+/// Slot j of the forward NTT holds R * poly(w_j), with R the Montgomery factor and the
+/// w_j the n distinct roots of X^n + 1 mod a prime, so tau_t moves slot j to the slot
+/// holding w_j^t. Every root is an odd power e_j of w_0, hence that slot is the one
+/// whose exponent is t * e_j mod 2n. Limb 0 fixes the permutation on its own. `None`
+/// means limb 0 is not such an evaluation, where no permutation exists.
+fn derive_automorph_tables(monomials_ntt: &[Poly], moduli: &[u64]) -> Option<Vec<Vec<usize>>> {
+    let n = monomials_ntt.len();
     let two_n = 2 * n;
-    let mut tables = Vec::with_capacity(n);
+    let q0 = moduli.first().copied().filter(|&q| q > 1)?;
 
-    for t in (1..two_n).step_by(2) {
-        let mut table = vec![0usize; n];
+    // Limb 0 of NTT(X^k) at slot j for k in [0, 2n), via X^(k+n) = -X^k.
+    let slot_value = |k: usize, j: usize| -> Option<u64> {
+        let (base, negate) = if k < n { (k, false) } else { (k - n, true) };
+        let value = *monomials_ntt.get(base)?.coeffs().get(j)? % q0;
+        Some(if negate { (q0 - value) % q0 } else { value })
+    };
 
-        loop {
-            let poly = Poly::random_moduli(n, moduli);
-            let mut poly_ntt = poly.clone();
-            poly_ntt.to_ntt(ctx);
-
-            let poly_auto = apply_automorphism(&poly, t);
-            let mut poly_auto_ntt = poly_auto.clone();
-            poly_auto_ntt.to_ntt(ctx);
-
-            let mut must_redo = false;
-
-            for i in 0..n {
-                let orig_val = poly_ntt.coeffs()[i];
-                let mut found = 0usize;
-                let mut count = 0usize;
-
-                for j in 0..n {
-                    if poly_auto_ntt.coeffs()[j] == orig_val {
-                        count += 1;
-                        found = j;
-                    }
-                }
-
-                if count != 1 {
-                    must_redo = true;
-                    break;
-                }
-
-                table[found] = i;
-            }
-
-            if !must_redo {
-                break;
-            }
-        }
-
-        tables.push(table);
+    let mut powers_of_w0 = (1..two_n)
+        .step_by(2)
+        .map(|e| slot_value(e, 0).map(|value| (value, e)))
+        .collect::<Option<Vec<_>>>()?;
+    powers_of_w0.sort_unstable();
+    if powers_of_w0.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return None;
     }
 
-    tables
+    // Odd exponent e is stored at e / 2.
+    let mut exponents = Vec::with_capacity(n);
+    let mut slot_of_exponent = vec![usize::MAX; n];
+    for j in 0..n {
+        let root = slot_value(1, j)?;
+        let at = powers_of_w0
+            .binary_search_by_key(&root, |&(value, _)| value)
+            .ok()?;
+        let e = powers_of_w0[at].1;
+        if slot_of_exponent[e / 2] != usize::MAX {
+            return None;
+        }
+        slot_of_exponent[e / 2] = j;
+        exponents.push(e as u64);
+    }
+
+    let two_n = two_n as u64;
+    Some(
+        (1..two_n)
+            .step_by(2)
+            .map(|t| {
+                exponents
+                    .iter()
+                    .map(|&e| slot_of_exponent[(((t * e) % two_n) / 2) as usize])
+                    .collect()
+            })
+            .collect(),
+    )
 }
 
 /// Apply tau_t as an O(n) index permutation in the NTT domain.
@@ -1614,6 +1632,9 @@ fn extended_gcd_i64(a: i64, b: i64) -> (i64, i64, i64) {
         (g, y - (b / a) * x, x)
     }
 }
+
+#[cfg(test)]
+mod automorph_tables_oracle;
 
 #[cfg(test)]
 mod tests {
