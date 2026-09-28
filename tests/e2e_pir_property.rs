@@ -3,11 +3,9 @@
 //! shard_id is idx / entries_per_shard. Axes: entry size, entry count (with the
 //! non-power-of-two 3), fill pattern (random / all-zeros / all-0xff), variant
 //! (NoPacking / InspiRING) and CRT modulus shape (single-prime DEFAULT_Q, the
-//! Google-derivation 27-bit pair, the 30-bit override pair) — the modulus axis
-//! is what the retired single-modulus examples never drove. Every case also
+//! Google-derivation 27-bit pair, the 30-bit override pair). Every case also
 //! walks both boundary indices 0 and num_entries-1. Scale cells (d=2048,
-//! entries=2^14) stay in commit_e_two_crt_regression_grid.rs, whose enumerated
-//! byte oracle over expensive cells is deliberately kept.
+//! entries=2^14) are in two_crt_regression_grid.rs.
 
 #![allow(
     clippy::expect_used,
@@ -26,7 +24,7 @@ use raven_inspire::pir::{
 };
 
 /// Same 27-bit pair the Google `for_scenario` derivation emits and the
-/// commit-E regression grid pins; a test fixture, not a shipped parameter.
+/// 2-CRT regression grid pins; a test fixture, not a shipped parameter.
 const GOOGLE_CRT: [u64; 2] = [67_043_329, 132_120_577];
 
 fn params_for(crt_moduli: Vec<u64>) -> InspireParams {
@@ -200,10 +198,9 @@ proptest! {
     }
 }
 
-/// Deterministic floor under the random sampler: the retired
-/// ethereum_format.rs dimensions (num_entries=3 shard padding, all-zeros,
-/// all-0xff) are guaranteed to run every invocation, on a 2-CRT context the
-/// retired examples never used, through the same oracle as the property.
+/// Deterministic floor under the random sampler: the corner cells
+/// (num_entries=3 shard padding, all-zeros, all-0xff) run every invocation,
+/// on 2-CRT contexts, through the same oracle as the property.
 #[test]
 fn pir_round_trip_pinned_corner_cells() {
     for (crt, fill, variant) in [

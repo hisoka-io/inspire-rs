@@ -164,11 +164,6 @@ fn residue_drops_handshake_handle_and_rehydrated_session_decodes_inline() {
     assert_eq!(decoded.as_slice(), &db[7 * entry_size..8 * entry_size]);
 }
 
-// A CRS versioned-bytes test lived here; its round-trip half duplicated
-// crs_ingest_width_validation.rs and its unique halves (the magic-mismatch
-// guard and the decode-size cap) moved there with the rest of the CRS ingest
-// surface (2026-09-06). This file is about the session residue.
-
 #[test]
 fn debug_redacts_secret_key_on_session_and_residue() {
     let params = d256_params();

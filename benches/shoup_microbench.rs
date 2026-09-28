@@ -1,5 +1,4 @@
-//! Shoup against Montgomery NTT butterflies in isolation, to decide whether
-//! the hot-path integration is worth its cost. Runs only under
+//! Shoup against Montgomery NTT butterflies in isolation. Runs only under
 //! `RAVEN_MICROBENCH=1` and `--release`.
 
 use raven_inspire::math::ntt::NttContext;

@@ -1,6 +1,6 @@
 //! One-sided RGSW encryption: `ell` RLWE rows over the gadget powers.
 //!
-//! Retained for non-live polynomial evaluation and compatibility KATs.
+//! Used by polynomial evaluation and its KATs; not on the served query path.
 
 mod external_product;
 mod types;

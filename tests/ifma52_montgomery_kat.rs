@@ -1,6 +1,6 @@
-//! IFMA52 Montgomery must be byte-identical to the scalar reference before any
-//! of it reaches the hot path. The SIMD case skips by name without
-//! AVX-512-IFMA, and fails outright under `RAVEN_REQUIRE_AVX512=1`.
+//! IFMA52 Montgomery must be byte-identical to the scalar reference. The SIMD
+//! case skips by name without AVX-512-IFMA, and fails outright under
+//! `RAVEN_REQUIRE_AVX512=1`.
 
 use raven_inspire::math::ifma52::mont_mul_split52;
 use raven_inspire::math::mod_q::DEFAULT_Q;
@@ -23,15 +23,8 @@ fn naive_mul_mod(a: u64, b: u64, q: u64) -> u64 {
     (((a as u128) * (b as u128)) % (q as u128)) as u64
 }
 
-// The ifma52_product_lohi random and edge examples are retired into
-// simd_differential_properties.rs's ifma52_product_lohi_matches_u128_property
-// (2026-09-06; the hi-word misassembly mutant that killed both kills the
-// property). ifma52_x8_matches_scalar_default_q is retired too: an x8 lane
-// swap reddens the surviving _matches_naive below and the rescued full-vector
-// pointwise differential (w4e evidence/w546-mc7b.txt). The two
-// mont_mul_split52 examples below are KEPT: split52 is the classical oracle
-// the Solinas property compares against, and an oracle keeps its own
-// independent anchor.
+// split52 is the classical oracle the Solinas property compares against, so it
+// keeps its own independent anchors here.
 
 #[test]
 fn mont_mul_split52_matches_ref_default_q() {

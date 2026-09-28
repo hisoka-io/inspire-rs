@@ -1,10 +1,5 @@
-# Standalone — see top-level Cargo.toml for why it's not a workspace member.
-# This crate ships the library-only surface used by the B1 adapter. Upstream
-# shipped server/CLI/ethereum-db/mmap scaffolding; the Raven fork stripped
-# that surface because (a) the B1 adapter consumes only the library, and
-# (b) those modules carry transitive tokio/axum/reqwest deps that break
-# wasm32-unknown-unknown. Detached workspace; built explicitly with:
-#   cargo build --manifest-path crates/raven-inspire/Cargo.toml --release
+# Its own workspace, so it builds standalone and as a submodule of a larger one.
+# Library only: no server, CLI or async runtime, so it builds for wasm32-unknown-unknown.
 [workspace]
 
 [package]
@@ -12,9 +7,9 @@ name = "raven-inspire"
 version = "0.1.0-alpha.0"
 edition = "2021"
 rust-version = "1.89"
-description = "Raven's fork of inspire-rs (igor53627) with Raven-local patches for known upstream issues and client-side query-path caching."
+description = "InsPIRe single-server private information retrieval: a fork of inspire-rs with correctness fixes and client-side session caching."
 license = "Apache-2.0"
-authors = ["Raven contributors", "Original inspire-rs authors (see UPSTREAM.md)"]
+authors = ["Raven contributors", "inspire-rs authors"]
 publish = false
 readme = "README.md"
 

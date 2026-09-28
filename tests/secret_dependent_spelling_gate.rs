@@ -817,8 +817,7 @@ fn ntt_corrections_are_branch_free() {
     }
 
     // A plain mask is not enough on x86-64: LLVM rebuilds the select and its
-    // cmov conversion turns it into a jump in the Montgomery and Shoup loops,
-    // as it did before this form landed.
+    // cmov conversion turns it into a jump in the Montgomery and Shoup loops.
     let helper = item_source(MODULAR_SRC, "fn sub_mod_branchless");
     deny(
         helper,

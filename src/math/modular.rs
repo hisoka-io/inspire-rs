@@ -235,7 +235,7 @@ impl ModQ {
         let sign = val >> 63;
         let magnitude = (val ^ sign).wrapping_sub(sign) as u64;
         let rem = reduce_by_public_modulus(magnitude, q);
-        // maps 0 to 0 rather than to q, which is what the sign branch got wrong
+        // maps a zero remainder to 0 rather than to q
         let complement = ct_sub_if_ge(q.wrapping_sub(rem), q);
         u64::conditional_select(&rem, &complement, ct_is_negative(val))
     }
@@ -319,8 +319,7 @@ mod tests {
     }
 
     /// The branch-free lift must agree with Euclidean remainder everywhere,
-    /// including where the old sign-branching form did not: `val` an exact
-    /// multiple of `q` returned `q` rather than `0`.
+    /// including a negative exact multiple of `q`, which must map to `0`, not `q`.
     #[test]
     fn from_signed_matches_euclidean_remainder() {
         let moduli = [Q, 12_289u64, 2u64, 1u64, u64::MAX, (1u64 << 62) + 1];

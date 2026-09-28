@@ -59,9 +59,9 @@ impl OracleVerdict {
 }
 
 /// Null-side alpha. A permutation p-value is ~uniform when the null holds, so asserting
-/// "does not reject at 1/20" reds one run in twenty however correct the code is — it did,
-/// at p = 301/8192. At 1/1000 the false-positive rate is ~0.1% and the power is untouched:
-/// the preregistered leak lands at p = 1/8192, which still rejects by a factor of eight.
+/// "does not reject at 1/20" reds one run in twenty however correct the code is.
+/// At 1/1000 the false-positive rate is ~0.1% and the power is untouched: the
+/// preregistered leak lands at p = 1/8192, which still rejects by a factor of eight.
 const NULL_ALPHA_RECIPROCAL: u64 = 1000;
 
 /// Positive-side alpha. A leak the instrument cannot see at 1/200 is a broken instrument.
@@ -414,11 +414,9 @@ fn same_shard_query_transcript_research_oracle() {
         let samples = rgsw_samples(form, Challenge::EndpointIndices);
         let verdict = evaluate(&samples);
         report(form.name(), &verdict);
-        // NULL, not LEAK: this asserts the oracle does NOT reject, so it carries the same
-        // one-in-alpha flake the null constant was introduced to remove, at 5x the rate. It
-        // kept the leak alpha only because it predates the split, and a constant used against
-        // its documented meaning would have propagated backwards -- tightening the leak side
-        // would silently tighten these two null checks.
+        // NULL, not LEAK: this asserts the oracle does NOT reject, so the leak alpha would
+        // flake at 5x the null rate, and tightening the leak side would silently tighten
+        // these null checks too.
         assert!(
             !verdict.rejects_at_reciprocal(NULL_ALPHA_RECIPROCAL),
             "{form:?}: {verdict:?}"

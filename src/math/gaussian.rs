@@ -80,8 +80,8 @@ pub fn os_seeded_chacha(what: &'static str) -> Result<ChaCha20Rng, EntropyUnavai
 
 /// [`os_seeded_chacha`] for entry points whose signature cannot carry the failure.
 ///
-/// Aborts on entropy failure, exactly as the `rand::thread_rng()` call it replaces did.
-/// Degrading to a weaker source instead would leak the query index to the server.
+/// Aborts on entropy failure. Degrading to a weaker source instead would leak
+/// the query index to the server.
 #[allow(
     clippy::panic,
     reason = "deliberate abort: a weaker RNG here leaks the query index; os_seeded_chacha is the typed sibling"
@@ -96,7 +96,7 @@ pub(crate) fn os_seeded_chacha_or_abort(what: &'static str) -> ChaCha20Rng {
 /// Bit patterns of `exp(-x^2 / 2 sigma^2)` for `x` in `[-tailcut, tailcut]`, ascending.
 ///
 /// A NaN probability is only reachable from a degenerate sigma; it maps to `+0.0`
-/// so the acceptance test rejects, matching the pre-tabulation `u < NaN` outcome.
+/// so the acceptance test rejects, as the float comparison `u < NaN` would.
 fn accept_threshold_table(sigma: f64, tailcut: usize) -> Vec<u64> {
     let sigma_sq_2 = 2.0 * sigma * sigma;
     let bound = tailcut as i64;

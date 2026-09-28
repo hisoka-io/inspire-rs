@@ -333,12 +333,9 @@ impl CostEstimator {
                 // of tau_g(s)*g^k - s*w_mask[k] + error, then rotates the set
                 // into gamma-1 automorphism copies - so the work scales with
                 // gamma*gadget_len, not with gamma alone, and the rotations are
-                // automorphisms rather than poly multiplications. Left at 2*gamma
-                // as the coarse stand-in it has always been: nothing observes op
-                // counts, whereas the BYTES are now pinned to the wire by
-                // tests/cost_model_matches_the_wire.rs. Reading "gamma rows" off
-                // this comment is what produced the 85x packing-key over-count
-                // below.
+                // automorphisms rather than poly multiplications. 2*gamma is a
+                // coarse stand-in: op counts are advisory, while the byte counts
+                // are pinned to the wire by tests/cost_model_matches_the_wire.rs.
                 let gamma = self.num_columns as u64;
                 (gamma * 2, gamma * 2, gamma * 2)
             }
@@ -519,9 +516,8 @@ impl CostEstimator {
         // it from `pack_params.gadget`, and `register_client_packing_keys`
         // refuses a query whose `y_body.len() != pack_params.gadget.len`. The
         // `y_all` rotations are derived on both sides and never serialized, so
-        // pricing this by gamma overstated it by gamma/ell (85x at a 512-byte
-        // record); tests/cost_model_matches_the_wire.rs holds it to the wire.
-        // Only sent for TwoPacking (InspiRING mode).
+        // the size scales with the gadget length, not gamma. Only sent for
+        // TwoPacking (InspiRING mode).
         let packing_key_bytes = match self.variant {
             InspireVariant::NoPacking | InspireVariant::OnePacking => 0,
             InspireVariant::TwoPacking => (self.params.packing_gadget_len as u64)
@@ -631,10 +627,7 @@ mod tests {
         assert_eq!(breakdown.packing.poly_additions, 301 + 46);
 
         // Communication: seeded fold row + y_body packing keys + packed response prefix.
-        // y_body is gadget_len polynomials, NOT gamma - this line read `16u64`
-        // (gamma at a 32-byte record) and so restated the estimator's own
-        // over-count instead of checking it. The wire is the oracle now:
-        // tests/cost_model_matches_the_wire.rs.
+        // y_body is gadget_len polynomials, not gamma.
         let crt_limbs = params.crt_moduli.len().max(1) as u64;
         let poly_size = tight_bytes(2048 * crt_limbs);
         let query_seeded = poly_size;

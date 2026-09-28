@@ -294,11 +294,8 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
     }
 }
 
-// Renamed from two_crt_inspiring_packing_offline_online_identity (2026-09-06
-// mutation audit): with no reference plaintext there is no identity to assert,
-// and a wrong-automorphism mutation in packing_offline survived this test while
-// only respond_byte_identity_kat's golden caught it. GAP: no direct oracle pins
-// packing_offline/packing_online output at 2-CRT moduli.
+// Shape and non-constancy only: with no reference plaintext there is no identity
+// to assert. The byte-level guard on packing is respond_byte_identity_kat's golden.
 #[test]
 fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
     use raven_inspire::inspiring::{

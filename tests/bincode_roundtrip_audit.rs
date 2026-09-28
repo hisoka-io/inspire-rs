@@ -31,7 +31,7 @@ fn small_params() -> InspireParams {
 }
 
 /// Shared d=256 / 32-byte-entry cell; the sampler comes back positioned right
-/// after setup, exactly as each test built it inline before the merge.
+/// after setup.
 fn fixture_32b() -> (ServerCrs, EncodedDatabase, RlweSecretKey, GaussianSampler) {
     let params = small_params();
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);

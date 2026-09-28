@@ -1,7 +1,6 @@
 //! The Shoup NTT path must be byte-identical to the Montgomery path at
 //! DEFAULT_Q and at each 30-bit 2-CRT prime, cross-checked against u128
-//! modular multiplication. Nothing Shoup-based enters the hot path until this
-//! is green.
+//! modular multiplication.
 
 use raven_inspire::math::mod_q::DEFAULT_Q;
 use raven_inspire::math::ntt::NttContext;
@@ -9,18 +8,9 @@ use raven_inspire::math::ntt::NttContext;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 
-// Six examples lived here (scalar-vs-naive at DEFAULT_Q, the two "_2crt_"
-// tests - which despite their names built SINGLE-prime contexts, so
-// crt_count()==1 and the per-limb indexing in pointwise_mul_shoup /
-// shoup_precompute_vec was never exercised with two limbs - the two
-// forward+inverse round trips, and the edge grid). All six are retired into
-// simd_differential_properties.rs's pointwise_mul_shoup_matches_naive_over_
-// full_vectors (2026-09-06), which walks all four context shapes every case,
-// asserts the FULL vector on a genuine 2-CRT context, embeds the pairwise
-// edge grid, and round-trips forward_shoup+inverse_shoup. Kill matrix
-// (w4e evidence/w546-mc*.txt): the swapped-limb-moduli mutant left all six
-// GREEN and kills the property; the dropped-final-subtract, unscaled-coeff-0
-// and corrupted-twin mutants that killed them kill the property too.
+// Full-vector and 2-CRT coverage of the Shoup path is the property
+// pointwise_mul_shoup_matches_naive_over_full_vectors in
+// simd_differential_properties.rs.
 
 #[test]
 fn shoup_convolution_matches_montgomery_default_q() {

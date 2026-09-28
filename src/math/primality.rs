@@ -90,7 +90,7 @@ mod tests {
         for strong_pseudoprime in [2047, 3_215_031_751, 3_825_123_056_546_413_051] {
             assert!(!is_prime(strong_pseudoprime), "{strong_pseudoprime}");
         }
-        // NTT-friendly composites a server has actually been tested with.
+        // NTT-friendly composites near the moduli this crate uses.
         for forged in [68_719_309_313, 68_718_424_065, 1_073_725_441, 1_072_693_249] {
             assert!(!is_prime(forged), "{forged}");
         }

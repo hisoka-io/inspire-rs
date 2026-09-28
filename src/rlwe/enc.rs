@@ -38,7 +38,7 @@ impl PlaintextRounding {
         let estimate = high * self.reciprocal + ((low * self.reciprocal) >> 64);
         let short = (numerator - estimate * self.delta).ct_gt(&(self.delta - 1));
         let quotient = u128::conditional_select(&estimate, &(estimate + 1), short);
-        // Truncation matches the `as u64` of the divide this replaces.
+        // Truncating to u64 matches the exact quotient's truncation.
         reduce_by_public_reciprocal(quotient as u64, self.p, self.p_reciprocal)
     }
 }

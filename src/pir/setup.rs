@@ -104,14 +104,13 @@ impl ServerCrs {
         self.params.q
     }
 
-    /// 16-byte version magic prefixing a serialized CRS, mirroring the storage
-    /// snapshot magic. A CRS is a persistent cryptographic artifact that can be
-    /// decoded without HTTP metadata, so its prefix identifies both the artifact
-    /// kind and the layout that requires re-bootstrap when changed.
+    /// 16-byte version magic prefixing a serialized CRS. A CRS is a persistent
+    /// artifact decoded without any transport metadata, so its prefix identifies
+    /// both the artifact kind and the layout; a layout change bumps it.
     pub const MAGIC: [u8; 16] = *b"RAVEN_CRS_v03\0\0\0";
 
     /// Reject a CRS body larger than this before decoding, so a malicious or stale
-    /// (e.g. the pre-shrink ~35 MiB) blob cannot drive an unbounded bincode allocation.
+    /// blob cannot drive an unbounded bincode allocation.
     /// A length pre-check is the only effective bound: bincode 1.3 forces an Infinite
     /// limit on the slice path, so `with_limit` is a no-op there. ~6x the largest
     /// legitimate CRS (d=4096 is ~2.5 MiB). This type-specific cap is deliberately
@@ -445,7 +444,7 @@ mod tests {
         assert_eq!(crs.params.ring_dim, params.ring_dim);
     }
 
-    /// H1: `setup_with_rng` must accept a caller-provided `CryptoRng`
+    /// `setup_with_rng` must accept a caller-provided `CryptoRng`
     /// and produce a CRS whose RNG-derived bytes are reproducible across
     /// runs given the same seed. Locks down the explicit-RNG injection
     /// path used by WASM clients and deterministic test fixtures.

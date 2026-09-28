@@ -21,22 +21,10 @@ fn test_params() -> InspireParams {
     }
 }
 
-// Five plain round-trip examples lived here (single_entry, random_entries,
-// multi_shard, boundary_indices, different_entry_sizes). All five are retired
-// into e2e_pir_property.rs's pir_round_trip property (2026-09-06), which walks
-// the same setup->query->respond->extract byte oracle over entry size, entry
-// count (incl. the non-power-of-two 3 and exact shard-boundary counts), fill
-// pattern, variant AND the CRT modulus axis, asserting shard routing plus both
-// boundary indices every case. Kill matrix (w4e evidence/w542-*.txt): the
-// shard+1 and byte-swap mutants that killed all five also kill the property;
-// a boundary-only routing mutant and a 2-CRT recombination mutant kill the
-// property while every example here stayed GREEN.
-
-// Renamed from test_e2e_privacy_basic (2026-09-06 mutation audit): nothing here
-// observes what an adversary sees, and its assert_ne loop was dead code - with
-// the result pinned to vec![5; 32] the loop could never fire and survived being
-// neutered outright. GAP: no test in this suite asserts query or response
-// indistinguishability across indices.
+// General round trips are the property in e2e_pir_property.rs. A statistical
+// query-transcript oracle (ignored by default, queries only) is in
+// query_indistinguishability_oracle.rs; no test covers response
+// indistinguishability.
 #[test]
 fn test_e2e_constant_fill_entry_retrieval() {
     let params = test_params();

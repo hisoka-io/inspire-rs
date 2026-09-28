@@ -1,6 +1,5 @@
 //! Wall time of the whole `PackParams::try_new` build at the production d=2048 cell,
-//! median of 5. The O(n^3) automorphism table search used to dominate it; the 2n
-//! monomial NTTs now take most of it.
+//! median of 5. The 2n monomial NTTs behind the automorphism tables take most of it.
 
 use std::time::Instant;
 

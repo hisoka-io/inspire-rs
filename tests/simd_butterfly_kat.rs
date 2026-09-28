@@ -88,8 +88,3 @@ fn solinas_forward_convolution_matches_naive_mul() {
         "NTT convolution does not match naive convolution"
     );
 }
-
-// A shipping-cell (n=2048) round-trip stress test lived here; it was a strict
-// subset of solinas_ntt_roundtrip_byte_identity above (same function, n list
-// already includes 2048, fewer seeds) and was retired 2026-09-06 - the
-// unscaled-coeff-0 inverse mutant killed both.

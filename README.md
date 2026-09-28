@@ -1,306 +1,137 @@
-![CI](https://github.com/igor53627/inspire-rs/actions/workflows/ci.yml/badge.svg)
-[![Crates.io](https://img.shields.io/crates/v/inspire.svg)](https://crates.io/crates/inspire)
-[![Docs](https://docs.rs/inspire/badge.svg)](https://docs.rs/inspire)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/igor53627/inspire-rs)
-[![Interactive Visualization](https://img.shields.io/badge/Demo-Protocol%20Visualization-blue)](https://igor53627.github.io/inspire-rs/protocol-visualization.html)
+# raven-inspire
 
-# inspire-rs
+A Rust implementation of InsPIRe, single-server private information retrieval with
+server-side preprocessing ([eprint 2025/1352](https://eprint.iacr.org/2025/1352)). A client
+fetches one fixed-width record from a server-held database without the server learning
+which record within a shard it asked for.
 
-**InsPIRe: Communication-Efficient PIR with Server-side Preprocessing**
+It is a fork of [inspire-rs](https://github.com/igor53627/inspire-rs). It is a library
+only (no server, CLI or async runtime), so it also builds for `wasm32-unknown-unknown`.
 
-A Rust implementation of the InsPIRe PIR (Private Information Retrieval) protocol, designed for private queries over large databases like Ethereum state (~73 GB, 2.4 billion entries).
+## Status
 
-## Overview
-
-InsPIRe achieves state-of-the-art communication efficiency for single-server PIR through:
-
-- **InspiRING Ring Packing**: Novel LWE→RLWE transformation using only 2 key-switching matrices (vs logarithmic in prior work)
-- **Homomorphic Polynomial Evaluation**: Reduced response size via encrypted polynomial evaluation
-- **CRS Model**: Server-side preprocessing for amortized efficiency
-
-## Features
-
-- 121.5-bit security at the shipped modulus (malb/lattice-estimator @ 3e48ef4,
-  binding attack `primal_bdd`). See PRIVACY.md for the derivation.
-- Support for 32-byte entries (Ethereum state format)
-- Database sharding for large datasets
-- CLI binaries for server/client/setup
-- Integration with [plinko-extractor](https://github.com/pse-team/plinko-extractor) format
-
-## Usage
-
-### Setup (Server-side preprocessing)
-
-```bash
-cargo run --release --bin inspire-setup -- \
-  --data-dir path/to/plinko-output \
-  --output-dir ./inspire_data \
-  --ring-dim 2048 \
-  --binary-output  # optional: also write binary shards for mmap
-```
-
-### Server
-
-```bash
-cargo run --release --bin inspire-server -- \
-  --data-dir ./inspire_data \
-  --bind 0.0.0.0:3000 \
-  --mmap  # optional: use memory-mapped shards
-```
-
-### Client
-
-```bash
-# Query by raw index
-cargo run --release --bin inspire-client -- \
-  --server http://localhost:3000 \
-  --secret-key inspire_data/secret_key.json \
-  Index --index 12345
-
-# Query account by address
-cargo run --release --bin inspire-client -- \
-  --server http://localhost:3000 \
-  --secret-key inspire_data/secret_key.json \
-  --account-mapping inspire_data/account-mapping.bin \
-  Account --address 0x...
-```
+Alpha (`0.1.0-alpha.0`), not published to crates.io, and not independently audited. The
+wire formats are not stable: the serialized CRS carries a version prefix, and a CRS with an
+older layout is refused rather than decoded.
 
 ## Protocol
 
-1. **Setup(D)**: Server encodes database as polynomials, generates CRS
-2. **Query(idx)**: Client encrypts `delta * X^(-idx)` as one seeded RLWE row
-3. **Respond(D', qry)**: Server multiplies each plaintext column by the encrypted monomial
-4. **Extract(st, resp)**: Client decrypts RLWE response
+1. `setup` encodes the database as polynomials, one record per ring coefficient and
+   `ring_dim` records per shard, and generates the CRS and the client secret key.
+2. `query` / `query_seeded` encrypt the inverse monomial `X^(-k)` for local index `k`.
+3. `respond*` multiplies each column polynomial by the encrypted monomial, which rotates
+   record `k` to coefficient 0, then packs the result.
+4. `extract*` decrypts and reassembles the record bytes.
 
-The key insight: storing value `y_k` at coefficient `k` of polynomial `h(X)`, then multiplying by `X^{-k}` (the inverse monomial) rotates `y_k` to coefficient 0.
+Three variants (`InspireVariant`): `NoPacking` returns one ciphertext per 16-bit column,
+`OnePacking` packs them with a log(d)-key automorphism tree, and `TwoPacking` uses a seeded
+query and InspiRING packing with two key-switching matrices. `TwoPacking` is the one to use.
 
-## Parameters
+```rust
+use raven_inspire::math::GaussianSampler;
+use raven_inspire::params::InspireParams;
+use raven_inspire::{extract_inspiring, query_seeded, respond_seeded_inspiring, setup};
 
-> **CORRECTED 2026-09-12:** the earlier default was the two-CRT pair
-> `[268369921, 249561089]` with `p = 2^16`. Current `secure_128_d2048` and
-> `secure_128_d4096` use the single-prime `DEFAULT_Q = 2^60 - 2^14 + 1` and `p = 65537`.
-> Two-CRT construction remains explicit through `for_scenario_with_crt`; it is not the default.
+let params = InspireParams::secure_128_d2048();
+let entry_size = 32;
+let database = vec![0u8; params.ring_dim * entry_size];
+let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
 
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| Ring dimension d | 2048 | Power of two |
-| Ciphertext modulus q | `DEFAULT_Q = 2^60 - 2^14 + 1` (one limb) | NTT-friendly prime |
-| Plaintext modulus p | 65537 | Fermat prime F4; supports 16-bit columns |
-| Error σ | 6.4 | Discrete Gaussian |
-| Key-switching matrices | 2 | K_g, K_h only (InspiRING) |
+let (crs, db, sk) = setup(&params, &database, entry_size, &mut sampler)?;
+let (state, query) = query_seeded(&crs, 42, &db.config, &sk, &mut sampler)?;
+let response = respond_seeded_inspiring(&crs, &db, &query)?;
+let record = extract_inspiring(&crs, &state, &response, entry_size)?;
+```
 
-### InspiRING Key Material Comparison (Conceptual)
+`ClientSession` caches the packing material so repeated queries skip it. It can register
+the ~48 KiB of packing keys with a `ServerSessionStore` once and send a handle afterwards.
 
-| Approach | KS Matrices | Conceptual Storage |
-|----------|-------------|-------------------|
-| Tree Packing | log(d) = 11 | 1056 KB |
-| InspiRING (2-matrix) | 2 (seeds only) | 64 bytes |
-| **Reduction** | **5.5x** | **16,000x** |
+## Parameters and sizes
 
-**Note**: The conceptual 64-byte figure refers only to InspiRING packing-key seeds. **Corrected
-2026-09-12:** the historical `ServerCrs` was reported as ~40-50 MB at d=2048, dominated by a
-~33 MB `crs_a_vectors` field. That field and four other unread fields have since been removed;
-the current client-shipped CRS is ~1.1 MiB. The HTTP server defaults to **InspiRING** when clients
-send packing keys; tree packing is opt-in via `packing_mode=tree`. The previous parameter note also
-called two CRT residues the default; current secure presets use one `DEFAULT_Q` limb. Explicit
-two-CRT scenarios remain available for testing and parameter studies.
+`InspireParams::secure_128_d2048` uses ring dimension 2048, a single 60-bit prime
+`q = 2^60 - 2^14 + 1`, `p = 65537` and `sigma = 6.4`. Sizes at d=2048 for a 512-byte
+record are independent of database size:
 
-## Building
+| Message | Bytes |
+|---|---:|
+| First query, packing keys inline | 61,735 |
+| Query carrying a session handle | 15,491 |
+| Response, mod-switched to a 36-bit modulus | 10,446 |
+| Response, unswitched | 17,358 |
+
+## Cargo features
+
+| Feature | Effect |
+|---|---|
+| `parallel` | Runs the respond and packing loops on rayon. Output is byte-identical to the default sequential build. |
+| `mod-switch-response` | Response modulus switching (`pir::mod_switch`) and the matching client extractor. |
+| `simd-packing-offline` | AVX-512 IFMA52 kernel for offline packing, selected at runtime by CPUID with a scalar fallback. |
+
+## Security notes
+
+- **Security level.** `secure_128_d2048` measures 121.5 bits, not 128
+  (malb/lattice-estimator @ 3e48ef4, binding attack `primal_bdd`). The preset name
+  predates the measurement. `security_level` is a label nothing reads, and `validate`
+  runs no lattice estimate. The d=4096 preset has not been measured.
+- **Shard id in the clear.** A query names its shard, and a shard holds at most
+  `ring_dim` records (2048 at the shipped preset). Query privacy covers the index within
+  that shard only, and repeated queries reveal the shard access pattern.
+- **Semi-honest server.** Nothing binds a response to the index that was queried. A
+  server that answers another row, by fault or on purpose, goes undetected, so an
+  application that needs integrity must check the record against a commitment it trusts.
+  Bounded recovery attempts against the a-side of packed responses failed at d=256. A
+  failed attack is not a privacy bound, and d=2048 is unmeasured.
+- **Sessions.** Queries that reuse a session handle are linkable to each other.
+  `SessionResidue` holds the client secret key in the clear, so store it as a secret.
+- **Noise margin.** Decryption fails silently once noise passes `Delta/2`. The served
+  36-bit response keeps 8.88 bits of margin at 512-byte records and 10.30 bits at 32-byte
+  records (`benches/packing_noise_measurement.rs`). Those are measurements, not an analytic
+  bound. The `InspireParams::for_scenario` noise gate does not model InspiRING packing
+  noise.
+- **Constant time.** On the client, the NTT, ring arithmetic, query generation, encryption,
+  key generation and RLWE decryption avoid branches, divisions and memory indexing that
+  depend on secrets. `tests/secret_dependent_spelling_gate.rs` enforces this by checking the
+  source text for forbidden constructs. It does not prove constant-time behaviour. Release
+  builds for x86-64 and wasm32 were checked by hand at rustc 1.98, and CI does not repeat that
+  check. The following are not covered: how a WebAssembly engine compiles `select`, the
+  wasm32 128-bit multiply (a `__multi3` call that was not inspected), native targets other
+  than x86-64, the AVX-512 IFMA kernels, the LWE path, and diagnostic helpers such as the
+  norms. These still branch or divide: `Poly::coeff` and `Poly::set_coeff` on two-limb
+  polynomials, `shoup_precompute_vec`, `mul_acc_ntt_domain` (on server operands),
+  `extract_with_tolerance` (on the decrypted value), and the tight codec's canonical-form
+  check (on a serialized secret key's coefficients).
+
+Report issues through the repository's issue tracker. Do not include sensitive data.
+
+## Differences from inspire-rs
+
+- Secure presets use the single prime `2^60 - 2^14 + 1`. Upstream's two-prime modulus
+  runs out of noise budget at 256-byte records and decrypts to wrong bytes.
+- A fix for NTT-domain automorphisms, which previously dropped a CRT limb and corrupted
+  two-prime decryption at d >= 256.
+- Typed errors in place of panics for oversized shard geometry, a variant on the wrong
+  query type, and malformed or mis-shaped wire input.
+- A CRS shrunk from ~35 MiB to ~1.1 MiB, with a version prefix and a decode size cap. The
+  binary codec is sized to the modulus width.
+- Client sessions and a packing-key handshake, response modulus switching, branch-free
+  client arithmetic, and `rayon` as an optional feature.
+- Upstream's server, CLI, mmap and Ethereum database modules are removed.
+
+## Building and testing
 
 ```bash
 cargo build --release
+cargo test --release --all-features
+cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-### WebAssembly (WASM) Builds
-
-The library supports building for `wasm32-unknown-unknown` targets (browsers) by disabling server-specific features:
-
-```toml
-# In your Cargo.toml
-[dependencies]
-inspire = { version = "0.1", default-features = false }
-```
-
-Build with wasm-pack:
-
-```bash
-wasm-pack build --target web -- --no-default-features
-```
-
-#### WASM Caveats
-
-1. **Parallelism (rayon)**: The library uses `rayon` for parallel computation. On WASM:
-   - Requires wasm threads (nightly + `-Z build-std` + `+atomics,+bulk-memory`)
-   - Integrate with `wasm-bindgen-rayon` for thread pool initialization
-   - Without threads, operations run sequentially on the main thread
-
-2. **Random number generation**: The `rand` crate requires `getrandom` JS support:
-   ```toml
-   [dependencies]
-   getrandom = { version = "0.2", features = ["js"] }
-   ```
-
-3. **Feature availability**: With `default-features = false`:
-   - [OK] Core PIR: setup, query, respond, extract
-   - [X] Server features: mmap, ethereum_db, HTTP endpoints
-   - [X] CLI features: binary executables
-
-## Testing
-
-```bash
-cargo test
-```
-
-## Quick Start with Test Data
-
-Generate test data files:
-
-```bash
-cargo run --example generate_test_data
-```
-
-This creates:
-- `testdata/database.bin` - 1024 entries of 32 bytes
-- `testdata/account-mapping.bin` - 10 test accounts
-- `testdata/storage-mapping.bin` - 20 test storage slots
-
-Run PIR setup:
-
-```bash
-cargo run --release --bin inspire-setup -- \
-  --database testdata/database.bin \
-  --entry-size 32 \
-  --output-dir testdata/pir
-```
-
-## Communication Costs
-
-Current exact TwoPacking binary sizes at d=2048 and a 512-byte record are:
-
-| Phase | Bytes | Notes |
-|-------|------:|-------|
-| First query | 61,735 | Includes inline packing keys |
-| Registered query | 15,491 | Carries a session handle |
-| Served response | 10,446 | Enabled adapter path, mod-switched to a 36-bit modulus and serialized at 36 bits per coefficient (17,358 unswitched) |
-| Served response with sibling addendum | 10,606 | Includes the separate 160-byte addendum a batch slot carries |
-| RIMS codec at 36 bits | 11,543 | Byte-aligned and not on the wire; the tight serializer is 1,097 bytes smaller |
-
-**Production recommendation**: use **InsPIRe^2 (TwoPacking)** with the mod-switched tight response.
-
-These costs are independent of database size at a fixed record shape.
-
-**Note**: The table reflects serialized sizes in single-modulus mode (`crt_moduli` length 1), which
-is also the current secure-preset default. **Corrected 2026-09-12:** the older note said "With CRT
-enabled (default), ciphertexts store two residues per coefficient." That describes the historical
-two-CRT default; explicit two-limb scenarios still increase sizes roughly proportionally.
-
-> **Why constant sizes?** This is a privacy requirement. If sizes varied with target index or database, traffic analysis could reveal what's being queried. See [docs/COMMUNICATION_COSTS.md](docs/COMMUNICATION_COSTS.md#why-pir-sizes-are-constant) for the formulas.
-
-### Protocol Variants
-
-```rust
-use inspire::{query, query_seeded, respond_one_packing, respond_seeded_packed};
-use inspire::params::InspireVariant;
-
-// InsPIRe^0: Simple, no packing
-let response = respond(&crs, &db, &query)?;
-
-// InsPIRe^1: Packed response (17x response reduction)
-let response = respond_one_packing(&crs, &db, &query)?;
-
-// InsPIRe^2: Seeded one-row query + packed response
-let (state, seeded_query) = query_seeded(&crs, index, &config, &sk, &mut sampler)?;
-let response = respond_seeded_packed(&crs, &db, &seeded_query)?;
-
-// Extract with variant-specific extraction
-let entry = extract_with_variant(&crs, &state, &response, entry_size, InspireVariant::TwoPacking)?;
-```
-
-## Performance
-
-Benchmarked on AMD/Intel x64 server with d=2048, the `secure_128_d2048` preset:
-
-### Server Response Time
-
-| Database Size | Shards | Respond Time |
-|---------------|--------|--------------|
-| 256K entries (8 MB) | 128 | 3.8 ms |
-| 512K entries (16 MB) | 256 | 3.1 ms |
-| 1M entries (32 MB) | 512 | 3.3 ms |
-
-### End-to-End Latency
-
-| Phase | Time |
-|-------|------|
-| Client: Query generation (seeded) | ~4 ms |
-| Server: Expand + Respond | ~3-4 ms |
-| Client: Extract result | ~5 ms |
-| **Total round-trip** | **~12 ms** |
-
-### Packing Performance
-
-The implementation supports two packing approaches:
-
-| Approach | Used By | Complexity | Notes |
-|----------|---------|------------|-------|
-| Tree packing | `respond_one_packing()` | O(log d) key-switches | Opt-in via `packing_mode=tree` |
-| InspiRING 2-matrix | `respond_inspiring()` | O(γ × ℓ × n) online | Default for networked API (requires packing keys) |
-
-**Tree packing** (via `automorph_pack`) is available as an explicit fallback. Set `packing_mode=tree` and use `extract_with_variant(..., InspireVariant::OnePacking)` to unpack. This uses log(d) Galois key-switching matrices stored in the CRS.
-
-**InspiRING 2-matrix** packing is implemented in `inspiring2` module with optimizations matching Google's reference:
-- NTT-domain automorphisms via precomputed permutation tables
-- Fused multiply-accumulate in NTT domain
-- Pre-cached bold_t in NTT form for zero-conversion online phase
-
-**HTTP API note:** Query JSON includes `packing_mode` (`\"inspiring\"` or `\"tree\"`, default `\"inspiring\"`). If `packing_mode=\"inspiring\"` and `inspiring_packing_keys` are missing, the server returns `400` with a descriptive error. Use `packing_mode=\"tree\"` to opt in to tree packing (both in-memory and mmap modes support InspiRING when keys are present).
-
-Run benchmarks: `cargo bench --bench packing`
-
-Run query size analysis: `cargo run --release --example query_size_comparison`
-
-## Documentation
-
-- [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) - Architecture details
-- [docs/COMMUNICATION_COSTS.md](docs/COMMUNICATION_COSTS.md) - Bandwidth analysis
-- [docs/protocol-visualization.html](docs/protocol-visualization.html) - Interactive D3 visualization of protocol and costs
-
-## Contributing
-
-Commit messages must follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```text
-<type>[(<scope>)][!]: <description>
-```
-
-Allowed types: `feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `style`, `perf`, `build`, `a11y`.
-
-Subject line must be **100 characters or fewer** (a warning is shown above 72).
-
-Automatic exceptions: `Merge ...`, `Revert ...`, and `fixup!/squash!/amend!` commits.
-Validation is shared by local hooks and CI via `scripts/validate-commit-msg.sh`.
-
-Examples:
-- `feat: add batch query support`
-- `fix(server): handle empty database`
-- `docs: update protocol parameters table`
-- `chore!: drop legacy API`
-
-Local git hooks validate and auto-fix commit messages. Enable them with:
-
-```bash
-git config core.hooksPath .githooks
-chmod +x .githooks/commit-msg .githooks/prepare-commit-msg
-```
-
-The `prepare-commit-msg` hook auto-corrects common mistakes (uppercase types, missing
-space after colon, trailing periods, uppercase description start) before the `commit-msg`
-validator runs.
+Run tests with `--release`, because the d=2048 tests are slow in debug builds. Tests
+marked `#[ignore]` cover large cells (for example 2^20 records of 256 bytes) and run with
+`-- --ignored`. The timing harnesses in `benches/` are run by hand, and each file states
+how. Minimum supported Rust version: 1.89.
 
 ## License
 
-MIT OR Apache-2.0
-
-## References
-
-- [InsPIRe Paper](https://eprint.iacr.org/2025/1352) - Original protocol specification (IEEE S&P 2025)
+Apache-2.0. This project is a fork of
+[inspire-rs](https://github.com/igor53627/inspire-rs), which is licensed MIT OR
+Apache-2.0.

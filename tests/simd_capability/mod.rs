@@ -6,9 +6,9 @@
 //! dispatch differential when `simd-packing-offline` is off: the dispatch then
 //! IS the scalar loop, so both sides of the comparison are the same code.
 //! Both skips are therefore named on stderr, and `RAVEN_REQUIRE_AVX512=1`
-//! promotes either one to a hard failure — which is what a CI lane that claims
-//! to exercise these kernels must set, so a runner that cannot run them says so
-//! instead of passing.
+//! promotes either one to a hard failure. A CI job that claims to exercise
+//! these kernels must set it, so a runner that cannot run them fails instead
+//! of passing.
 
 #![allow(
     dead_code,
@@ -43,7 +43,7 @@ pub fn require_avx512ifma(test: &str) -> bool {
     assert!(
         !skips_are_failures(),
         "{test}: host lacks AVX-512-IFMA52 (avx512ifma + avx512f) and {REQUIRE_ENV}=1 \
-         demands the SIMD kernels actually run. Either run this lane on a runner with \
+         demands the SIMD kernels actually run. Either run this job on a runner with \
          those CPU flags or unset {REQUIRE_ENV}."
     );
     eprintln!(
@@ -63,7 +63,7 @@ pub fn require_cargo_feature(test: &str, feature: &str, enabled: bool) -> bool {
         !skips_are_failures(),
         "{test}: built without --features {feature}, so the dispatch under test is the \
          scalar reference itself and the differential is vacuous; {REQUIRE_ENV}=1 demands \
-         a real comparison. Add --features {feature} to this lane."
+         a real comparison. Add --features {feature} to this job."
     );
     eprintln!(
         "LOUD SKIP: {test} did NOT run - built without --features {feature}, which makes \

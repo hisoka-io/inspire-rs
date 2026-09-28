@@ -379,7 +379,7 @@ impl std::fmt::Debug for SessionResidue {
 /// `RwLock` because every query reads and registration happens once per session.
 /// The store removes explicit handles but has no automatic eviction policy.
 /// Allocation is process-global, so replacing a flushed store cannot reissue a handle
-/// during that process lifetime. Restart-safe allocation belongs to the server adapter.
+/// during that process lifetime. Restart-safe allocation belongs to the embedding server.
 ///
 /// The handle is an unauthenticated u64. Guessing another client's handle yields a
 /// response encrypted under that client's keys, so it is a denial of useful response
@@ -495,7 +495,7 @@ pub(crate) fn ensure_packing_width_matches(
     // outer vector from the server's gamma, but each rotation is `y_body.len()` long,
     // and `packing_online`'s inner loop skips every digit `k >= y_all[i].len()`. A short
     // `y_body` under a correct `num_to_pack` therefore drops terms from the packing sum
-    // and returns wrong plaintext at HTTP 200 - the same failure the gamma check exists
+    // and returns wrong plaintext as a success - the same failure the gamma check exists
     // to stop, reached by a field the gamma check never reads.
     if keys.y_body.len() != pack_params.gadget.len {
         return Err(pir_err!(

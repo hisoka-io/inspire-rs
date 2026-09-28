@@ -73,8 +73,7 @@ fn an_empty_modulus_vector_is_refused_unless_the_whole_value_is_default() {
     let bytes = bincode::serialize(&p).expect("serialize");
     // moduli is the second length-prefixed vec; a 1 -> 0 flip on its length makes
     // the trailing modulus reparse as the next field. The window search must hard-
-    // fail when the prefix moves: an if-let here silently skipped every assertion
-    // once the fixture stopped producing a 1u64 window (2026-09-06 mutation audit).
+    // fail when the prefix moves; an if-let would silently skip every assertion.
     let mut hostile = bytes.clone();
     let one_le = 1u64.to_le_bytes();
     let at = hostile

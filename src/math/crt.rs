@@ -129,8 +129,8 @@ pub fn crt_modulus(moduli: &[u64]) -> u64 {
 mod tests {
     use super::*;
 
-    /// Old-vs-new over both residues' extremes and a wide random spread, at the two
-    /// 2-CRT moduli pairs in tree: the upstream preset and the adaptive derivation.
+    /// Against `crt_compose_2` over both residues' extremes and a wide random spread,
+    /// at the reference 2-CRT pair and the adaptive derivation's pair.
     #[test]
     fn constant_time_composition_matches_crt_compose_2() {
         for (q0, q1) in [(268_369_921u64, 249_561_089u64), (67_043_329, 132_120_577)] {

@@ -2,7 +2,7 @@
 //! another. The automorphism generator is `(2n/gamma)+1`, so mismatched keys are
 //! rotations under a different automorphism than the `bold_t` they multiply - and
 //! `packing_online` guards its loop with `if i < len`, skipping the shortfall instead
-//! of rejecting it. The result is HTTP 200 carrying wrong plaintext.
+//! of rejecting it. The result is a successful response carrying wrong plaintext.
 
 #![allow(
     clippy::expect_used,
@@ -39,11 +39,6 @@ fn keys_at(width: usize) -> (ClientPackingKeys, PackParams) {
     let keys = ClientPackingKeys::generate(&sk, &pack, [3u8; 32], &mut sampler);
     (keys, pack)
 }
-
-// Two single-cell tests lived here ((8,8) accept and (4,8) refuse); both are
-// cells of the 5x5 table below, which since 2026-09-06 also asserts the
-// refusal message on every mismatched pair (the reworded-message mutant that
-// killed the deleted (4,8) test kills the table now).
 
 /// Every legal width pairing must be screened, not just the one above.
 #[test]

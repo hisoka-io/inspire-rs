@@ -1,6 +1,5 @@
 //! `solinas_mont_mul_default_q` must be byte-identical to classical Montgomery
 //! REDC at DEFAULT_Q, and its AVX-512-IFMA variant lane-identical to it.
-//! Nothing Solinas-based enters the hot path until this is green.
 
 use raven_inspire::math::ifma52::mont_mul_split52;
 use raven_inspire::math::mod_q::DEFAULT_Q;
@@ -16,13 +15,8 @@ fn naive_mul_mod(a: u64, b: u64, q: u64) -> u64 {
     (((a as u128) * (b as u128)) % (q as u128)) as u64
 }
 
-// The random-draw and edge-grid scalar examples are retired into
-// simd_differential_properties.rs's solinas_scalar_matches_classical_
-// montgomery_property (2026-09-06; the dropped-final-subtract mutant that
-// killed them kills the property). solinas_ifma52_x8_matches_scalar is
-// retired too: an x8 lane swap reddens the surviving _matches_naive below and
-// the rescued full-vector pointwise differential, so scalar-equality was
-// implied coverage (w4e evidence/w546-mc7a.txt).
+// Random and edge-grid scalar coverage is the property in
+// simd_differential_properties.rs.
 
 /// Solinas matches classical at m = 0 and across the random m distribution.
 #[test]

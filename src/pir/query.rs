@@ -99,7 +99,7 @@ pub struct ServerSessionHandle(pub u64);
 /// Query sent to the server.
 ///
 /// Privacy caveat: `shard_id` travels in cleartext, so the anonymity set is one
-/// shard rather than the whole database. See PRIVACY.md.
+/// shard of at most `ring_dim` entries rather than the whole database.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ClientQueryWire")]
 pub struct ClientQuery {

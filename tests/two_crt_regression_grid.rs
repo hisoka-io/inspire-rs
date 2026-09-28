@@ -64,7 +64,7 @@ fn smoke_cell(params: &InspireParams, entries: u64, record_bytes: usize, label: 
 }
 
 #[test]
-fn commit_e_google_crt_d256_singleshard_variable_records() {
+fn google_crt_d256_singleshard_variable_records() {
     let crt = vec![67_043_329u64, 132_120_577u64];
     for &rb in &[8usize, 32, 128, 256] {
         let params = base_params(256, crt.clone());
@@ -73,7 +73,7 @@ fn commit_e_google_crt_d256_singleshard_variable_records() {
 }
 
 #[test]
-fn commit_e_google_crt_d512_multi_records() {
+fn google_crt_d512_multi_records() {
     let crt = vec![67_043_329u64, 132_120_577u64];
     for &rb in &[8usize, 32, 256] {
         let params = base_params(512, crt.clone());
@@ -82,7 +82,7 @@ fn commit_e_google_crt_d512_multi_records() {
 }
 
 #[test]
-fn commit_e_google_crt_d2048_one_shard() {
+fn google_crt_d2048_one_shard() {
     let crt = vec![67_043_329u64, 132_120_577u64];
     for &rb in &[8usize, 32, 256] {
         let params = base_params(2048, crt.clone());
@@ -91,7 +91,7 @@ fn commit_e_google_crt_d2048_one_shard() {
 }
 
 #[test]
-fn commit_e_google_crt_d2048_multi_shard_small_records() {
+fn google_crt_d2048_multi_shard_small_records() {
     let crt = vec![67_043_329u64, 132_120_577u64];
     let params = base_params(2048, crt);
     smoke_cell(
@@ -103,7 +103,7 @@ fn commit_e_google_crt_d2048_multi_shard_small_records() {
 }
 
 #[test]
-fn commit_e_30bit_crt_d2048_multi_records() {
+fn thirty_bit_crt_d2048_multi_records() {
     let crt = DEFAULT_Q_2CRT_30BIT.to_vec();
     for &rb in &[8usize, 32, 256] {
         let params = base_params(2048, crt.clone());
@@ -112,7 +112,7 @@ fn commit_e_30bit_crt_d2048_multi_records() {
 }
 
 #[test]
-fn commit_e_single_prime_default_q_no_regression() {
+fn single_prime_default_q_no_regression() {
     let crt = vec![1_152_921_504_606_830_593u64];
     for &rb in &[8usize, 32, 256] {
         let params = base_params(2048, crt.clone());

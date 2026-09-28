@@ -634,7 +634,7 @@ pub fn respond_with_variant(
             "respond_with_variant(TwoPacking) is not supported on an unseeded \
              ClientQuery: TwoPacking requires the seeded pipeline \
              (query_seeded + respond_seeded_with_variant or respond_seeded_inspiring / \
-             respond_seeded_packed). See docs/GOOGLE_ALIGNMENT.md."
+             respond_seeded_packed)."
         )),
     }
 }

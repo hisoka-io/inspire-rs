@@ -22,18 +22,6 @@ fn test_params() -> InspireParams {
     }
 }
 
-// A hand-constructed-wire twin of the bincode round-trip test below lived
-// here; it reached the same ensure_server_derivatives state by clearing fields
-// manually. Its stronger per-poly assertions (y_all coefficients and the
-// is_ntt flags) moved into the round-trip test (2026-09-06), which models the
-// wire with a real bincode round trip; the NTT-transform-skip mutant that
-// killed both kills the merged survivor.
-
-// A "noop when populated" test lived here; the early-return guard it named is
-// a pure perf shortcut with no observable behaviour (the recompute is discarded
-// by independently guarded write-backs), so deleting the guard left the test
-// green (2026-09-06 mutation audit).
-
 #[test]
 fn bincode_roundtrip_then_server_derive_matches_original_y_all_ntt() {
     let params = test_params();

@@ -2,7 +2,7 @@
 //!
 //! AVX-512-IFMA (Intel) / AVX-512-IFMA52 (AMD Zen 5) intrinsics
 //! `_mm512_madd52{lo,hi}_epu64` operate on 52-bit masked operands in
-//! 64-bit lanes, producing 104-bit products split as lo52/hi52. Raven's
+//! 64-bit lanes, producing 104-bit products split as lo52/hi52.
 //! DEFAULT_Q = 2^60 − 2^14 + 1 exceeds the 52-bit window by 8 bits, so
 //! Montgomery multiplication requires a split-52 decomposition:
 //!
@@ -26,15 +26,14 @@
 //! ```
 //!
 //! This module ships two entry points:
-//! - `mont_mul_split52`: scalar reference implementation for KAT against
-//!   inspire-rs's `montgomery_mul_at`. Byte-identical correctness.
+//! - `mont_mul_split52`: scalar reference implementation, byte-identical
+//!   to `NttContext`'s Montgomery multiply.
 //! - `pointwise_mul_ifma52_8wide`: 8-wide SIMD implementation gated via
 //!   `#[target_feature(enable = "avx512ifma")]`. Runtime dispatch via
 //!   `is_x86_feature_detected!("avx512ifma")`.
 //!
 //! Scalar fallback (`mont_mul_split52`) preserves correctness on
-//! wasm32 and pre-Zen5 non-Intel-Icelake hardware. The 8-wide SIMD is
-//! the measurement target for the ≥1.3x backward-recursion gate.
+//! wasm32 and on hardware without IFMA52.
 //!
 //! # Safety invariants
 //!
@@ -69,14 +68,13 @@ const fn split52(a: u64) -> (u64, u64) {
 
 /// Scalar split-52 Montgomery multiplication, reference implementation
 /// for correctness KAT. Not vectorized; returns `a · b · R^{-1} mod q`
-/// where `R = 2^64`. Byte-identical to inspire-rs's `montgomery_mul_at`.
+/// where `R = 2^64`. Byte-identical to `NttContext`'s Montgomery multiply.
 ///
 /// # Arguments
 ///
 /// * `a`, `b`: operands in `[0, q)`, each < 2^60.
 /// * `q`: modulus (in this module's intended use: DEFAULT_Q).
-/// * `q_inv_neg`: precomputed `-q^{-1} mod 2^64`, matching
-///   inspire-rs's Montgomery state.
+/// * `q_inv_neg`: precomputed `-q^{-1} mod 2^64`, as `NttContext` holds it.
 #[inline]
 pub fn mont_mul_split52(a: u64, b: u64, q: u64, q_inv_neg: u64) -> u64 {
     let (a_hi, a_lo) = split52(a);

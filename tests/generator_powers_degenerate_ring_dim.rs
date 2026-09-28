@@ -1,10 +1,8 @@
 //! `GeneratorPowers::try_new` totality over ring dimensions: every `d` that is
 //! not a power of two (zero included) must surface as a typed
 //! `PackParamsError` naming `d` - never an abort - and every power of two must
-//! build a table satisfying the algebraic inverse law. The old file argued
-//! about 5-invertibility mod 2d, but the implementation rejects every
-//! non-power-of-two through the same guard with the same variant, so the nine
-//! hand-picked rejects collapsed into this exhaustive sweep (2026-09-06).
+//! build a table satisfying the algebraic inverse law. Every non-power-of-two
+//! is rejected through the same guard with the same variant.
 
 use raven_inspire::inspiring::{GeneratorPowers, PackParamsError};
 

@@ -4,7 +4,7 @@
 //! including ring dimensions, moduli, and security levels. `validate` checks
 //! structural and noise invariants only: it runs no lattice estimate, and
 //! `security_level` is a declared target nothing verifies. The shipped
-//! `secure_128_d2048` measures 121.5 bits, not 128 (see PRIVACY.md).
+//! `secure_128_d2048` measures 121.5 bits, not 128.
 //!
 //! # Overview
 //!
@@ -18,7 +18,7 @@
 //! ```
 //! use raven_inspire::params::{InspireParams, SecurityLevel};
 //!
-//! // The shipped preset. Measures 121.5 bits, not 128; see PRIVACY.md.
+//! // The shipped preset. Measures 121.5 bits, not 128.
 //! let params = InspireParams::secure_128_d2048();
 //! assert!(params.validate().is_ok());
 //!
@@ -232,16 +232,9 @@ impl InspireParams {
     /// assert!(params.validate().is_ok());
     /// ```
     pub fn secure_128_d2048() -> Self {
-        // Raven-local patch: use the library-internal
-        // DEFAULT_Q = 2^60 - 2^14 + 1 (`src/math/mod_q.rs`) as a
-        // single-prime CRT modulus, matching `inspire-rs` internal
-        // correctness tests and `inspire-exex` production
-        // `default_params()`. The upstream 2-CRT form
-        // `[268369921, 249561089]` gave q ≈ 2^55.89, ~4 bits below
-        // DEFAULT_Q; at 256 B records (128 InspiRING columns) the
-        // gap exhausted the noise budget and decryption scrambled
-        // silently. No upstream test ever exercised the shipped
-        // preset at a cell above 32 B records.
+        // One prime rather than the reference 2-CRT pair `DEFAULT_CRT_MODULI`: that pair
+        // gives q ≈ 2^55.89, and at 256 B records (128 InspiRING columns) the missing
+        // ~4 bits exhaust the noise budget and decryption returns wrong bytes silently.
         let crt_moduli = vec![crate::math::mod_q::DEFAULT_Q];
         let q = crate::math::mod_q::DEFAULT_Q;
         let gadget_base: u64 = 1 << 20; // 2^20
@@ -289,9 +282,7 @@ impl InspireParams {
     /// assert!(params.validate().is_ok());
     /// ```
     pub fn secure_128_d4096() -> Self {
-        // Raven-local patch: DEFAULT_Q single-prime form matching
-        // the d=2048 preset. See `secure_128_d2048` above for
-        // full rationale.
+        // Single prime for the reason given in `secure_128_d2048`.
         let crt_moduli = vec![crate::math::mod_q::DEFAULT_Q];
         let q = crate::math::mod_q::DEFAULT_Q;
         let gadget_base: u64 = 1 << 20;
@@ -477,9 +468,8 @@ impl InspireParams {
 
     /// Strict validation variant that additionally enforces
     /// `gcd(ring_dim, p) == 1` so tree-packed extract's `d_inv`
-    /// computation always succeeds. Opt-in
-    /// because legacy test params use p=65536 which fails this
-    /// guard while still exercising non-tree-packed paths.
+    /// computation always succeeds. Opt-in because test params with
+    /// p = 65536 fail this guard while still exercising the other paths.
     pub fn validate_strict_tree_packed(&self) -> Result<(), &'static str> {
         self.validate()?;
         if gcd_u64(self.ring_dim as u64, self.p) != 1 {
@@ -522,30 +512,15 @@ impl Default for InspireParams {
     }
 }
 
-// ===========================================================================
-// Adaptive parameter derivation (Raven-local).
-//
-// Port of Google's `params_for_scenario_medium_payload` from
-// `private-membership/research/InsPIRe/src/params.rs:109-167`.
-// Brought into the fork so callers can derive paper-matching `InspireParams`
-// per (N, record_size, gamma_triple) without leaving the fork's API surface.
-//
-// The derivation produces two 2-CRT ~27-bit primes
-// (`[67043329, 132120577]`, product ~= 2^52.97, each <= 2^32) matching the
-// paper's Table 1 InsPIRe shape. The <= 2^32 per prime is what unblocks NPIR
-// NTT + YPIR matmul kernel ports: those kernels downcast moduli to u32
-// before entering their AVX-512 lanes. Under a single 60-bit modulus, those
-// kernels would produce garbage coefficients; under this derivation they
-// are drop-in compatible.
-//
-// Theorem 7's `(q~/q)^2` factor was reviewed and does not belong in `get_variance`; the
-// mod-switch rounding term is charged by `check_mod_switch_noise_budget` instead.
-// ===========================================================================
+// Adaptive parameter derivation: a port of `params_for_scenario_medium_payload` from
+// Google's InsPIRe reference (`research/InsPIRe/src/params.rs`), deriving paper-shaped
+// parameters per (N, record size, gamma triple). It yields the 2-CRT pair
+// `[67043329, 132120577]` (q ~= 2^52.97), the paper's Table 1 shape.
 
 /// Inputs to the adaptive derivation. Same shape as Google's function.
 #[derive(Debug, Clone, Copy)]
 pub struct AdaptiveInputs {
-    /// N - number of database items (2^20 for Raven's SLO cell).
+    /// N - number of database items.
     pub input_num_items: usize,
     /// Record size in bits (2048 for 256 B records).
     pub input_item_size_bits: usize,
@@ -583,7 +558,7 @@ pub struct AdaptiveDerivation {
     pub custom_q_log2: f64,
 }
 
-/// `get_variance` from `params.rs:105-107` in Google's reference.
+/// `get_variance` from Google's reference.
 /// Returns variance in `log2` units.
 ///
 /// The `(q~/q)^2` factor of Theorem 7 (eprint 2025/1352) does not belong here:
@@ -624,15 +599,8 @@ pub fn derive_medium_payload(inputs: &AdaptiveInputs) -> AdaptiveDerivation {
 
     let log_p: usize = 16;
     assert!(log_p <= 16, "log_p must be <= 16");
-    // Raven-local deviation: Google uses p = 1 << 16 = 65536. inspire-rs
-    // uses p = 65537 (Fermat prime F4) so that `mod_inverse(d, p)` holds for
-    // d = 2048 under the tree-packed extract path (`extract_packed` at
-    // extract.rs:135). 65536 is not coprime to 2048; Google's Params only
-    // uses the InspiRING extract path, so they don't hit the invariant.
-    // The noise formula's `p^2` term changes from 65536^2 to 65537^2 - a
-    // delta of ~3.05e-5 bits in log space, well below the 0.01-bit
-    // measurement floor. Variance bound is identical to the ported
-    // derivation.
+    // The reference uses p = 65536, which is not coprime to d = 2048, so the tree-packed
+    // extract could not invert d mod p. 65537 moves the `p^2` noise term by ~3e-5 bits.
     let p: u64 = 65537;
 
     let q2_bits: usize = 28;
@@ -703,8 +671,7 @@ pub fn derive_medium_payload(inputs: &AdaptiveInputs) -> AdaptiveDerivation {
     // Google's CUSTOM_MOD for medium-payload scenarios. Both primes are
     // NTT-friendly: 67043329 - 1 = 67043328 = 4096 * 16368 and
     // 132120577 - 1 = 132120576 = 4096 * 32256, so each ~= 1 (mod 4096),
-    // admitting length-2048 negacyclic NTT. Both fit in u32 which is what
-    // unblocks NPIR + YPIR kernel ports.
+    // admitting length-2048 negacyclic NTT.
     let custom_moduli: Vec<u64> = vec![67_043_329, 132_120_577];
     let custom_q: f64 = custom_moduli.iter().map(|&m| m as f64).product();
     let custom_q_log2 = custom_q.log2();
@@ -736,10 +703,9 @@ pub fn derive_medium_payload(inputs: &AdaptiveInputs) -> AdaptiveDerivation {
 impl InspireParams {
     /// Derive paper-aligned parameters for a specific cell shape.
     ///
-    /// Ports Google's `params_for_scenario_medium_payload` natively inside
-    /// the fork. Returns a validated `InspireParams` with 2-CRT ~27-bit
-    /// moduli, p = 65537 (Fermat F4; Raven-local deviation from Google's
-    /// p = 65536 documented in the noise-budget analysis), sigma = 6.4,
+    /// Ports Google's `params_for_scenario_medium_payload`. Returns a validated
+    /// `InspireParams` with 2-CRT ~27-bit moduli, p = 65537 (the reference uses
+    /// 65536, which is not coprime to the ring dimension), sigma = 6.4 and
     /// gadget = (2^19, 3).
     ///
     /// ## Warning: noise-budget under-count for InspiRING packing
@@ -755,28 +721,25 @@ impl InspireParams {
     /// InspiRING-specific noise term crosses the `delta = floor(q/p)`
     /// scaling boundary.
     ///
-    /// **Measured 2026-09-20**, 1,000 responses per width on the shipped respond
-    /// path (`benches/packing_noise_measurement.rs`), against the decode boundary
+    /// Measured over 1,000 responses per width on the respond path at `DEFAULT_Q`
+    /// (`benches/packing_noise_measurement.rs`), against the decode boundary
     /// `Delta/2 = q/(2p)` = 8,795,958,806,527: **11.225 bits** of margin at
     /// gamma 16 (32 B records) and **9.245 bits** at gamma 256 (512 B records).
     /// The bench asserts the worst sample, so an erosion fails there rather than
     /// scrambling a response in production. That is an empirical margin on the
     /// sampled path, **not** an analytic bound and not a tail bound - this
     /// function's own ~0.093-bit slack figure stays unreliable as a predictor
-    /// because the term is still unmodelled. Root `SECURITY.md`, item G6.
+    /// because the term is still unmodelled.
     ///
     /// Use [`for_scenario_with_crt`](Self::for_scenario_with_crt) with a
     /// wider 2-CRT pair (typically 2 x 30-bit primes, q ~= 2^60) for the
-    /// empirically-correctness-safe shape that matches `DEFAULT_Q`'s
-    /// proven headroom while preserving u32-fit per limb (kernel ports
-    /// stay unblocked). Keep `for_scenario` for scenarios where the
-    /// tree-packed extract path is the only one in use (Google's own
-    /// pipeline), or consult the noise-budget analysis for the principled
-    /// analysis.
+    /// shape that matches `DEFAULT_Q`'s measured headroom while keeping each
+    /// limb below 2^32. Keep `for_scenario` for scenarios where the tree-packed
+    /// extract path is the only one in use.
     ///
     /// # Arguments
-    /// * `num_items` - number of database entries (2^20 for Raven's SLO cell)
-    /// * `record_bytes` - size of each record in bytes (256 for SLO)
+    /// * `num_items` - number of database entries
+    /// * `record_bytes` - size of each record in bytes
     /// * `gammas` - paper §7.1 `[gamma_0, gamma_1, gamma_2]` triple. For
     ///   256 B records, use `[64, 1024, 64]` (paper value); for 32 B use
     ///   `[16, 1024, 16]`.
@@ -794,7 +757,6 @@ impl InspireParams {
         gammas: [usize; 3],
         performance_factor: usize,
     ) -> Result<Self, &'static str> {
-        // Input validation on gammas BEFORE derivation.
         // Paper Algorithm 2 requires γ_0 ≤ ring_dim/2 (= 1024 for
         // the fixed poly_len = 2048) so the partial-packing bound
         // from Theorem 4 holds. Each γ MUST be positive (zero-γ
@@ -856,9 +818,8 @@ impl InspireParams {
     /// noise growth and correctness smoke fails at the target cell. The
     /// recommended override pair for 2^20 x 256 B is
     /// [`DEFAULT_Q_2CRT_30BIT`] (two 30-bit NTT-friendly primes, product
-    /// q ~= 2^60, matching `DEFAULT_Q`'s proven correctness headroom
-    /// while keeping each limb <= 2^32 so the NPIR / YPIR u32-based
-    /// AVX-512 kernel ports remain compatible).
+    /// q ~= 2^60, matching `DEFAULT_Q`'s correctness headroom while keeping
+    /// each limb below 2^32).
     ///
     /// All other derivation fields (poly_len, p=65537, sigma=6.4,
     /// gadget_base=2^19) come from the Google derivation unchanged.
@@ -927,7 +888,7 @@ impl InspireParams {
         Ok(params)
     }
 
-    /// Unchecked conversion for audit-trail KATs comparing a derivation with
+    /// Unchecked conversion for KATs comparing a derivation with
     /// its parameters. The sole in-tree caller, [`Self::for_scenario`], validates
     /// the result immediately. Other callers must call [`Self::validate`]
     /// before use; invalid derivations can also overflow the modulus product.
@@ -947,8 +908,8 @@ impl InspireParams {
     }
 }
 
-/// Default 2-CRT 30-bit NTT-friendly prime pair for the InspiRING
-/// empirical-correctness-safe shape at ring dimension 2048.
+/// Default 2-CRT 30-bit NTT-friendly prime pair for InspiRING at ring
+/// dimension 2048, with the noise headroom of `DEFAULT_Q`.
 ///
 /// Both primes verified by deterministic Miller-Rabin (witnesses
 /// `{2,3,5,7,11,13,17,19,23,29,31,37}`, which is a prime-proving set
@@ -957,28 +918,19 @@ impl InspireParams {
 /// - `p[1] = 1073692673 = 2^30 - 49151`. 4096 = 2^12 divides p-1.
 /// - each is prime
 /// - each `~= 1 (mod 4096)` so admits length-2048 negacyclic NTT
-/// - each `<= 2^30` so products in the AVX-512 u32 kernels
-///   `_mm512_mul_epu32` (u32 x u32 -> u64) fit without overflow
+/// - each `<= 2^30`, so a limb fits a u32 and a limb product fits a u64
 /// - gcd = 1 (distinct primes)
-/// - product `q = 1152587268104077313, log2(q) ~ 59.9996` matches
-///   `DEFAULT_Q`'s empirical correctness ceiling observed across
-///   sessions 012-014 under
-///   `TwoPacking + InspiRING + respond_seeded_inspiring`.
+/// - product `q = 1152587268104077313, log2(q) ~ 59.9996`, the headroom
+///   `DEFAULT_Q` gives TwoPacking + InspiRING
 ///
-/// Historical note: the user-suggested pair
-/// `[2^30 - 2^18 + 1, 2^30 - 2^14 + 1]` was initially adopted but
-/// Miller-Rabin showed `2^30 - 2^14 + 1 = 1073725441` is composite
-/// (factors verified during Phase E.5.1 search). `2^30 - 2^20 + 1
-/// = 1072693249` is also composite. The chosen pair preserves the
-/// intent (two 30-bit NTT-friendly primes close to 2^30) while using
-/// only primality-verified values.
+/// The neater `2^30 - 2^14 + 1` and `2^30 - 2^20 + 1` are both composite.
 pub const DEFAULT_Q_2CRT_30BIT: [u64; 2] = [1_073_479_681, 1_073_692_673];
 
 /// Database sharding configuration for large-scale PIR.
 ///
-/// Sharding divides a large database into smaller chunks that can be processed
-/// independently. This enables memory-mapped access for databases that exceed
-/// available RAM (e.g., Ethereum's 73 GB state).
+/// Sharding divides a database into `ring_dim`-entry chunks that are encoded
+/// and queried independently. The shard id travels in the clear, so a shard is
+/// the anonymity set of a query.
 ///
 /// # Fields
 ///
@@ -1256,9 +1208,8 @@ impl ShardConfig {
     /// arithmetic assumes: total_entries fits the shard layout,
     /// entries_per_shard is non-zero, and no shard_id overflows u32.
     ///
-    /// Call at construction time (e.g. in an adapter before the
-    /// first query) to fail fast rather than discover invariant
-    /// violations mid-retrieval.
+    /// Call at construction time to fail fast rather than discover
+    /// invariant violations mid-retrieval.
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.entries_per_shard() == 0 {
             return Err("ShardConfig: entries_per_shard is zero");

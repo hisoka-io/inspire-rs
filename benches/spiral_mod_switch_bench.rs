@@ -114,7 +114,7 @@ fn main() {
         eprintln!("seed=0x{seed:016x}: running pipeline...");
         let r = run_one_seed(seed);
         if !r.correct {
-            eprintln!("seed=0x{seed:016x}: DECRYPT FAILED. M015 honest stop. Bench aborts.");
+            eprintln!("seed=0x{seed:016x}: DECRYPT FAILED. Bench aborts.");
             std::process::exit(2);
         }
         eprintln!(
@@ -161,9 +161,7 @@ fn main() {
     );
 
     if packed_reduction < 20.0 {
-        eprintln!(
-            "FAIL: packed_reduction ({packed_reduction:.2}%) < 20% target. M015 honest stop."
-        );
+        eprintln!("FAIL: packed_reduction ({packed_reduction:.2}%) < 20% target.");
         std::process::exit(1);
     }
 

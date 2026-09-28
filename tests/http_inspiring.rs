@@ -1,13 +1,7 @@
-//! The InspiRING query/response JSON codec, as an HTTP server would use it.
-//!
-//! Until 2026-09-06 this file was an axum round-trip gated on
-//! `#![cfg(feature = "server")]` - a feature the Raven fork does not define -
-//! so it compiled to an empty binary and ran zero tests, while its 400-path
-//! assertion tested a check its own handler performed. What was worth keeping
-//! is the serde property: a query and a response that cross a JSON wire must
-//! still extract the right bytes. That is asserted here directly, with no HTTP
-//! stack, and it is the only live guard against a JSON field drop or rename on
-//! `ClientQuery` / `ServerResponse` (bincode stability cannot see those).
+//! The InspiRING query/response JSON codec, as an HTTP server would use it: a
+//! query and a response that cross a JSON wire must still extract the right
+//! bytes. This guards against a JSON field drop or rename on `ClientQuery` /
+//! `ServerResponse`, which bincode stability cannot see.
 
 #![allow(
     clippy::unwrap_used,

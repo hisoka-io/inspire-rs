@@ -2,11 +2,10 @@
 //! decode boundary.
 //!
 //! `get_variance` models Spiral-family LWE and gadget noise and does **not** model the noise
-//! InspiRING 2-matrix packing adds (root `SECURITY.md`, item G6). The failure mode is silent:
-//! once the packed noise crosses `Delta/2` a coefficient decodes to the wrong plaintext and
-//! nothing errors. This file is the empirical bound that disclosure needs — it measures
-//! `||e_pack||_inf` on the shipped respond path at both production widths and now ASSERTS the
-//! margin instead of printing a distribution nobody reads.
+//! InspiRING 2-matrix packing adds. The failure mode is silent: once the packed noise
+//! crosses `Delta/2` a coefficient decodes to the wrong plaintext and nothing errors. This
+//! file measures `||e_pack||_inf` on the shipped respond path at both production widths and
+//! asserts the margin.
 //!
 //! With `mod-switch-response` it also measures the SERVED form: the same responses after the
 //! checked switch to the served modulus and a trip through the response serializer, against

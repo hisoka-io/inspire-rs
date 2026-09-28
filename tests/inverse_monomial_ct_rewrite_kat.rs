@@ -1,12 +1,9 @@
-//! Byte-level pin on `inverse_monomial`, so a branch-free rewrite of it can be
-//! proved to return the same bytes.
+//! Byte-level pin on `inverse_monomial`.
 //!
-//! The function picks one coefficient by `k`, and `k` is the query index - the
-//! secret the whole scheme exists to hide. Making it constant-time means
-//! writing every coefficient and selecting through a barrier, which touches the
-//! ciphertext the client publishes. This KAT is the precondition for that edit:
-//! it fixes the output, backing residue by backing residue, over every index of
-//! two rings and both CRT shapes.
+//! The function places one coefficient by `k`, and `k` is the query index - the
+//! secret the whole scheme exists to hide - so it writes every coefficient and
+//! selects without a branch. This KAT fixes the output, backing residue by
+//! backing residue, over every index of two rings and both CRT shapes.
 //!
 //! The expectation is derived, not observed. The ring is negacyclic
 //! (X^d = -1), so exponents reduce modulo 2d. For 0 < k <= d,

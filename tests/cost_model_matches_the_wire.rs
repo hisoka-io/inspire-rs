@@ -2,19 +2,16 @@
 //! the wire.
 //!
 //! `CostEstimator` is a tight coefficient-payload model: it charges the public
-//! modulus bit width and leaves serde framing out of scope. The original model
-//! was never compared to a real serialized query and also priced packing keys
-//! by `gamma` instead of `gadget_len`. `y_body` carries `gadget_len` polynomials,
-//! not `gamma` (`src/pir/session.rs` refuses a query whose
-//! `y_body.len() != pack_params.gadget.len`; `inspiring2.rs` builds it from
-//! `generate_ksk_body(.., &pack_params.gadget, ..)`). The shipped d=2048
+//! modulus bit width and leaves serde framing out of scope. `y_body` carries
+//! `gadget_len` polynomials, not `gamma` (`src/pir/session.rs` refuses a query
+//! whose `y_body.len() != pack_params.gadget.len`; `inspiring2.rs` builds it
+//! from `generate_ksk_body(.., &pack_params.gadget, ..)`). The shipped d=2048
 //! packing-key payload is 46,252 B on the tight wire.
 //!
-//! The framing constants below are DERIVED from the independently built closed
-//! form in `crates/client/tests/query_generation_budget.rs`, not fitted to a
-//! measurement here - a constant fitted to the thing it checks is a mirror
-//! oracle. Its tight one-row anchor is 15,491 B for a `secure_128_d2048` query with a
-//! session handle.
+//! The framing constants below are derived from bincode's fixint layout, not
+//! fitted to a measurement here: a constant fitted to the thing it checks is a
+//! mirror oracle. The tight one-row query with a session handle is 15,491 B at
+//! `secure_128_d2048`.
 
 #![allow(
     clippy::expect_used,
@@ -30,7 +27,7 @@ use raven_inspire::pir::{query_seeded, respond_seeded_inspiring, setup, PackingM
 /// Bytes bincode 1.3 legacy fixint spends on one `Poly` besides its
 /// coefficients: `moduli` (8 length + 8 per limb), `q`, `dim`,
 /// `crt_q0_inv_mod_q1`, `is_ntt`, and the `coeffs` length prefix.
-/// `poly_bytes(d,k) = 8*d*k + (8*k + 41)` in `query_generation_budget.rs`.
+/// Untight, `poly_bytes(d, k) = 8*d*k + (8*k + 41)`.
 const fn poly_framing(crt_limbs: usize) -> usize {
     8 * crt_limbs + 41
 }
@@ -62,7 +59,7 @@ const fn packed_response_payload(ring_dim: usize, gamma: usize, crt_limbs: usize
     (tight_payload_bytes(ring_dim * crt_limbs) + tight_payload_bytes(gamma * crt_limbs)) as u64
 }
 
-/// `query_generation_budget.rs::query_bytes_with_inlined_keys(2048, 1, 3)`.
+/// Closed-form inlined-key query size at d=2048, one limb, three gadget digits.
 const INLINED_QUERY_WIRE_BYTES: usize = 61_735;
 /// The same closed form's response prediction at the shipped cell.
 const SHIPPED_RESPONSE_WIRE_BYTES: usize = 15_558;
@@ -152,7 +149,7 @@ fn measure(params: &InspireParams, entry_size: usize) -> Measured {
     }
 }
 
-/// Pinning the R1 response estimate is what lets the query half be isolated
+/// Pinning the response estimate is what lets the query half be isolated
 /// from `communication.bytes` below.
 #[test]
 fn cost_model_response_bytes_match_the_wire() {
@@ -173,7 +170,7 @@ fn cost_model_response_bytes_match_the_wire() {
     );
 }
 
-/// D2: the estimator's query term against a real serialized query.
+/// The estimator's query term against a real serialized query.
 #[test]
 fn cost_model_query_bytes_match_the_wire() {
     let params = small_params();
@@ -206,9 +203,9 @@ fn cost_model_query_bytes_match_the_wire() {
     );
 }
 
-/// The same identity for the inlined form at the shipped parameter cell, against the closed form in
-/// `crates/client/tests/query_generation_budget.rs` rather than a local
-/// measurement. Analytic on both sides: no d=2048 crypto runs here.
+/// The same identity for the inlined form at the shipped parameter cell, against
+/// the closed-form sizes above rather than a local measurement. Analytic on both
+/// sides: no d=2048 crypto runs here.
 #[test]
 fn cost_model_total_matches_the_inlined_2048_cell() {
     let params = InspireParams::secure_128_d2048();

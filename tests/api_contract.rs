@@ -279,15 +279,6 @@ fn server_crs_skipped_fields_none_after_roundtrip() {
     assert_eq!(recovered.inspiring_num_columns, crs.inspiring_num_columns);
 }
 
-// A bincode round-trip test asserting only ring_dim and column count lived
-// here, next to a JSON sibling with the same two-field spot-check; both
-// survived a mutation that zeroed every serialized Poly coefficient
-// (2026-09-06 mutation audits). The bincode wire is now guarded by
-// bincode_roundtrip_audit.rs's server_response_packing_mode_all_variants test,
-// which round-trips all three packing_mode states and compares the full
-// coefficient content; payload fidelity is additionally pinned by
-// poly_wire_shape_refusal.rs and the respond_byte_identity_kat golden.
-
 /// One well-formed coefficient-domain polynomial: decoding refuses a query whose row
 /// count differs from its gadget, so the fixture carries the one row a query has.
 fn zero_row_json() -> serde_json::Value {
@@ -364,12 +355,6 @@ fn reexport_all_extract_variants_accessible() {
     let _: ExtractWithVariantFn = raven_inspire::extract_with_variant;
 }
 
-// Two enum-arity tautologies (assert_eq!(len, len) over local literals) lived
-// here; both survived a variant-meaning swap plus an added variant
-// (2026-09-06 mutation audit). NOTE the audit also showed the
-// OnePacking/TwoPacking dispatch swap in extract_with_variant survives every
-// live test - the only coverage is the two #[ignore]d e2e variant tests.
-
 #[test]
 fn api_setup_query_respond_extract_compiles() {
     use raven_inspire::math::GaussianSampler;
@@ -395,22 +380,3 @@ fn api_setup_query_respond_extract_compiles() {
         "extract through the public API must return entry 0's bytes, not merely its length"
     );
 }
-
-// Three tests lived here and were deleted after mutation proofs (2026-09-06):
-// - api_seeded_query_compiles asserted only its own input back (state.index==0)
-//   and never inspected the expand() result; a corrupted expand() survived it
-//   and was killed by e2e_pir::test_e2e_seeded_query.
-// - client_query_json_roundtrip / seeded_client_query_json_roundtrip asserted
-//   shard_id+packing_mode only; an RgswCiphertext that serialized empty rows
-//   survived both. The live JSON-path guard is
-//   http_inspiring::inspiring_query_response_json_round_trip, which byte-checks
-//   the extracted entry after a JSON round trip of query and response.
-
-// A per-mode trio of ServerResponse bincode round trips (packing_mode
-// None/Tree/Inspiring) lived here, each paying its own full PIR setup. Their
-// one real catch — `skip_serializing_if` on the tag EOFs bincode's positional
-// decode — is carried by bincode_roundtrip_audit.rs's
-// server_response_packing_mode_all_variants test, proven red under the same
-// skip_serializing_if mutation that killed the None-mode trio member
-// (2026-09-06 mutation audit; the Tree/Inspiring members survived it and
-// asserted nothing the survivor does not).

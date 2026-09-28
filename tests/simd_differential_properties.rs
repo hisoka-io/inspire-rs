@@ -1,13 +1,10 @@
 //! Differential properties for the modular-arithmetic kernels: IFMA52 wide
 //! product vs u128, Solinas-Montgomery vs classical REDC, the Shoup pointwise
-//! path vs naive u128 over FULL vectors on a genuine 2-CRT context (the axis
-//! no example test drove: shoup_montgomery_kat's `_2crt_` tests built
-//! single-prime contexts and every pointwise example zeroed all but position
-//! 0), and the fused mul_acc3 vs three serial mul_acc calls. Plus the rescued
-//! microbench identities (scalar/IFMA Solinas pointwise vs Montgomery
-//! pointwise, Solinas forward+inverse round trip), which previously lived only
-//! behind RAVEN_MICROBENCH=1 and never ran in any CI lane. SIMD halves run
-//! where the host has AVX-512-IFMA and loud-skip otherwise.
+//! path vs naive u128 over full vectors on a genuine 2-CRT context, and the
+//! fused mul_acc3 vs three serial mul_acc calls. Plus the Solinas identities
+//! (scalar/IFMA Solinas pointwise vs Montgomery pointwise, Solinas
+//! forward+inverse round trip). SIMD halves run where the host has
+//! AVX-512-IFMA and loud-skip otherwise.
 
 #![allow(
     clippy::expect_used,
@@ -146,11 +143,9 @@ proptest! {
         n in prop::sample::select(&[64usize, 256, 2048]),
         seed in any::<u64>(),
     ) {
-        // Every case walks all four context shapes: a drawn-shape axis let the
-        // dropped-final-subtract mutant survive an 8-case run in which no
-        // single-prime DEFAULT_Q shape happened to be drawn (measured
-        // 2026-09-06; a 30-bit limb hits the subtract with p ~ 2^-34, so only
-        // the 60-bit shape can catch it).
+        // Every case walks all four context shapes rather than drawing one: a
+        // 30-bit limb reaches the final subtract with p ~ 2^-34, so only the
+        // 60-bit shape reliably exercises it.
         for shape in 0..4usize {
             let ctx = match shape {
                 0 => NttContext::with_default_q(n),
@@ -273,8 +268,7 @@ proptest! {
     }
 }
 
-/// Rescued from solinas_microbench (RAVEN_MICROBENCH-gated, so it never ran):
-/// the scalar Solinas pointwise wrapper and both IFMA52 x8 pointwise kernels
+/// The scalar Solinas pointwise wrapper and both IFMA52 x8 pointwise kernels
 /// must match the classical Montgomery pointwise product over full vectors in
 /// the NTT domain. The scalar half is a genuine two-algorithm differential and
 /// runs everywhere; the SIMD half runs where the host has AVX-512-IFMA.
@@ -330,8 +324,8 @@ fn solinas_and_ifma52_pointwise_match_montgomery_full_vectors() {
     }
 }
 
-/// Rescued from solinas_microbench: forward_solinas + inverse_solinas is the
-/// identity. Runs everywhere (the Solinas NTT path is scalar DEFAULT_Q-only).
+/// forward_solinas + inverse_solinas is the identity. Runs everywhere (the
+/// Solinas NTT path is scalar DEFAULT_Q-only).
 #[test]
 fn solinas_ntt_forward_inverse_round_trips() {
     for n in [256usize, 2048] {

@@ -1,5 +1,5 @@
-//! Locks each Raven-local deviation from upstream (see `UPSTREAM.md`) so a
-//! later upstream pull cannot silently revert it.
+//! Locks each deviation from inspire-rs (listed in the README) so a later
+//! merge from it cannot silently revert one.
 
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel, ShardConfig};
@@ -24,10 +24,10 @@ fn small_params() -> InspireParams {
     }
 }
 
-/// `entries_per_shard > ring_dim` is a typed error; upstream `debug_assert!`
-/// vanishes in release and panics deep in `inverse_monomial` instead.
+/// `entries_per_shard > ring_dim` is a typed error; a `debug_assert!` would
+/// vanish in release and panic deep in `inverse_monomial` instead.
 #[test]
-fn commit_a_encode_database_returns_error_on_oversized_shard() {
+fn encode_database_returns_error_on_oversized_shard() {
     let params = small_params();
     let shard_config = ShardConfig {
         shard_size_bytes: 1 << 30,
@@ -52,7 +52,7 @@ fn commit_a_encode_database_returns_error_on_oversized_shard() {
 /// `respond_with_variant(TwoPacking)` errors toward the seeded pipeline rather
 /// than routing through OnePacking, which decodes to wrong plaintext.
 #[test]
-fn commit_b_respond_with_variant_twopacking_returns_error() {
+fn respond_with_variant_twopacking_returns_error() {
     let params = small_params();
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
     let num_entries = params.ring_dim;
@@ -82,9 +82,9 @@ fn commit_b_respond_with_variant_twopacking_returns_error() {
 }
 
 /// `extract_with_variant(TwoPacking)` routes to `extract_inspiring` on an
-/// InspiRING-shaped response, matching what upstream's client did directly.
+/// InspiRING-shaped response.
 #[test]
-fn commit_c_extract_with_variant_handles_inspiring_response() {
+fn extract_with_variant_handles_inspiring_response() {
     let params = small_params();
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
     let num_entries = params.ring_dim;
@@ -117,7 +117,7 @@ fn commit_c_extract_with_variant_handles_inspiring_response() {
     )
     .unwrap();
 
-    assert_eq!(via_inspiring, via_wrapper, "commit C must route TwoPacking extraction to extract_inspiring for InspiRING-shaped responses");
+    assert_eq!(via_inspiring, via_wrapper, "extract_with_variant(TwoPacking) must route to extract_inspiring for InspiRING-shaped responses");
     let target_byte = (target_index as usize) * entry_size;
     assert_eq!(&via_wrapper[..], &db[target_byte..target_byte + entry_size]);
 }
@@ -133,12 +133,12 @@ fn commit_d_preset_default_q_passes_smoke_at_2_20_x_256b() {
     let params = InspireParams::secure_128_d2048();
     assert_eq!(
         params.q, 1_152_921_504_606_830_593,
-        "secure_128_d2048 must ship DEFAULT_Q after commit D"
+        "secure_128_d2048 must ship DEFAULT_Q"
     );
     assert_eq!(
         params.crt_moduli,
         vec![1_152_921_504_606_830_593],
-        "secure_128_d2048 must use single-prime CRT form after commit D"
+        "secure_128_d2048 must use the single-prime CRT form"
     );
 
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
@@ -166,7 +166,7 @@ fn commit_d_preset_default_q_passes_smoke_at_2_20_x_256b() {
         assert_eq!(
             &recovered[..],
             &expected[..],
-            "commit D: smoke byte-match must pass at index {idx}"
+            "smoke byte-match must pass at index {idx}"
         );
     }
 }
@@ -174,7 +174,7 @@ fn commit_d_preset_default_q_passes_smoke_at_2_20_x_256b() {
 /// Registering packing keys once must shrink the wire query and still decode
 /// byte-equal to the inlined-keys path.
 #[test]
-fn phase_b_handshake_roundtrip_byte_equal_to_inlined_keys() {
+fn handshake_roundtrip_byte_equal_to_inlined_keys() {
     let params = small_params();
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
     let num_entries = params.ring_dim;

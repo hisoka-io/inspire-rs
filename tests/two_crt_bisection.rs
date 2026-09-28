@@ -1,12 +1,6 @@
-//! Seeded-query round trips over (ring_dim, record_bytes) cells under both the
-//! single-prime and the 2-CRT modulus. Formerly ~30 hand-enumerated cells
-//! whose per-cell PASS/FAIL report was unreachable (the assert inside
-//! `run_cell` fired on the first failure) and whose d=2048 legs duplicated
-//! commit_e_two_crt_regression_grid.rs cell-for-cell (same fixture, indices
-//! and assertion). Converted 2026-09-06: the d<=1024 cells - including the
-//! single-prime control the grid lacks below d=2048 - are drawn by the
-//! property below, both modulus shapes every case; the d=2048 legs live in the
-//! commit-E grid, which stays.
+//! Seeded-query round trips over (ring_dim, record_bytes) cells at d <= 1024,
+//! under both the single-prime and the 2-CRT modulus every case. The d=2048
+//! cells live in two_crt_regression_grid.rs.
 
 use proptest::prelude::*;
 use raven_inspire::math::GaussianSampler;
@@ -82,8 +76,7 @@ proptest! {
 
     /// Every drawn (ring_dim, record_bytes) cell round-trips under BOTH the
     /// single-prime DEFAULT_Q and the 2-CRT 30-bit modulus (both shapes per
-    /// case, so a shape-specific defect cannot escape a run). record_bytes
-    /// includes 128, carried from the deleted d=2048 large-ring test.
+    /// case, so a shape-specific defect cannot escape a run).
     #[test]
     fn seeded_round_trip_over_ring_and_record_cells(
         ring_dim in prop::sample::select(&[256usize, 512, 1024]),

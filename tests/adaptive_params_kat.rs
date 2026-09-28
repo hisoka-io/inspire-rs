@@ -25,7 +25,7 @@ fn slo_cell_derivation_matches_reference() {
     assert_eq!(d.num_tiles_log2, 0);
     assert_eq!(d.custom_moduli, vec![67_043_329u64, 132_120_577u64]);
 
-    // exact literal upstream, so compare bitwise
+    // an exact literal in the reference, so compare bitwise
     assert_eq!(d.sigma_x.to_bits(), 6.4f64.to_bits());
 
     // tolerance is orders tighter than the 0.09-bit slack budget
@@ -66,8 +66,7 @@ fn for_scenario_bridges_to_inspire_params_byte_identical() {
         .expect("derived params must self-validate");
 
     // The derivation is invariant to record size and gamma choice at this N:
-    // the 32 B / paper-gamma scenario must land on the same cell (this
-    // absorbed the deleted for_scenario_at_32_byte_record_paper_gammas).
+    // the 32 B / paper-gamma scenario must land on the same cell.
     let params_32b = InspireParams::for_scenario(1 << 20, 32, [16, 1024, 16], 1)
         .expect("32 B scenario must derive clean");
     assert_eq!(params_32b.ring_dim, params.ring_dim);

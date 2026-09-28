@@ -1,7 +1,5 @@
 //! `respond` must emit identical bytes with and without the `parallel` feature.
-//! A checked-in fixture is hashed to one golden under both builds, and the
-//! order-preserving `par_iter().map().collect()` those kernels rely on is
-//! pinned separately.
+//! A checked-in fixture is hashed to one golden under both builds.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stderr)]
 #![allow(
@@ -143,8 +141,3 @@ fn respond_byte_identical_par_vs_seq_on_fixed_input() {
         "respond bytes differ from the golden - a par/seq divergence (or the fixture changed)"
     );
 }
-
-// A test pinning rayon's documented guarantee that par_iter().map().collect()
-// preserves order (rayon docs, ParallelIterator::collect) lived here; it ran
-// over a test-local kernel and stayed green while respond's collect order was
-// inverted (2026-09-06 mutation audit). The golden above is the real guard.

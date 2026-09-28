@@ -30,10 +30,6 @@ fn sample_db_poly(dim: usize, moduli: &[u64], seed: u64) -> Poly {
     Poly::from_coeffs_moduli(coeffs, moduli)
 }
 
-// Two example tests (a fixed RGSW(0) case and a 64-seed random loop) were
-// converted into the differential property below (2026-09-06); the
-// dropped-gadget-digit mutant that killed both kills the property.
-
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig {
         cases: 6,

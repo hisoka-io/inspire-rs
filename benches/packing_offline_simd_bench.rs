@@ -121,10 +121,9 @@ fn drive_one_cell(label: &str, entries: usize, entry_bytes: usize, params: Inspi
 
 /// Whether the bench body should run.
 ///
-/// This used to be the whole story: unset the variable, the body early-returns, and libtest
-/// reports `ok` - a passing test that measured nothing and could not fail. The tests now announce
-/// the skip through the harness's own channel (`eprintln!` is invisible without `--nocapture`) and
-/// the callers assert that they either measured something or were explicitly told not to.
+/// An early return alone would report `ok` for a run that measured nothing, so the skip is
+/// announced through the harness's own channel (`eprintln!` is invisible without `--nocapture`)
+/// and the callers assert that they either measured something or were explicitly told not to.
 fn should_run() -> bool {
     if std::env::var("RAVEN_PACKING_OFFLINE_SIMD_BENCH")
         .ok()

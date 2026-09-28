@@ -80,10 +80,7 @@ fn run_kat_at(n: usize, gamma: usize, base_seed: u64) {
     }
 }
 
-// Four per-gamma tests collapsed into one cell loop (2026-09-06): they
-// differed only in (n, gamma, seed), and the accumulator-zeroing mutant that
-// reddens any of them under --features simd-packing-offline reddens this loop
-// at its first cell. Both preconditions are gates rather than notes: without
+// Both preconditions are gates rather than notes: without
 // the CPU feature the kernel cannot run, and without the cargo feature the
 // dispatch IS the scalar reference, so the differential compares a loop with
 // itself. RAVEN_REQUIRE_AVX512=1 turns either into a failure.
