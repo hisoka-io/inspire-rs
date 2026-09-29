@@ -1082,8 +1082,7 @@ pub fn respond_inspiring_cached_with_session(
     )?;
     require_shard_width("respond_inspiring_cached_with_session", crs, shard)?;
 
-    // Set RAVEN_PROFILE_RESPOND to any value for a per-region stderr breakdown.
-    let profile = std::env::var_os("RAVEN_PROFILE_RESPOND").is_some();
+    let profile = RespondDebugSwitches::get().profile;
     let t_extprod_start = if profile {
         Some(std::time::Instant::now())
     } else {
@@ -1151,9 +1150,8 @@ pub fn respond_inspiring_cached_with_session(
         .unwrap_or(&client_packing_keys.y_all);
 
     // y_all_ntt is `#[serde(skip)]`, so it is populated only in-process; when it is
-    // there the fully-NTT path avoids a per-call `to_ntt`. RAVEN_FORCE_PACKING_ONLINE
-    // pins the fallback so the wire-format delta can be measured.
-    let force_packing_online = std::env::var_os("RAVEN_FORCE_PACKING_ONLINE").is_some();
+    // there the fully-NTT path avoids a per-call `to_ntt`.
+    let force_packing_online = RespondDebugSwitches::get().force_packing_online;
     let packed = if !force_packing_online
         && !client_packing_keys.y_all_ntt.is_empty()
         && derived_y_all.is_none()
@@ -1298,6 +1296,27 @@ pub fn respond_sequential(
         packing_mode: None,
         packed_coefficients: None,
     })
+}
+
+/// Measurement switches on the respond path, read from the environment once per process so no
+/// query pays for the lookup and a variable set later cannot change a running server.
+#[derive(Clone, Copy, Debug)]
+struct RespondDebugSwitches {
+    /// `RAVEN_PROFILE_RESPOND`: a per-region stderr breakdown of every respond.
+    profile: bool,
+    /// `RAVEN_FORCE_PACKING_ONLINE`: pin the coefficient-domain packing fallback, so the
+    /// wire-format delta can be measured.
+    force_packing_online: bool,
+}
+
+impl RespondDebugSwitches {
+    fn get() -> Self {
+        static SWITCHES: std::sync::OnceLock<RespondDebugSwitches> = std::sync::OnceLock::new();
+        *SWITCHES.get_or_init(|| Self {
+            profile: std::env::var_os("RAVEN_PROFILE_RESPOND").is_some(),
+            force_packing_online: std::env::var_os("RAVEN_FORCE_PACKING_ONLINE").is_some(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1655,5 +1674,69 @@ mod tests {
             total_0 as f64 / total_2 as f64
         );
         println!("╚══════════════════════════════════════════════════════════════╝");
+    }
+
+    const SWITCH_PROBE: &str = "RAVEN_RESPOND_SWITCH_PROBE";
+    const SWITCH_PROBE_RAN: &str = "respond-switch-probe-ran";
+
+    /// Runs in a child process, alone: changing the environment while other test threads
+    /// read it is undefined behavior.
+    #[test]
+    fn respond_debug_switch_probe() {
+        if std::env::var_os(SWITCH_PROBE).is_none() {
+            return;
+        }
+        let first = RespondDebugSwitches::get();
+        std::env::remove_var("RAVEN_PROFILE_RESPOND");
+        std::env::remove_var("RAVEN_FORCE_PACKING_ONLINE");
+        let later = RespondDebugSwitches::get();
+        assert_eq!((first.profile, first.force_packing_online), (true, true));
+        assert_eq!(
+            (later.profile, later.force_packing_online),
+            (true, true),
+            "a switch cleared after the first respond reached a later one"
+        );
+        println!("{SWITCH_PROBE_RAN}");
+    }
+
+    /// Reading once proves nothing if the respond path reads the variables itself.
+    #[test]
+    fn respond_reads_the_environment_only_through_its_switches() {
+        let (production, _tests) = include_str!("respond.rs")
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("test module");
+        let (outside, helper) = production
+            .split_once("impl RespondDebugSwitches {")
+            .expect("switch helper");
+        assert!(
+            !outside.contains("env::var"),
+            "respond.rs reads the environment outside RespondDebugSwitches"
+        );
+        assert_eq!(helper.matches("env::var_os(").count(), 2);
+    }
+
+    #[test]
+    fn respond_debug_switches_are_read_once_per_process() {
+        let module = module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_crate, path)| path);
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                &format!("{module}::respond_debug_switch_probe"),
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(SWITCH_PROBE, "1")
+            .env("RAVEN_PROFILE_RESPOND", "1")
+            .env("RAVEN_FORCE_PACKING_ONLINE", "1")
+            .output()
+            .expect("run the probe");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains(SWITCH_PROBE_RAN),
+            "probe failed or did not run:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
