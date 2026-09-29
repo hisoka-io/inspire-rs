@@ -74,14 +74,14 @@ record are independent of database size:
 - **What a query reveals.** A query names its shard in the clear, and a shard holds `ring_dim` records (2048 at the shipped preset),
   so privacy covers the index within that shard. Queries made under one session handle are linkable to each other.
 - **Honest-server answers.** A response is not bound to the queried index; an application checks the record it receives against a
-  commitment it trusts (Raven's Railgun client folds each Merkle path to an independently obtained root).
+  commitment it trusts.
 - **Correctness margin.** The served 36-bit response keeps 8.88 bits of noise margin at 512-byte records and 10.30 bits at 32-byte
   records, measured by `benches/packing_noise_measurement.rs`.
 - **Constant time.** Client-side NTT, ring arithmetic, query generation, key generation and decryption avoid secret-dependent branches,
   divisions and indexing; `tests/secret_dependent_spelling_gate.rs` enforces the spelling, and release builds for x86-64 and wasm32 were
   inspected at rustc 1.98. `SessionResidue` holds the client secret key: store it as a secret.
 
-Report security issues privately through the process in Raven's `SECURITY.md` (github.com/hisoka-io/raven).
+Report security issues privately through this repository's GitHub security advisories, not the public issue tracker.
 
 ## Differences from inspire-rs
 
