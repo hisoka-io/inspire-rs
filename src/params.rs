@@ -208,9 +208,8 @@ impl InspireParams {
     /// 121.5 bits, not 128 (malb/lattice-estimator @ 3e48ef4, binding attack
     /// `primal_bdd`). log2 q = 57 is the largest modulus clearing 128 bits.
     ///
-    /// These are the recommended parameters for most applications, providing
-    /// a good balance between security, performance, and noise margin.
-    /// Suitable for databases up to ~1GB per shard.
+    /// A shard holds `ring_dim` = 2048 records of at most 2048 bytes (the
+    /// InspiRING width limit), so at most 4 MiB of records per shard.
     ///
     /// # Returns
     ///

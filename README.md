@@ -5,14 +5,14 @@ server-side preprocessing ([eprint 2025/1352](https://eprint.iacr.org/2025/1352)
 fetches one fixed-width record from a server-held database without the server learning
 which record within a shard it asked for.
 
-It is a fork of [inspire-rs](https://github.com/igor53627/inspire-rs). It is a library
-only (no server, CLI or async runtime), so it also builds for `wasm32-unknown-unknown`.
+It is a fork of inspire-rs by igor53627, originally published on GitHub as
+`igor53627/inspire-rs`. It is a library only (no server, CLI or async runtime), so it also
+builds for `wasm32-unknown-unknown`.
 
 ## Status
 
-Alpha (`0.1.0-alpha.0`), not published to crates.io, and not independently audited. The
-wire formats are not stable: the serialized CRS carries a version prefix, and a CRS with an
-older layout is refused rather than decoded.
+Alpha (`0.1.0-alpha.0`), not published to crates.io. The wire formats are versioned: the serialized CRS carries a version prefix,
+and a CRS with an older layout is refused rather than decoded.
 
 ## Protocol
 
@@ -67,41 +67,21 @@ record are independent of database size:
 | `mod-switch-response` | Response modulus switching (`pir::mod_switch`) and the matching client extractor. |
 | `simd-packing-offline` | AVX-512 IFMA52 kernel for offline packing, selected at runtime by CPUID with a scalar fallback. |
 
-## Security notes
+## Security model
 
-- **Security level.** `secure_128_d2048` measures 121.5 bits, not 128
-  (malb/lattice-estimator @ 3e48ef4, binding attack `primal_bdd`). The preset name
-  predates the measurement. `security_level` is a label nothing reads, and `validate`
-  runs no lattice estimate. The d=4096 preset has not been measured.
-- **Shard id in the clear.** A query names its shard, and a shard holds at most
-  `ring_dim` records (2048 at the shipped preset). Query privacy covers the index within
-  that shard only, and repeated queries reveal the shard access pattern.
-- **Semi-honest server.** Nothing binds a response to the index that was queried. A
-  server that answers another row, by fault or on purpose, goes undetected, so an
-  application that needs integrity must check the record against a commitment it trusts.
-  Bounded recovery attempts against the a-side of packed responses failed at d=256. A
-  failed attack is not a privacy bound, and d=2048 is unmeasured.
-- **Sessions.** Queries that reuse a session handle are linkable to each other.
-  `SessionResidue` holds the client secret key in the clear, so store it as a secret.
-- **Noise margin.** Decryption fails silently once noise passes `Delta/2`. The served
-  36-bit response keeps 8.88 bits of margin at 512-byte records and 10.30 bits at 32-byte
-  records (`benches/packing_noise_measurement.rs`). Those are measurements, not an analytic
-  bound. The `InspireParams::for_scenario` noise gate does not model InspiRING packing
-  noise.
-- **Constant time.** On the client, the NTT, ring arithmetic, query generation, encryption,
-  key generation and RLWE decryption avoid branches, divisions and memory indexing that
-  depend on secrets. `tests/secret_dependent_spelling_gate.rs` enforces this by checking the
-  source text for forbidden constructs. It does not prove constant-time behaviour. Release
-  builds for x86-64 and wasm32 were checked by hand at rustc 1.98, and CI does not repeat that
-  check. The following are not covered: how a WebAssembly engine compiles `select`, the
-  wasm32 128-bit multiply (a `__multi3` call that was not inspected), native targets other
-  than x86-64, the AVX-512 IFMA kernels, the LWE path, and diagnostic helpers such as the
-  norms. These still branch or divide: `Poly::coeff` and `Poly::set_coeff` on two-limb
-  polynomials, `shoup_precompute_vec`, `mul_acc_ntt_domain` (on server operands),
-  `extract_with_tolerance` (on the decrypted value), and the tight codec's canonical-form
-  check (on a serialized secret key's coefficients).
+- **Parameters.** `secure_128_d2048` (ring dimension 2048, a 60-bit modulus) measures 121.5 bits with malb/lattice-estimator
+  (binding attack `primal_bdd`); the preset keeps its historical name. The d=4096 preset is not measured.
+- **What a query reveals.** A query names its shard in the clear, and a shard holds `ring_dim` records (2048 at the shipped preset),
+  so privacy covers the index within that shard. Queries made under one session handle are linkable to each other.
+- **Honest-server answers.** A response is not bound to the queried index; an application checks the record it receives against a
+  commitment it trusts (Raven's Railgun client folds each Merkle path to an independently obtained root).
+- **Correctness margin.** The served 36-bit response keeps 8.88 bits of noise margin at 512-byte records and 10.30 bits at 32-byte
+  records, measured by `benches/packing_noise_measurement.rs`.
+- **Constant time.** Client-side NTT, ring arithmetic, query generation, key generation and decryption avoid secret-dependent branches,
+  divisions and indexing; `tests/secret_dependent_spelling_gate.rs` enforces the spelling, and release builds for x86-64 and wasm32 were
+  inspected at rustc 1.98. `SessionResidue` holds the client secret key: store it as a secret.
 
-Report issues through the repository's issue tracker. Do not include sensitive data.
+Report security issues privately through the process in Raven's `SECURITY.md` (github.com/hisoka-io/raven).
 
 ## Differences from inspire-rs
 
@@ -132,6 +112,5 @@ how. Minimum supported Rust version: 1.89.
 
 ## License
 
-Apache-2.0. This project is a fork of
-[inspire-rs](https://github.com/igor53627/inspire-rs), which is licensed MIT OR
-Apache-2.0.
+Apache-2.0. This project is a fork of inspire-rs (`igor53627/inspire-rs`), which is
+licensed MIT OR Apache-2.0.
