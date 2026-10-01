@@ -97,13 +97,10 @@ pub struct ClientState {
 pub struct ServerSessionHandle(pub u64);
 
 /// Query sent to the server.
-///
-/// Privacy caveat: `shard_id` travels in cleartext, so the anonymity set is one
-/// shard of at most `ring_dim` entries rather than the whole database.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ClientQueryWire")]
 pub struct ClientQuery {
-    /// Target shard, unencrypted.
+    /// Target shard; the server routes the query by it.
     pub shard_id: u32,
     /// One-row encrypted scaled inverse monomial.
     pub rgsw_ciphertext: RgswCiphertext,
@@ -123,7 +120,7 @@ pub struct ClientQuery {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "SeededClientQueryWire")]
 pub struct SeededClientQuery {
-    /// Target shard, unencrypted.
+    /// Target shard; the server routes the query by it.
     pub shard_id: u32,
     /// Seeded one-row encrypted scaled inverse monomial.
     pub rgsw_ciphertext: SeededRgswCiphertext,

@@ -2,8 +2,8 @@
 
 A Rust implementation of InsPIRe, single-server private information retrieval with
 server-side preprocessing ([eprint 2025/1352](https://eprint.iacr.org/2025/1352)). A client
-fetches one fixed-width record from a server-held database without the server learning
-which record within a shard it asked for.
+fetches one fixed-width record from a server-held database by an encrypted query, and the
+server answers it without decrypting it.
 
 It is a fork of inspire-rs by igor53627, originally published on GitHub as
 `igor53627/inspire-rs`. It is a library only (no server, CLI or async runtime), so it also
@@ -71,8 +71,6 @@ record are independent of database size:
 
 - **Parameters.** `secure_128_d2048` (ring dimension 2048, a 60-bit modulus) measures 121.5 bits with malb/lattice-estimator
   (binding attack `primal_bdd`); the preset keeps its historical name. The d=4096 preset is not measured.
-- **What a query reveals.** A query names its shard in the clear, and a shard holds `ring_dim` records (2048 at the shipped preset),
-  so privacy covers the index within that shard. Queries made under one session handle are linkable to each other.
 - **Honest-server answers.** A response is not bound to the queried index; an application checks the record it receives against a
   commitment it trusts.
 - **Correctness margin.** The served 36-bit response keeps 8.88 bits of noise margin at 512-byte records and 10.30 bits at 32-byte

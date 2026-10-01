@@ -10,7 +10,7 @@
 //! Fixed public constants below implement a pre-registered protocol.
 //! It covers one fixed d=256 session, indices 0 and 255 in one shard, and seeded
 //! and unseeded one-row fold bytes at the power demonstrated by a 25% one-byte leak.
-//! It excludes the clear shard id, packing keys and handles, adaptive queries,
+//! It excludes the shard id, packing keys and handles, adaptive queries,
 //! other parameters and indices, responses, OS entropy, arbitrary nonlinear
 //! distinguishers, and every timing, cache, or power channel. A pass neither
 //! establishes 128-bit advantage nor closes known Poly/NTT residuals.

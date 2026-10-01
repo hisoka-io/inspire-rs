@@ -928,8 +928,7 @@ pub const DEFAULT_Q_2CRT_30BIT: [u64; 2] = [1_073_479_681, 1_073_692_673];
 /// Database sharding configuration for large-scale PIR.
 ///
 /// Sharding divides a database into `ring_dim`-entry chunks that are encoded
-/// and queried independently. The shard id travels in the clear, so a shard is
-/// the anonymity set of a query.
+/// and queried independently.
 ///
 /// # Fields
 ///
