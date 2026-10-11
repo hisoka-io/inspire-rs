@@ -119,3 +119,14 @@ name = "spiral_mod_switch_bench"
 path = "benches/spiral_mod_switch_bench.rs"
 required-features = ["mod-switch-response"]
 harness = false
+
+# Mirrors the release settings of the workspace this crate ships in.
+[profile.prod]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[[example]]
+name = "howl_g_time"
+required-features = ["parallel"]

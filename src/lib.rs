@@ -19,6 +19,7 @@ pub const fn num_columns(entry_size: usize) -> usize {
 }
 
 pub mod cost;
+pub mod howl_g;
 pub mod inspiring;
 pub mod ks;
 pub mod lwe;
