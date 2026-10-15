@@ -128,6 +128,7 @@ fn two_crt_rlwe_encrypt_decrypt_roundtrip() {
         gadget_base: 1 << 20,
         query_gadget_len: 3,
         packing_gadget_len: 3,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     };
     params.validate().expect("2-CRT params must validate");
@@ -172,6 +173,7 @@ fn two_crt_trivial_encrypt_decrypt_roundtrip() {
         gadget_base: 1 << 20,
         query_gadget_len: 3,
         packing_gadget_len: 3,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     };
     let ctx = params.ntt_context();
@@ -210,6 +212,7 @@ fn two_crt_external_product_identity() {
         gadget_base: 1 << 20,
         query_gadget_len: 3,
         packing_gadget_len: 3,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     };
     let ctx = params.ntt_context();
@@ -259,6 +262,7 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
         gadget_base: 1 << 20,
         query_gadget_len: 3,
         packing_gadget_len: 3,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     };
     let ctx = params.ntt_context();
@@ -314,6 +318,7 @@ fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
         gadget_base: 1 << 20,
         query_gadget_len: 3,
         packing_gadget_len: 3,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     };
     params.validate().expect("2-CRT params must validate");

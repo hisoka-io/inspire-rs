@@ -329,11 +329,11 @@ impl CostEstimator {
         let (extra_ntt, extra_mul, extra_add) = match self.variant {
             InspireVariant::NoPacking | InspireVariant::OnePacking => (0, 0, 0),
             InspireVariant::TwoPacking => {
-                // `ClientPackingKeys::generate` builds y_body as gadget_len rows
-                // of tau_g(s)*g^k - s*w_mask[k] + error: one NTT of s, then per
+                // `ClientPackingKeys::generate` builds y_body as one row per key
+                // digit, tau_g(s)*z^k - s*w_mask[k] + error: one NTT of s, then per
                 // row an NTT of the mask, a product and the NTT back. A session
                 // builds the key once; counting it per query is the upper bound.
-                let digits = self.params.packing_gadget_len as u64;
+                let digits = self.params.packing_key_rows() as u64;
                 (2 * digits + 1, digits, 2 * digits)
             }
         };
@@ -419,6 +419,8 @@ impl CostEstimator {
 
             InspireVariant::TwoPacking => {
                 // InspiRING 2-matrix packing (packing_offline + packing_online).
+                // l below is the digits the packing key covers.
+                let ell = self.params.packing_key_rows() as u64;
                 //
                 // Offline phase (packing_offline):
                 //   Step 1 - For each i in 0..γ:
@@ -507,14 +509,14 @@ impl CostEstimator {
         let query_bytes_seeded = self.wire_poly_bytes();
 
         // InspiRING packing keys: only `y_body` crosses the wire, and it holds
-        // one polynomial per gadget digit - `ClientPackingKeys::generate` builds
-        // it from the packing gadget, and the server refuses a key whose
-        // `y_body.len()` differs from its gadget length. Rotations are never
-        // materialized on either side, so the size scales with the gadget
-        // length, not gamma. Only sent for TwoPacking (InspiRING mode).
+        // one polynomial per gadget digit the key covers - `ClientPackingKeys::generate`
+        // builds it from the packing gadget, and the server refuses a key whose
+        // `y_body.len()` differs. Rotations are never materialized on either side, so
+        // the size scales with the key rows, not gamma. Only sent for TwoPacking
+        // (InspiRING mode).
         let packing_key_bytes = match self.variant {
             InspireVariant::NoPacking | InspireVariant::OnePacking => 0,
-            InspireVariant::TwoPacking => (self.params.packing_gadget_len as u64)
+            InspireVariant::TwoPacking => (self.params.packing_key_rows() as u64)
                 .saturating_mul(self.params.ring_dim as u64)
                 .checked_mul(self.crt_moduli_count())
                 .map_or(u64::MAX, |coefficients| {

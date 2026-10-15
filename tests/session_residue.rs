@@ -18,6 +18,7 @@ fn d256_params() -> InspireParams {
         gadget_base: 1 << 20,
         query_gadget_len: 3,
         packing_gadget_len: 3,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     }
 }

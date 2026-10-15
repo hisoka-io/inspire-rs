@@ -394,6 +394,7 @@ mod tests {
             gadget_base: 1 << 20,
             query_gadget_len: 3,
             packing_gadget_len: 3,
+            approximate_packing_gadget: false,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -568,6 +569,7 @@ mod tests {
             gadget_base: 1 << 20,
             query_gadget_len: 3,
             packing_gadget_len: 3,
+            approximate_packing_gadget: false,
             security_level: crate::params::SecurityLevel::Bits128,
         };
 

@@ -29,7 +29,9 @@
 use crate::math::gaussian::tailcut_for;
 use crate::math::primality::is_prime;
 use crate::math::NttContext;
-use serde::{Deserialize, Serialize};
+use serde::de::{Error as _, SeqAccess, Visitor};
+use serde::ser::{Error as _, SerializeTuple};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use subtle::{ConditionallySelectable, ConstantTimeGreater};
 
 /// Default CRT moduli from the InsPIRe reference implementation.
@@ -122,6 +124,7 @@ pub enum InspireVariant {
 /// * `sigma` - Standard deviation for discrete Gaussian error sampling
 /// * `gadget_base` - Base for gadget decomposition (typically 2^20)
 /// * `query_gadget_len` / `packing_gadget_len` - Gadget digits per role
+/// * `approximate_packing_gadget` - the InspiRING packing key skips the lowest digit
 /// * `security_level` - declared target; never read, never validated
 ///
 /// # Example
@@ -138,7 +141,7 @@ pub enum InspireVariant {
 /// // Get scaling factor for encoding
 /// let delta = params.delta();
 /// ```
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InspireParams {
     /// Ring dimension d (power of two).
     ///
@@ -187,8 +190,134 @@ pub struct InspireParams {
     /// Number of key-switching and InspiRING packing gadget digits.
     pub packing_gadget_len: usize,
 
+    /// The InspiRING packing key carries no row for the least significant gadget digit.
+    ///
+    /// The server rounds that digit away before decomposing, so the key is
+    /// `packing_gadget_len - 1` polynomials and the rounding residual, at most half a
+    /// base, takes the place of the digit's own key-error term. Key-switching matrices
+    /// keep every digit. Off in every preset. Both sides read it from the parameter
+    /// set, and a set with it on serializes to a layout of its own.
+    pub approximate_packing_gadget: bool,
+
     /// Advisory security target; serialized but not validated or dispatched on.
     pub security_level: SecurityLevel,
+}
+
+/// [`InspireParams`] as named fields, for self-describing formats. An exact set writes
+/// the nine keys it always had.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "InspireParams", rename = "InspireParams")]
+struct NamedInspireParams {
+    ring_dim: usize,
+    q: u64,
+    crt_moduli: Vec<u64>,
+    p: u64,
+    sigma: f64,
+    gadget_base: u64,
+    query_gadget_len: usize,
+    packing_gadget_len: usize,
+    security_level: SecurityLevel,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    approximate_packing_gadget: bool,
+}
+
+/// First word of the positional form of a set with the approximate packing gadget.
+/// An exact set keeps the positional layout it always had, which opens with
+/// `ring_dim`, and a reader that predates the marker refuses it as a ring dimension.
+const APPROXIMATE_GADGET_MARKER: u64 = u64::MAX;
+
+impl Serialize for InspireParams {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if serializer.is_human_readable() {
+            return NamedInspireParams::serialize(self, serializer);
+        }
+        // Exhaustive on purpose: a field added to the set does not compile until it has
+        // a place in this layout.
+        let Self {
+            ring_dim,
+            q,
+            crt_moduli,
+            p,
+            sigma,
+            gadget_base,
+            query_gadget_len,
+            packing_gadget_len,
+            approximate_packing_gadget: marked,
+            security_level,
+        } = self;
+        let marked = *marked;
+        if !marked && u64::try_from(*ring_dim) == Ok(APPROXIMATE_GADGET_MARKER) {
+            return Err(S::Error::custom(
+                "InspireParams serialize refused: ring_dim equals the layout marker of an \
+                 approximate-gadget set, so the bytes would decode as another parameter set",
+            ));
+        }
+        let mut fields = serializer.serialize_tuple(9 + usize::from(marked))?;
+        if marked {
+            fields.serialize_element(&APPROXIMATE_GADGET_MARKER)?;
+        }
+        fields.serialize_element(ring_dim)?;
+        fields.serialize_element(q)?;
+        fields.serialize_element(crt_moduli)?;
+        fields.serialize_element(p)?;
+        fields.serialize_element(sigma)?;
+        fields.serialize_element(gadget_base)?;
+        fields.serialize_element(query_gadget_len)?;
+        fields.serialize_element(packing_gadget_len)?;
+        fields.serialize_element(security_level)?;
+        fields.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for InspireParams {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if deserializer.is_human_readable() {
+            return NamedInspireParams::deserialize(deserializer);
+        }
+        deserializer.deserialize_tuple(10, PositionalInspireParams)
+    }
+}
+
+struct PositionalInspireParams;
+
+impl<'de> Visitor<'de> for PositionalInspireParams {
+    type Value = InspireParams;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("the InspireParams fields in declaration order")
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<InspireParams, A::Error> {
+        fn next<'de, A: SeqAccess<'de>, T: Deserialize<'de>>(
+            seq: &mut A,
+            field: &'static str,
+        ) -> Result<T, A::Error> {
+            seq.next_element()?
+                .ok_or_else(|| A::Error::custom(format_args!("InspireParams ends before {field}")))
+        }
+
+        let first: u64 = next(&mut seq, "ring_dim")?;
+        let approximate_packing_gadget = first == APPROXIMATE_GADGET_MARKER;
+        let ring_dim: u64 = if approximate_packing_gadget {
+            next(&mut seq, "ring_dim")?
+        } else {
+            first
+        };
+        Ok(InspireParams {
+            ring_dim: usize::try_from(ring_dim).map_err(|_| {
+                A::Error::custom(format_args!("ring_dim {ring_dim} does not fit usize"))
+            })?,
+            q: next(&mut seq, "q")?,
+            crt_moduli: next(&mut seq, "crt_moduli")?,
+            p: next(&mut seq, "p")?,
+            sigma: next(&mut seq, "sigma")?,
+            gadget_base: next(&mut seq, "gadget_base")?,
+            query_gadget_len: next(&mut seq, "query_gadget_len")?,
+            packing_gadget_len: next(&mut seq, "packing_gadget_len")?,
+            approximate_packing_gadget,
+            security_level: next(&mut seq, "security_level")?,
+        })
+    }
 }
 
 /// `extract_column_value` packs two bytes per column; `p` must exceed this.
@@ -248,6 +377,7 @@ impl InspireParams {
             gadget_base,
             query_gadget_len: gadget_len,
             packing_gadget_len: gadget_len,
+            approximate_packing_gadget: false,
             security_level: SecurityLevel::Bits128,
         }
     }
@@ -296,6 +426,7 @@ impl InspireParams {
             gadget_base,
             query_gadget_len: gadget_len,
             packing_gadget_len: gadget_len,
+            approximate_packing_gadget: false,
             security_level: SecurityLevel::Bits128,
         }
     }
@@ -334,6 +465,28 @@ impl InspireParams {
         self.crt_moduli.len()
     }
 
+    /// Polynomials in an InspiRING packing key: one per packing-gadget digit the key
+    /// covers. The client builds this many, the server expands this many mask rows and
+    /// refuses a key of any other length.
+    ///
+    /// ```
+    /// use raven_inspire::params::InspireParams;
+    ///
+    /// let exact = InspireParams::secure_128_d2048();
+    /// assert_eq!(exact.packing_key_rows(), 3);
+    /// let approximate = InspireParams { approximate_packing_gadget: true, ..exact };
+    /// assert_eq!(approximate.packing_key_rows(), 2);
+    /// ```
+    pub fn packing_key_rows(&self) -> usize {
+        self.packing_gadget_len
+            .saturating_sub(self.packing_dropped_digits())
+    }
+
+    /// Low packing-gadget digits the InspiRING packing key has no row for.
+    pub(crate) fn packing_dropped_digits(&self) -> usize {
+        usize::from(self.approximate_packing_gadget)
+    }
+
     /// Create an NTT context for these parameters.
     pub fn ntt_context(&self) -> NttContext {
         NttContext::with_moduli(self.ring_dim, self.moduli())
@@ -346,6 +499,7 @@ impl InspireParams {
     /// - `q` is NTT-friendly: q ≡ 1 (mod 2d)
     /// - `q >= p` for valid scaling, and `floor(q/p)/2` wider than the sampler tailcut
     /// - both gadget lengths span every residue modulo `q`
+    /// - `q` is the exact product of the CRT moduli, which must fit a `u64`
     ///
     /// # Returns
     ///
@@ -401,7 +555,16 @@ impl InspireParams {
             }
         }
 
-        let crt_product: u64 = self.crt_moduli.iter().product();
+        // Checked: a wrapped product is a different number that a matching q would pass for,
+        // while the NTT context and every polynomial work modulo the real limbs.
+        let crt_product = self
+            .crt_moduli
+            .iter()
+            .try_fold(1u64, |product, &m| product.checked_mul(m))
+            .ok_or(
+                "the product of crt_moduli overflows u64: no 64-bit q is that product, and a \
+                 q equal to its wrapped value would pair the wrong modulus with these limbs",
+            )?;
         if self.q != crt_product {
             return Err("q must equal product of CRT moduli");
         }
@@ -454,6 +617,14 @@ impl InspireParams {
             return Err(
                 "gadget_base^packing_gadget_len must be >= q; a narrower packing gadget drops \
                  high digits and returns wrong plaintext",
+            );
+        }
+
+        if self.approximate_packing_gadget && self.packing_gadget_len < 2 {
+            return Err(
+                "approximate_packing_gadget needs packing_gadget_len >= 2: with one digit \
+                 the packing key would have no rows and every packed response would decode \
+                 to wrong plaintext",
             );
         }
 
@@ -881,6 +1052,7 @@ impl InspireParams {
             gadget_base: d.z,
             query_gadget_len: gadget_len,
             packing_gadget_len: gadget_len,
+            approximate_packing_gadget: false,
             security_level: SecurityLevel::Bits128,
         };
         params.validate()?;
@@ -890,9 +1062,9 @@ impl InspireParams {
     /// Unchecked conversion for KATs comparing a derivation with
     /// its parameters. The sole in-tree caller, [`Self::for_scenario`], validates
     /// the result immediately. Other callers must call [`Self::validate`]
-    /// before use; invalid derivations can also overflow the modulus product.
+    /// before use; a modulus product past `u64` saturates and `validate` refuses it.
     pub fn from_derivation(d: &AdaptiveDerivation) -> Self {
-        let q: u64 = d.custom_moduli.iter().product();
+        let q = crate::math::crt_modulus(&d.custom_moduli);
         Self {
             ring_dim: d.poly_len,
             q,
@@ -902,6 +1074,7 @@ impl InspireParams {
             gadget_base: d.z,
             query_gadget_len: d.t_exp_left,
             packing_gadget_len: d.t_exp_left,
+            approximate_packing_gadget: false,
             security_level: SecurityLevel::Bits128,
         }
     }
@@ -1288,6 +1461,143 @@ mod tests {
     fn test_default_params_valid() {
         let params = InspireParams::default();
         assert!(params.validate().is_ok());
+    }
+
+    /// The largest primes below `2^bits` that are 1 mod `2 * ring_dim`, largest first.
+    fn ntt_primes_below(bits: u32, ring_dim: u64, count: usize) -> Vec<u64> {
+        let two_n = 2 * ring_dim;
+        let top = ((1u64 << bits) - 1) / two_n * two_n + 1;
+        (0..)
+            .map(|step| top - step * two_n)
+            .filter(|&candidate| candidate < (1 << bits) && is_prime(candidate))
+            .take(count)
+            .collect()
+    }
+
+    /// Two 61-bit NTT primes whose product is past `u64`. A `q` equal to the wrapped
+    /// product passes every other rule, so only the product check stands between this
+    /// set and a context built on limbs that do not multiply to `q`.
+    #[test]
+    fn a_wrapping_limb_pair_is_refused() {
+        let limbs = ntt_primes_below(61, 2048, 2);
+        // 2^61 - 77_823 and 2^61 - 139_263.
+        assert_eq!(
+            limbs,
+            [2_305_843_009_213_616_129, 2_305_843_009_213_554_689]
+        );
+        let (a, b) = (limbs[0], limbs[1]);
+        for limb in [a, b] {
+            assert_eq!(limb % 4096, 1);
+            assert!(is_prime(limb) && limb >> 60 == 1);
+            // Alone, each limb is a parameter set `validate` accepts.
+            let alone = InspireParams {
+                q: limb,
+                crt_moduli: vec![limb],
+                query_gadget_len: 4,
+                packing_gadget_len: 4,
+                ..InspireParams::secure_128_d2048()
+            };
+            assert_eq!(alone.validate(), Ok(()));
+        }
+        assert!(a.checked_mul(b).is_none());
+        let wrapped = a.wrapping_mul(b);
+        assert_eq!(wrapped, 4_611_686_029_265_252_353);
+
+        let forged = InspireParams {
+            q: wrapped,
+            crt_moduli: vec![a, b],
+            query_gadget_len: 4,
+            packing_gadget_len: 4,
+            ..InspireParams::secure_128_d2048()
+        };
+        // Everything `validate` checks after the product holds for the wrapped q.
+        assert!(wrapped >= forged.p && forged.delta() / 2 > tailcut_for(forged.sigma) as u64);
+        assert_eq!(min_gadget_len(forged.gadget_base, wrapped), Some(4));
+        assert_eq!(gcd_u64(a, b), 1);
+        let refusal = forged.validate().unwrap_err();
+        assert!(
+            refusal.contains("overflows u64") && !refusal.contains("  "),
+            "{refusal}"
+        );
+
+        // No other q rescues the pair, the saturated product included.
+        for q in [u64::MAX, a, b, 1] {
+            let other = InspireParams {
+                q,
+                ..forged.clone()
+            };
+            assert!(other.validate().unwrap_err().contains("overflows u64"));
+        }
+    }
+
+    /// The largest pair that still fits: the check refuses overflow, not width.
+    #[test]
+    fn a_limb_pair_whose_product_fits_is_still_judged_on_its_q() {
+        let limbs = ntt_primes_below(32, 2048, 2);
+        let (a, b) = (limbs[0], limbs[1]);
+        let q = a.checked_mul(b).unwrap();
+        assert_eq!(q >> 63, 1);
+        let params = InspireParams {
+            q,
+            crt_moduli: vec![a, b],
+            query_gadget_len: 4,
+            packing_gadget_len: 4,
+            ..InspireParams::secure_128_d2048()
+        };
+        assert_eq!(params.validate(), Ok(()));
+        let off_by_one = InspireParams { q: q - 1, ..params };
+        assert_eq!(
+            off_by_one.validate(),
+            Err("q must equal product of CRT moduli")
+        );
+    }
+
+    /// A derivation whose limbs multiply past `u64` yields a set `validate` refuses,
+    /// in debug and release builds alike.
+    #[test]
+    fn an_overflowing_derivation_is_refused_by_validate() {
+        let limbs = ntt_primes_below(61, 2048, 2);
+        let mut derivation = derive_medium_payload(&AdaptiveInputs {
+            input_num_items: 1 << 20,
+            input_item_size_bits: 2048,
+            gammas: [64, 1024, 64],
+            performance_factor: 1,
+        });
+        derivation.custom_moduli = limbs;
+        let params = InspireParams::from_derivation(&derivation);
+        assert_eq!(params.q, u64::MAX);
+        assert!(params.validate().unwrap_err().contains("overflows u64"));
+    }
+
+    #[test]
+    fn the_approximate_gadget_needs_a_second_packing_digit() {
+        let approximate = InspireParams {
+            approximate_packing_gadget: true,
+            ..InspireParams::secure_128_d2048()
+        };
+        assert_eq!(approximate.validate(), Ok(()));
+        assert_eq!(approximate.packing_key_rows(), 2);
+        assert_eq!(InspireParams::secure_128_d2048().packing_key_rows(), 3);
+        assert_eq!(InspireParams::secure_128_d4096().packing_key_rows(), 3);
+
+        // One digit of base 2^61 covers a 60-bit q; dropping it leaves no key.
+        let one_digit = InspireParams {
+            gadget_base: 1 << 61,
+            query_gadget_len: 1,
+            packing_gadget_len: 1,
+            ..InspireParams::secure_128_d2048()
+        };
+        assert_eq!(one_digit.validate(), Ok(()));
+        let dropped = InspireParams {
+            approximate_packing_gadget: true,
+            ..one_digit
+        };
+        assert_eq!(dropped.packing_key_rows(), 0);
+        let refusal = dropped.validate().unwrap_err();
+        assert!(
+            refusal.contains("packing_gadget_len >= 2") && !refusal.contains("  "),
+            "{refusal}"
+        );
     }
 
     #[test]

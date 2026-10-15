@@ -49,6 +49,7 @@ pub fn params_for(ring_dim: usize, moduli: &[u64], gadget_len: usize) -> Inspire
         gadget_base: 1 << 20,
         query_gadget_len: gadget_len,
         packing_gadget_len: gadget_len,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     }
 }

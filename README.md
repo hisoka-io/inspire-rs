@@ -70,6 +70,12 @@ record are independent of database size:
 | Response, mod-switched to a 36-bit modulus | 10,446 |
 | Response, unswitched | 17,358 |
 
+A parameter set with `approximate_packing_gadget` on packs under a key of two polynomials: the
+server rounds the lowest gadget digit away and the key has no row for it. The key is then
+30,843 bytes on the wire and 32,768 bytes registered, and a batch with the key inline is
+30,855 + 15,477 n bytes. The presets leave the option off. `benches/approximate_gadget_noise.rs`
+measures the served decode margin under both gadgets on the production ring.
+
 ## Cargo features
 
 | Feature | Effect |

@@ -785,6 +785,21 @@ fn pack_shard(
         ));
     }
     seat.require_width(pack_params)?;
+    // The recursion pairs digit k with mask row k and stops at the shorter of the two.
+    let key_rows = pack_params.key_rows();
+    if offline_keys.w_all_ntt.len() + 1 != num_columns
+        || offline_keys
+            .w_all_ntt
+            .iter()
+            .any(|row| row.len() != key_rows)
+    {
+        return Err(pir_err!(
+            "InspiRING offline keys do not hold {} rotations of {key_rows} mask rows for \
+             shard {}; refusing to pack under keys expanded for another gadget or width",
+            num_columns.saturating_sub(1),
+            shard.id
+        ));
+    }
     let ctx = crs.params.ntt_context();
     let mut profile = RegionProfile::start();
 
@@ -887,6 +902,7 @@ fn validate_cache_parts(
         || pack_params.gadget.base != crs.params.gadget_base
         || pack_params.gadget.len != crs.params.packing_gadget_len
         || pack_params.gadget.q != crs.params.q
+        || pack_params.dropped_digits != crs.params.packing_dropped_digits()
     {
         return Err(pir_err!(
             "{operation}: cached pack params do not match CRS params at width {expected_columns}"
@@ -894,7 +910,7 @@ fn validate_cache_parts(
     }
     if offline_keys.w_seed != crs.inspiring_w_seed
         || offline_keys.full_key
-        || offline_keys.w_mask.len() != pack_params.gadget.len
+        || offline_keys.w_mask.len() != pack_params.key_rows()
         || offline_keys.w_all.len() != expected_columns - 1
         || offline_keys.w_all_ntt.len() != expected_columns - 1
     {
@@ -1345,6 +1361,7 @@ mod tests {
             gadget_base: 1 << 20,
             query_gadget_len: 3,
             packing_gadget_len: 3,
+            approximate_packing_gadget: false,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -1576,6 +1593,7 @@ mod tests {
             gadget_base: 1 << 20,
             query_gadget_len: 3,
             packing_gadget_len: 3,
+            approximate_packing_gadget: false,
             security_level: crate::params::SecurityLevel::Bits128,
         };
         let d = params.ring_dim;

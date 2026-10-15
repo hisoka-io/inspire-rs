@@ -13,6 +13,7 @@ fn params(query_gadget_len: usize, packing_gadget_len: usize) -> InspireParams {
         gadget_base: 1 << 20,
         query_gadget_len,
         packing_gadget_len,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     }
 }

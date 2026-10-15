@@ -20,6 +20,7 @@ fn seat() -> PackingKeySeat {
         gadget_base: 1 << 20,
         query_gadget_len: 3,
         packing_gadget_len: 3,
+        approximate_packing_gadget: false,
         security_level: SecurityLevel::Bits128,
     };
     let mut sampler = GaussianSampler::with_seed(params.sigma, 3);

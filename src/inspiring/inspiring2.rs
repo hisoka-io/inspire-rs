@@ -54,6 +54,9 @@ pub struct PackParams {
     pub gadget: GadgetVector,
     /// tables[(t-1)/2] maps an NTT index to its source index under tau_t, odd t in [1, 2n).
     pub automorph_tables: Vec<Vec<usize>>,
+    /// Low gadget digits with no key row: the recursion rounds them away. 0 is the
+    /// exact gadget.
+    pub dropped_digits: usize,
 }
 
 /// Rejection reason from [`PackParams::try_new`] / [`PackParams::try_new_full`].
@@ -83,6 +86,11 @@ pub enum PackParamsError {
     AutomorphTablesUnderivable {
         /// Ring dimension of the rejected parameters.
         ring_dim: usize,
+    },
+    /// The parameter set asks for the approximate packing gadget where it is undefined.
+    ApproximateGadgetUnsupported {
+        /// What rules it out.
+        reason: &'static str,
     },
 }
 
@@ -122,6 +130,11 @@ impl std::fmt::Display for PackParamsError {
                 "InspiRING automorphism tables are undefined at ring_dim {ring_dim}: the NTT \
                  over the first CRT modulus does not evaluate at {ring_dim} distinct roots of \
                  X^n + 1"
+            ),
+            Self::ApproximateGadgetUnsupported { reason } => write!(
+                f,
+                "the approximate packing gadget is unavailable here: {reason}. Clear \
+                 approximate_packing_gadget on the parameter set"
             ),
         }
     }
@@ -185,6 +198,11 @@ impl PackParams {
         if !n.is_power_of_two() {
             return Err(PackParamsError::RingDimNotPowerOfTwo { ring_dim: n });
         }
+        if params.approximate_packing_gadget {
+            return Err(PackParamsError::ApproximateGadgetUnsupported {
+                reason: "full packing (gamma = ring_dim) decomposes every digit",
+            });
+        }
         Self::build(params, n, 5)
     }
 
@@ -197,6 +215,12 @@ impl PackParams {
         let q = params.q;
         let moduli = params.moduli().to_vec();
         let two_n = 2 * n;
+        let dropped_digits = params.packing_dropped_digits();
+        if dropped_digits >= params.packing_gadget_len {
+            return Err(PackParamsError::ApproximateGadgetUnsupported {
+                reason: "dropping the lowest digit of a one-digit gadget leaves no key row",
+            });
+        }
         let ctx = params.ntt_context();
 
         let mut gen_pows = Vec::with_capacity(n);
@@ -257,7 +281,14 @@ impl PackParams {
             neg_monomials_ntt,
             gadget,
             automorph_tables,
+            dropped_digits,
         })
+    }
+
+    /// Polynomials in a packing key for these parameters, and digits per link of the
+    /// offline recursion: the gadget digits above the dropped ones.
+    pub fn key_rows(&self) -> usize {
+        self.gadget.len.saturating_sub(self.dropped_digits)
     }
 
     /// Table index for tau_t, defined for odd t in [1, 2n).
@@ -484,7 +515,8 @@ pub struct OfflinePackingKeys {
     pub w_seed: [u8; 32],
     /// Public seed `v_mask` expands from, full packing only.
     pub v_seed: [u8; 32],
-    /// gadget_len random polynomials expanded from `w_seed`.
+    /// One uniform polynomial per key row, expanded from `w_seed`: the row for digit `k`
+    /// is polynomial `k` of the expansion.
     pub w_mask: Vec<Poly>,
     /// Conjugation mask, full packing only.
     pub v_mask: Vec<Poly>,
@@ -506,11 +538,17 @@ impl OfflinePackingKeys {
         let n = pack_params.ring_dim;
         let q = pack_params.q;
         let num_to_pack = pack_params.num_to_pack;
-        let gadget_len = pack_params.gadget.len;
         let ctx = NttContext::with_moduli(n, &pack_params.moduli);
 
         // Generate w_mask from seed and convert to NTT form
-        let w_mask = generate_mask_from_seed(w_seed, n, q, &pack_params.moduli, gadget_len);
+        let w_mask = kept_mask_rows(
+            w_seed,
+            n,
+            q,
+            &pack_params.moduli,
+            pack_params.gadget.len,
+            pack_params.dropped_digits,
+        );
         let w_mask_ntt: Vec<Poly> = w_mask
             .iter()
             .map(|p| {
@@ -644,7 +682,8 @@ impl OfflinePackingKeys {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ClientPackingKeysWire")]
 pub struct ClientPackingKeys {
-    /// `y_body[k] = tau_g(s)*g^k - s*w_mask[k] + error`.
+    /// `y_body[r] = tau_g(s)*z^k - s*w_mask[r] + error`, one row per gadget digit `k`
+    /// the key covers, lowest first.
     pub y_body: Vec<Poly>,
     /// Conjugation body, full packing only.
     ///
@@ -723,7 +762,9 @@ impl ClientPackingKeys {
     /// # Errors
     ///
     /// [`PackParamsError::IllegalWidth`] when `num_to_pack` is not a legal partial
-    /// packing width at `params.ring_dim`.
+    /// packing width at `params.ring_dim`, and
+    /// [`PackParamsError::ApproximateGadgetUnsupported`] when the set drops its only
+    /// packing digit.
     ///
     /// ```
     /// use raven_inspire::inspiring::ClientPackingKeys;
@@ -735,7 +776,7 @@ impl ClientPackingKeys {
     /// let mut sampler = GaussianSampler::with_seed(params.sigma, 1);
     /// let secret_key = RlweSecretKey::generate(&params, &mut sampler);
     /// let keys = ClientPackingKeys::generate(&secret_key, &params, 16, [7; 32], &mut sampler)?;
-    /// assert_eq!(keys.y_body.len(), params.packing_gadget_len);
+    /// assert_eq!(keys.y_body.len(), params.packing_key_rows());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn generate(
@@ -752,14 +793,20 @@ impl ClientPackingKeys {
                 ring_dim: n,
             });
         }
+        let first_digit = params.packing_dropped_digits();
+        if first_digit >= params.packing_gadget_len {
+            return Err(PackParamsError::ApproximateGadgetUnsupported {
+                reason: "dropping the lowest digit of a one-digit gadget leaves no key row",
+            });
+        }
         let q = params.q;
         let moduli = params.moduli();
         let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
         let ctx = NttContext::with_moduli(n, moduli);
 
-        let w_mask = generate_mask_from_seed(w_seed, n, q, moduli, gadget.len);
+        let w_mask = kept_mask_rows(w_seed, n, q, moduli, gadget.len, first_digit);
         let generator = PackParams::partial_generator(n, num_to_pack) % (2 * n);
-        let y_body = generate_ksk_body(sk, generator, &gadget, &w_mask, sampler, &ctx);
+        let y_body = generate_ksk_body(sk, generator, &gadget, first_digit, &w_mask, sampler, &ctx);
 
         Ok(Self {
             y_body,
@@ -787,8 +834,9 @@ impl ClientPackingKeys {
         let v_mask = generate_mask_from_seed(v_seed, n, q, &pack_params.moduli, gadget_len);
 
         let gen_pow = pack_params.gen_pows[1];
-        let y_body = generate_ksk_body(sk, gen_pow, &pack_params.gadget, &w_mask, sampler, &ctx);
-        let z_body = generate_ksk_body(sk, two_n - 1, &pack_params.gadget, &v_mask, sampler, &ctx);
+        let gadget = &pack_params.gadget;
+        let y_body = generate_ksk_body(sk, gen_pow, gadget, 0, &w_mask, sampler, &ctx);
+        let z_body = generate_ksk_body(sk, two_n - 1, gadget, 0, &v_mask, sampler, &ctx);
 
         Self {
             y_body,
@@ -797,6 +845,24 @@ impl ClientPackingKeys {
             num_to_pack: n,
         }
     }
+}
+
+/// The mask rows of a key that has no rows for its `dropped` lowest digits: row r is
+/// the mask the full expansion gives digit `dropped + r`. A mask follows its digit, so
+/// such a key is the full key less its lowest rows, and one secret under both gadgets
+/// publishes each digit under one mask.
+fn kept_mask_rows(
+    seed: [u8; 32],
+    n: usize,
+    q: u64,
+    moduli: &[u64],
+    gadget_len: usize,
+    dropped: usize,
+) -> Vec<Poly> {
+    generate_mask_from_seed(seed, n, q, moduli, gadget_len)
+        .into_iter()
+        .skip(dropped)
+        .collect()
 }
 
 /// Deterministically expand a seed into gadget_len uniform polynomials.
@@ -821,11 +887,13 @@ fn generate_mask_from_seed(
     result
 }
 
-/// y_body[k] = tau_g(s)*g^k - s*w_mask[k] + error.
+/// Row r is `tau_g(s)*z^(first_digit + r) - s*w_mask[r] + error`: one row per mask
+/// polynomial, so no row can go out without its mask.
 fn generate_ksk_body(
     sk: &RlweSecretKey,
     gen_pow: usize,
     gadget: &GadgetVector,
+    first_digit: usize,
     w_mask: &[Poly],
     sampler: &mut GaussianSampler,
     ctx: &NttContext,
@@ -839,22 +907,17 @@ fn generate_ksk_body(
     let mut s_ntt = s.clone();
     s_ntt.to_ntt(ctx);
 
-    let mut result = Vec::with_capacity(gadget.len);
+    let mut result = Vec::with_capacity(w_mask.len());
 
-    for k in 0..gadget.len {
-        let gadget_power = gadget.power(k);
+    for (row, w_row) in w_mask.iter().enumerate() {
+        let gadget_power = gadget.power(first_digit + row);
 
         let tau_s_times_g = tau_s.scalar_mul(gadget_power);
 
-        let s_times_mask = if k < w_mask.len() {
-            let mut w_k_ntt = w_mask[k].clone();
-            w_k_ntt.to_ntt(ctx);
-            let mut prod = s_ntt.mul_ntt_domain(&w_k_ntt, ctx);
-            prod.from_ntt(ctx);
-            prod
-        } else {
-            Poly::zero_moduli(n, moduli)
-        };
+        let mut w_row_ntt = w_row.clone();
+        w_row_ntt.to_ntt(ctx);
+        let mut s_times_mask = s_ntt.mul_ntt_domain(&w_row_ntt, ctx);
+        s_times_mask.from_ntt(ctx);
         let neg_s_times_mask = s_times_mask.negate();
 
         let error = Poly::sample_gaussian_moduli(n, moduli, sampler);
@@ -944,6 +1007,11 @@ pub(super) fn rotation_sums(
 /// The backward recursion of the offline phase over `r_all[i] = R[i]` in NTT form:
 /// `T[i] = G^{-1}(R[i+1])`, `R[i] += sum_k w_all[i][k] * T[i][k]`, `a_hat = R[0]`.
 /// Every way of producing `R` ends here, so their outputs cannot differ.
+///
+/// With dropped digits `G^{-1}` is [`gadget_decompose_rounded`]: `T[i]` then recomposes
+/// to `R[i+1]` less a residual of at most half a dropped unit, which reaches the
+/// packed ciphertext as `tau_g(s)` times that residual in place of the dropped rows'
+/// key error.
 pub(super) fn fold_rotations_backward(
     pack_params: &PackParams,
     packing_key: &PackingKeyBody,
@@ -964,7 +1032,15 @@ pub(super) fn fold_rotations_backward(
         let mut r_i_plus_1_coeff = r_all[i + 1].clone();
         r_i_plus_1_coeff.from_ntt(ctx);
 
-        let gadget_inv = gadget_decompose(&r_i_plus_1_coeff, &pack_params.gadget);
+        let gadget_inv = if pack_params.dropped_digits == 0 {
+            gadget_decompose(&r_i_plus_1_coeff, &pack_params.gadget)
+        } else {
+            gadget_decompose_rounded(
+                &r_i_plus_1_coeff,
+                &pack_params.gadget,
+                pack_params.dropped_digits,
+            )
+        };
 
         // Serial on purpose: handing one digit to a second thread costs more than its
         // transform (1.5x slower measured), and a fused `mul_acc3_ntt_domain` measured
@@ -1024,9 +1100,13 @@ struct LastDigitNtt {
 }
 
 impl LastDigitNtt {
-    /// `None` when the digits do not recompose (a gadget shorter than the modulus) or
-    /// `base^(len-1)` has no inverse; every digit is then transformed.
+    /// `None` when the digits do not recompose (a gadget shorter than the modulus, or
+    /// one that rounds its low digits away) or `base^(len-1)` has no inverse; every
+    /// digit is then transformed.
     fn derive(pack_params: &PackParams, ctx: &NttContext) -> Option<Self> {
+        if pack_params.dropped_digits != 0 {
+            return None;
+        }
         let gadget = &pack_params.gadget;
         let q = u128::from(pack_params.q);
         let base = u128::from(gadget.base);
@@ -1079,6 +1159,70 @@ impl LastDigitNtt {
         }
         last
     }
+}
+
+/// The base-z digits of `round(poly / z^dropped)`, lowest first: `len - dropped`
+/// polynomials with `sum_r digit_r * z^(dropped + r) = poly - residual` over the
+/// integers and `|residual| <= z^dropped / 2` per coefficient. The top digit keeps the
+/// rounding carry, so it can equal z where every other digit stays below it.
+fn gadget_decompose_rounded(poly: &Poly, gadget: &GadgetVector, dropped: usize) -> Vec<Poly> {
+    // `coeff` composes the CRT limbs; one limb is already the coefficient.
+    let composed: Vec<u64>;
+    let coeffs = if poly.moduli().len() == 1 {
+        poly.coeffs()
+    } else {
+        composed = (0..poly.dimension()).map(|j| poly.coeff(j)).collect();
+        &composed
+    };
+    rounded_digit_rows(coeffs, gadget, dropped, true)
+        .into_iter()
+        .map(|row| Poly::from_coeffs_moduli(row, poly.moduli()))
+        .collect()
+}
+
+/// [`gadget_decompose_rounded`] over plain coefficients. `shifts` lets a power-of-two
+/// base split by shift and mask; the division form is the definition it must equal.
+fn rounded_digit_rows(
+    coeffs: &[u64],
+    gadget: &GadgetVector,
+    dropped: usize,
+    shifts: bool,
+) -> Vec<Vec<u64>> {
+    let rows = gadget.len.saturating_sub(dropped);
+    let mut digits = vec![vec![0u64; coeffs.len()]; rows];
+    let Some(top) = rows.checked_sub(1) else {
+        return digits;
+    };
+    let base_bits = gadget.base.trailing_zeros();
+    let dropped_bits = u32::try_from(dropped)
+        .ok()
+        .and_then(|dropped| base_bits.checked_mul(dropped))
+        .filter(|bits| shifts && gadget.base.is_power_of_two() && (1..64).contains(bits));
+
+    if let Some(dropped_bits) = dropped_bits {
+        let half = 1u128 << (dropped_bits - 1);
+        let mask = gadget.base - 1;
+        for (j, &coeff) in coeffs.iter().enumerate() {
+            let mut rounded = ((u128::from(coeff) + half) >> dropped_bits) as u64;
+            for row in &mut digits[..top] {
+                row[j] = rounded & mask;
+                rounded >>= base_bits;
+            }
+            digits[top][j] = rounded;
+        }
+    } else {
+        let base = u128::from(gadget.base);
+        let unit = base.saturating_pow(u32::try_from(dropped).unwrap_or(u32::MAX));
+        for (j, &coeff) in coeffs.iter().enumerate() {
+            let mut rounded = (u128::from(coeff) + unit / 2) / unit;
+            for row in &mut digits[..top] {
+                row[j] = (rounded % base) as u64;
+                rounded /= base;
+            }
+            digits[top][j] = rounded as u64;
+        }
+    }
+    digits
 }
 
 /// [`packing_offline`] for gamma = n, running the R and R-bar recursions together.
@@ -1282,11 +1426,14 @@ pub fn packing_online_gather(
         ));
     }
     let on_ring = |poly: &Poly| poly.dimension() == n && poly.moduli() == moduli;
-    if digits != pack_params.gadget.len || !y_body_ntt.iter().all(|y| y.is_ntt() && on_ring(y)) {
+    if digits == 0
+        || digits != pack_params.key_rows()
+        || !y_body_ntt.iter().all(|y| y.is_ntt() && on_ring(y))
+    {
         return Err(format!(
             "online packing refused: the key body must be {} NTT-form polynomials on the \
              pack-params ring, got {digits}",
-            pack_params.gadget.len
+            pack_params.key_rows()
         ));
     }
     if let Some(row) = precomp
@@ -1557,6 +1704,12 @@ pub fn precompute_inspiring(
     k_g: &crate::ks::KeySwitchingMatrix,
     params: &InspireParams,
 ) -> Result<InspiringPrecomputation, PackParamsError> {
+    // K_g stands in for the packing key here and carries a row for every digit.
+    if params.approximate_packing_gadget {
+        return Err(PackParamsError::ApproximateGadgetUnsupported {
+            reason: "the legacy precomputation packs under a full key-switching matrix",
+        });
+    }
     let d = params.ring_dim;
     let q = params.q;
     let num_to_pack = crs_a_vectors.len();
@@ -1754,6 +1907,7 @@ mod tests {
             gadget_base: 1 << 20,
             query_gadget_len: 3,
             packing_gadget_len: 3,
+            approximate_packing_gadget: false,
             security_level: crate::params::SecurityLevel::Bits128,
         }
     }
@@ -1889,6 +2043,324 @@ mod tests {
             }
         }
         assert_eq!((derived, transformed), (64, 64));
+    }
+
+    /// `round(coeff / z^dropped)` split into base-z digits by plain division, the top
+    /// digit keeping whatever is left.
+    fn rounded_digits_by_definition(coeff: u64, gadget: &GadgetVector, dropped: usize) -> Vec<u64> {
+        let base = u128::from(gadget.base);
+        let unit = base.pow(dropped as u32);
+        let mut rounded = (u128::from(coeff) + unit / 2) / unit;
+        let rows = gadget.len - dropped;
+        (0..rows)
+            .map(|row| {
+                let digit = if row + 1 == rows {
+                    rounded
+                } else {
+                    rounded % base
+                };
+                rounded /= base;
+                digit as u64
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rounded_digits_recompose_within_half_a_dropped_unit() {
+        use rand::Rng;
+        let two_limb = |pair: [u64; 2]| pair[0] * pair[1];
+        let gadgets = [
+            (1u64 << 20, 3usize, vec![crate::math::DEFAULT_Q]),
+            (1 << 20, 3, crate::params::DEFAULT_CRT_MODULI.to_vec()),
+            (1 << 20, 3, crate::params::DEFAULT_Q_2CRT_30BIT.to_vec()),
+            (1 << 19, 3, vec![67_043_329, 132_120_577]),
+            (1 << 19, 4, crate::params::DEFAULT_Q_2CRT_30BIT.to_vec()),
+            (1 << 30, 2, vec![crate::math::DEFAULT_Q]),
+            (1000, 7, vec![crate::math::DEFAULT_Q]),
+            (3, 38, vec![crate::math::DEFAULT_Q]),
+        ];
+        let mut rng = ChaCha20Rng::seed_from_u64(0x524f_554e);
+        let mut carried = 0;
+        for (base, len, moduli) in gadgets {
+            let q = if moduli.len() == 2 {
+                two_limb([moduli[0], moduli[1]])
+            } else {
+                moduli[0]
+            };
+            assert!(u128::from(base).pow(len as u32) >= u128::from(q));
+            let gadget = GadgetVector::new(base, len, q);
+            for dropped in 1..len.min(3) {
+                let unit = u128::from(base).pow(dropped as u32);
+                let half = (unit / 2) as u64;
+                let mut coeffs: Vec<u64> = [
+                    0,
+                    1,
+                    half.saturating_sub(1),
+                    half,
+                    half + 1,
+                    unit as u64 - 1,
+                    unit as u64,
+                    q / 2,
+                    q - half - 1,
+                    q - half,
+                    q - 2,
+                    q - 1,
+                ]
+                .into_iter()
+                .filter(|&coeff| coeff < q)
+                .collect();
+                coeffs.extend((0..500).map(|_| rng.gen_range(0..q)));
+                coeffs.resize(coeffs.len().next_power_of_two(), q - 1);
+
+                let rows = rounded_digit_rows(&coeffs, &gadget, dropped, true);
+                assert_eq!(
+                    rows,
+                    rounded_digit_rows(&coeffs, &gadget, dropped, false),
+                    "base {base} len {len} dropped {dropped}: shift form"
+                );
+                assert_eq!(rows.len(), len - dropped);
+                let top_bound = u128::from(q) / u128::from(base).pow(len as u32 - 1) + 1;
+                for (j, &coeff) in coeffs.iter().enumerate() {
+                    let digits: Vec<u64> = rows.iter().map(|row| row[j]).collect();
+                    assert_eq!(
+                        digits,
+                        rounded_digits_by_definition(coeff, &gadget, dropped)
+                    );
+                    let (top, lower) = digits.split_last().unwrap();
+                    assert!(lower.iter().all(|&digit| digit < base));
+                    assert!(u128::from(*top) <= top_bound);
+                    carried += usize::from(*top == base);
+                    let recomposed: u128 = digits
+                        .iter()
+                        .enumerate()
+                        .map(|(row, &digit)| {
+                            u128::from(digit) * u128::from(base).pow((dropped + row) as u32)
+                        })
+                        .sum();
+                    let residual = i128::from(coeff) - recomposed as i128;
+                    assert!(
+                        residual.unsigned_abs() <= unit / 2,
+                        "base {base} len {len} dropped {dropped} coeff {coeff}: {residual}"
+                    );
+                }
+
+                // The polynomial form reads composed coefficients and writes each digit
+                // back across the limbs.
+                let poly = Poly::from_coeffs_moduli(coeffs.clone(), &moduli);
+                let digit_polys = gadget_decompose_rounded(&poly, &gadget, dropped);
+                for (row, digit_poly) in rows.iter().zip(&digit_polys) {
+                    assert_eq!(digit_poly.moduli(), moduli.as_slice());
+                    let read: Vec<u64> = (0..coeffs.len()).map(|j| digit_poly.coeff(j)).collect();
+                    assert_eq!(&read, row, "base {base} len {len} dropped {dropped}");
+                }
+            }
+        }
+        // q - 1 rounds up to z^len at the shipped gadget: the carry is exercised.
+        assert!(carried > 0);
+    }
+
+    /// A parameter set with the approximate gadget folds with the rounded digits, one
+    /// mask row per kept digit, and never takes the derived last digit: its digits do
+    /// not recompose to the coefficient.
+    #[test]
+    fn an_approximate_gadget_folds_its_kept_digits_and_derives_none() {
+        use rand::Rng;
+        let modulus_sets = [
+            vec![crate::math::DEFAULT_Q],
+            crate::params::DEFAULT_CRT_MODULI.to_vec(),
+            crate::params::DEFAULT_Q_2CRT_30BIT.to_vec(),
+            vec![67_043_329, 132_120_577],
+        ];
+        let mut rng = ChaCha20Rng::seed_from_u64(0x4150_5258);
+        for moduli in &modulus_sets {
+            for gadget_len in [3usize, 4] {
+                let exact = InspireParams {
+                    crt_moduli: moduli.clone(),
+                    q: moduli.iter().product(),
+                    query_gadget_len: gadget_len,
+                    packing_gadget_len: gadget_len,
+                    ..test_params()
+                };
+                let params = InspireParams {
+                    approximate_packing_gadget: true,
+                    ..exact.clone()
+                };
+                let ctx = params.ntt_context();
+                for gamma in [2usize, 16] {
+                    let pack_params = PackParams::try_new(&params, gamma).unwrap();
+                    assert_eq!(
+                        (pack_params.dropped_digits, pack_params.key_rows()),
+                        (1, gadget_len - 1)
+                    );
+                    assert!(LastDigitNtt::derive(&pack_params, &ctx).is_none());
+                    let keys = OfflinePackingKeys::generate(&pack_params, [7; 32]);
+                    assert_eq!(keys.w_mask.len(), gadget_len - 1);
+                    // Each kept digit keeps the mask the exact gadget gives it.
+                    let exact_pack = PackParams::try_new(&exact, gamma).unwrap();
+                    let exact_keys = OfflinePackingKeys::generate(&exact_pack, [7; 32]);
+                    assert_eq!(keys.w_mask, exact_keys.w_mask[1..]);
+                    assert_eq!(keys.w_all_ntt[0], exact_keys.w_all_ntt[0][1..]);
+
+                    let r_all: Vec<Poly> = (0..gamma)
+                        .map(|_| {
+                            let mut words = Vec::with_capacity(256 * moduli.len());
+                            for &modulus in moduli {
+                                words.extend((0..256).map(|_| rng.gen_range(0..modulus)));
+                            }
+                            let mut poly = Poly::from_crt_coeffs(words, moduli);
+                            poly.force_ntt_domain();
+                            poly
+                        })
+                        .collect();
+
+                    let mut expected = r_all.clone();
+                    let mut expected_t = Vec::new();
+                    for i in (0..gamma - 1).rev() {
+                        let coeffs = expected[i + 1].from_ntt_new(&ctx);
+                        let mut digits = vec![vec![0u64; 256]; gadget_len - 1];
+                        for j in 0..256 {
+                            let split = rounded_digits_by_definition(
+                                coeffs.coeff(j),
+                                &pack_params.gadget,
+                                1,
+                            );
+                            for (row, digit) in digits.iter_mut().zip(split) {
+                                row[j] = digit;
+                            }
+                        }
+                        let digits: Vec<Poly> = digits
+                            .into_iter()
+                            .map(|row| Poly::from_coeffs_moduli(row, moduli))
+                            .collect();
+                        for (digit, w_ntt) in digits.iter().zip(&keys.w_all_ntt[i]) {
+                            let term = digit.to_ntt_new(&ctx).mul_ntt_domain(w_ntt, &ctx);
+                            expected[i] = expected[i].add_ntt_domain(&term);
+                        }
+                        expected_t.push(digits);
+                    }
+                    expected_t.reverse();
+
+                    let folded = fold_rotations_backward(&pack_params, &keys, r_all, &ctx);
+                    assert!(
+                        folded.a_hat == expected[0].from_ntt_new(&ctx)
+                            && folded.bold_t == expected_t
+                            && folded
+                                .bold_t_ntt
+                                .iter()
+                                .all(|row| row.len() == gadget_len - 1),
+                        "moduli {moduli:?} gadget_len {gadget_len} gamma {gamma}"
+                    );
+                    let transformed: Vec<Vec<Poly>> = expected_t
+                        .iter()
+                        .map(|row| row.iter().map(|digit| digit.to_ntt_new(&ctx)).collect())
+                        .collect();
+                    assert_eq!(folded.bold_t_ntt, transformed);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_approximate_gadget_is_refused_where_it_is_undefined() {
+        let one_digit = InspireParams {
+            approximate_packing_gadget: true,
+            packing_gadget_len: 1,
+            ..test_params()
+        };
+        let refused = |result: Result<PackParams, PackParamsError>| {
+            matches!(
+                result,
+                Err(PackParamsError::ApproximateGadgetUnsupported { .. })
+            )
+        };
+        assert!(refused(PackParams::try_new(&one_digit, 16)));
+
+        let approximate = InspireParams {
+            approximate_packing_gadget: true,
+            ..test_params()
+        };
+        assert!(PackParams::try_new(&approximate, 16).is_ok());
+        assert!(refused(PackParams::try_new_full(&approximate)));
+        assert!(PackParams::try_new_full(&test_params()).is_ok());
+
+        let mut sampler = GaussianSampler::with_seed(approximate.sigma, 3);
+        let sk = RlweSecretKey::generate(&one_digit, &mut sampler);
+        assert!(matches!(
+            ClientPackingKeys::generate(&sk, &one_digit, 16, [1; 32], &mut sampler),
+            Err(PackParamsError::ApproximateGadgetUnsupported { .. })
+        ));
+
+        let ctx = approximate.ntt_context();
+        let gadget = GadgetVector::new(
+            approximate.gadget_base,
+            approximate.packing_gadget_len,
+            approximate.q,
+        );
+        let k_g = generate_automorphism_ks_matrix(&sk, 3, &gadget, &mut sampler, &ctx);
+        let a_vectors: Vec<Vec<u64>> = (0..8)
+            .map(|_| {
+                Poly::random_moduli(256, approximate.moduli())
+                    .coeffs()
+                    .to_vec()
+            })
+            .collect();
+        assert!(matches!(
+            precompute_inspiring(&a_vectors, &k_g, &approximate),
+            Err(PackParamsError::ApproximateGadgetUnsupported { .. })
+        ));
+        assert!(precompute_inspiring(&a_vectors, &k_g, &test_params()).is_ok());
+    }
+
+    /// An approximate key is an exact key less its lowest row: row r hides
+    /// `tau_g(s) * z^(r + 1)` under the mask the exact key gives that digit, so the two
+    /// keys of one secret differ by key error alone, digit for digit.
+    #[test]
+    fn an_approximate_key_is_the_exact_key_without_its_lowest_row() {
+        let exact_params = test_params();
+        let params = InspireParams {
+            approximate_packing_gadget: true,
+            ..exact_params.clone()
+        };
+        let ctx = params.ntt_context();
+        let mut sampler = GaussianSampler::with_seed(params.sigma, 11);
+        let sk = RlweSecretKey::generate(&params, &mut sampler);
+        let gamma = 16;
+        let keys = ClientPackingKeys::generate(&sk, &params, gamma, [5; 32], &mut sampler).unwrap();
+        let exact =
+            ClientPackingKeys::generate(&sk, &exact_params, gamma, [5; 32], &mut sampler).unwrap();
+        assert_eq!((keys.y_body.len(), exact.y_body.len()), (2, 3));
+
+        let q = params.q;
+        let worst = |poly: &Poly| {
+            (0..256)
+                .map(|j| poly.coeff(j).min(q - poly.coeff(j)))
+                .max()
+                .unwrap()
+        };
+        let w_mask = generate_mask_from_seed([5; 32], 256, q, params.moduli(), 3);
+        let generator = PackParams::partial_generator(256, gamma);
+        let tau_s = apply_automorphism(&sk.poly, generator);
+        for (row, y) in keys.y_body.iter().enumerate() {
+            let digit = row + 1;
+            let power = (1u64 << 20).pow(digit as u32);
+            let unmasked = y + &sk.poly.mul_ntt(&w_mask[digit], &ctx);
+            let error = &unmasked + &tau_s.scalar_mul(power).negate();
+            assert!(
+                worst(&error) <= 39,
+                "row {row}: {} is past the sampler tailcut",
+                worst(&error)
+            );
+            // Same digit, same mask: two errors apart. Any other pairing leaves a
+            // mask or a multiple of the secret uncancelled.
+            let same_digit = y + &exact.y_body[digit].negate();
+            assert!(
+                worst(&same_digit) <= 78,
+                "row {row}: {}",
+                worst(&same_digit)
+            );
+            let same_row = y + &exact.y_body[row].negate();
+            assert!(worst(&same_row) > q / 8, "row {row}");
+        }
     }
 
     #[test]

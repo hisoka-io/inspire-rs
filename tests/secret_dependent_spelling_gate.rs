@@ -1331,13 +1331,15 @@ fn dispatch_free_bodies() -> Vec<(&'static str, &'static str)> {
         (SESSION_SRC, "pub fn query_seeded("),
         (SESSION_SRC, "pub fn query_batch("),
         (SESSION_SRC, "fn seeded_row("),
+        // One row per mask polynomial: no arm builds a row without its mask.
+        (INSPIRING_SRC, "fn generate_ksk_body"),
     ]
 }
 
 /// Each pinned body with one public branch, lifted out before the scan: the
-/// modulus width, the limb count, the automorphism's destination (a function of
-/// `g` and the position) and the gadget row count.
-const PUBLIC_BRANCHES: [(&str, &str, &str); 4] = [
+/// modulus width, the limb count and the automorphism's destination (a function of
+/// `g` and the position).
+const PUBLIC_BRANCHES: [(&str, &str, &str); 3] = [
     (
         POLY_SRC,
         "fn scale_residues",
@@ -1349,11 +1351,6 @@ const PUBLIC_BRANCHES: [(&str, &str, &str); 4] = [
         "if let [q0, q1] = self.moduli[..] {",
     ),
     (GALOIS_SRC, "pub fn apply_automorphism", "if new_idx < d {"),
-    (
-        INSPIRING_SRC,
-        "fn generate_ksk_body",
-        "if k < w_mask.len() {",
-    ),
 ];
 
 /// The per-site lists above name the spellings each site once had. This runs

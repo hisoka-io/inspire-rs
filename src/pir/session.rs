@@ -124,7 +124,7 @@ impl ClientSession {
             &PackingGeometry {
                 ring_dim: params.ring_dim,
                 moduli: params.moduli(),
-                gadget_len: params.packing_gadget_len,
+                key_rows: params.packing_key_rows(),
                 num_to_pack: self.crs.inspiring_num_columns,
             },
             &params.ntt_context(),
@@ -433,7 +433,7 @@ impl std::fmt::Debug for SessionResidue {
 
 /// A client's packing key as the server holds it: `y_body` in NTT form and nothing
 /// derived from it. Packing reads each rotation through the automorphism tables the
-/// server shares across clients, so a seat is `gadget_len` polynomials at any gamma.
+/// server shares across clients, so a seat is one polynomial per key row at any gamma.
 pub struct PackingKeySeat {
     y_body_ntt: Vec<Poly>,
     num_to_pack: usize,
@@ -452,7 +452,7 @@ impl std::fmt::Debug for PackingKeySeat {
 pub(crate) struct PackingGeometry<'a> {
     pub(crate) ring_dim: usize,
     pub(crate) moduli: &'a [u64],
-    pub(crate) gadget_len: usize,
+    pub(crate) key_rows: usize,
     pub(crate) num_to_pack: usize,
 }
 
@@ -461,7 +461,7 @@ impl<'a> From<&'a PackParams> for PackingGeometry<'a> {
         Self {
             ring_dim: pack_params.ring_dim,
             moduli: &pack_params.moduli,
-            gadget_len: pack_params.gadget.len,
+            key_rows: pack_params.key_rows(),
             num_to_pack: pack_params.num_to_pack,
         }
     }
@@ -475,7 +475,7 @@ impl PackingKeySeat {
     /// # Errors
     ///
     /// The keys are not coefficient-form polynomials on the server ring, carry a
-    /// different digit count than the server gadget, or declare another gamma.
+    /// different row count than the server's packing shape, or declare another gamma.
     ///
     /// ```
     /// use raven_inspire::inspiring::{ClientPackingKeys, PackParams};
@@ -670,8 +670,8 @@ pub(crate) fn require_wire_packing_body_shape(
 ///
 /// The automorphism generator is `(2n/gamma)+1`, so keys built at another gamma are
 /// rotations under a different automorphism than the `bold_t` they multiply, and a key
-/// with fewer polynomials than gadget digits cannot key-switch every digit. Either
-/// would pack a wrong plaintext.
+/// whose rows are not the digits the server decomposes into pairs rows with the wrong
+/// digits. Either would pack a wrong plaintext.
 ///
 /// # Errors
 /// [`crate::pir::Result`] error naming the mismatched key domain, material, or width.
@@ -682,13 +682,13 @@ pub(crate) fn ensure_packing_width_matches(
     require_wire_packing_body_shape(keys, geometry.ring_dim, geometry.moduli)?;
     // The key MATERIAL, not just the declared width: gamma is a self-reported label,
     // `y_body` is what the packing sum reads.
-    if keys.y_body.len() != geometry.gadget_len {
+    if keys.y_body.len() != geometry.key_rows {
         return Err(pir_err!(
-            "packing-key material mismatch: client sent {} y_body polynomials, server \
-             gadget has {} digits, and every digit needs its key polynomial. The client \
-             must re-derive its packing keys against the current CRS.",
+            "packing-key material mismatch: client sent {} y_body polynomials, the server \
+             decomposes into {} digits, and every digit needs its key polynomial. The \
+             client must re-derive its packing keys against the current CRS.",
             keys.y_body.len(),
-            geometry.gadget_len
+            geometry.key_rows
         ));
     }
     require_matching_width(keys.num_to_pack, geometry.num_to_pack)
@@ -793,6 +793,7 @@ mod from_residue_failfast_tests {
             gadget_base: 1 << 20,
             query_gadget_len: 3,
             packing_gadget_len: 3,
+            approximate_packing_gadget: false,
             security_level: SecurityLevel::Bits128,
         };
         let db = vec![0u8; params.ring_dim * 32];
