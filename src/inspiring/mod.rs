@@ -8,6 +8,7 @@ mod collapse;
 mod collapse_one;
 pub mod inspiring2;
 mod pack;
+mod shard_store;
 mod simple_pack;
 mod transform;
 mod types;
@@ -26,6 +27,7 @@ pub use inspiring2::{
     PrecompInsPIR, RotatedKsMatrix,
 };
 pub use pack::{pack, pack_online, partial_pack, precompute_packing, PackingPrecomputation};
+pub use shard_store::ShardPackingStore;
 pub use simple_pack::{pack_lwe_to_rlwe, pack_rlwe_coeffs};
 pub use transform::{aggregate, transform, transform_at_slot, transform_partial};
 pub use types::{AggregatedCiphertext, IntermediateCiphertext};

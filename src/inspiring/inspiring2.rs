@@ -272,6 +272,20 @@ impl PackParams {
     pub fn get_automorph_table(&self, t: usize) -> &[usize] {
         &self.automorph_tables[self.table_index(t)]
     }
+
+    /// The tables of `tau_{g^i}` for i in `0..count`, or `None` when one is missing or
+    /// short. A short table would end a slot walk early and drop terms.
+    pub(super) fn rotation_tables(&self, count: usize) -> Option<Vec<&[usize]>> {
+        self.gen_pows
+            .iter()
+            .take(count)
+            .map(|g_pow| {
+                let table = self.automorph_tables.get(g_pow.checked_sub(1)? / 2)?;
+                (table.len() == self.ring_dim).then_some(table.as_slice())
+            })
+            .collect::<Option<Vec<&[usize]>>>()
+            .filter(|tables| tables.len() == count)
+    }
 }
 
 /// Permutation tables satisfying `NTT(tau_t(poly))[i] = NTT(poly)[table[i]]` for every
@@ -866,12 +880,6 @@ pub fn packing_offline(
     a_ct_tilde: &[Poly],
     ctx: &NttContext,
 ) -> PrecompInsPIR {
-    let n = pack_params.ring_dim;
-    let q = pack_params.q;
-    let moduli = &pack_params.moduli;
-    let num_to_pack = pack_params.num_to_pack;
-    let gen_pows = &pack_params.gen_pows;
-
     let a_ct_ntt: Vec<Poly> = a_ct_tilde
         .iter()
         .map(|a| {
@@ -881,16 +889,35 @@ pub fn packing_offline(
         })
         .collect();
 
-    // Each r_all[i] is independent - only the backward recursion below reads the
-    // vector - so this O(gamma^2) region parallelizes, and it dominates server time.
+    let r_all = rotation_sums(pack_params, &a_ct_ntt, ctx);
+    fold_rotations_backward(pack_params, packing_key, r_all, ctx)
+}
+
+/// Step 1 of the offline phase, NTT form in and out:
+/// `(1/gamma) * tau_{g^i}(sum_j X^{j*g^{n-i}} * inputs[j])` for i in `0..gamma`.
+///
+/// Linear in `inputs`, which is what lets a shard fold its own columns ahead of the
+/// queries: with `inputs[j] = a * h_j` the result is `tau_{g^i}(a)` times the result
+/// for `inputs[j] = h_j`.
+pub(super) fn rotation_sums(
+    pack_params: &PackParams,
+    inputs_ntt: &[Poly],
+    ctx: &NttContext,
+) -> Vec<Poly> {
+    let n = pack_params.ring_dim;
+    let moduli = &pack_params.moduli;
+    let gen_pows = &pack_params.gen_pows;
+
+    // Each sum is independent, so this O(gamma^2) region parallelizes; computed per
+    // query it dominates server time.
     use crate::par_prelude::*;
-    let r_all: Vec<Poly> = (0..num_to_pack)
+    (0..pack_params.num_to_pack)
         .into_par_iter()
         .map(|i| {
             let mut r_pow_i_ntt = Poly::zero_moduli(n, moduli);
             r_pow_i_ntt.to_ntt(ctx);
 
-            for (j, a_j_ntt) in a_ct_ntt.iter().enumerate() {
+            for (j, input_ntt) in inputs_ntt.iter().enumerate() {
                 // g^{n-i}: the index walks the generator in the inverse direction.
                 let exp_index = (n - i) % n;
                 let index = (j * gen_pows[exp_index]) % (2 * n);
@@ -902,7 +929,7 @@ pub fn packing_offline(
                     &pack_params.neg_monomials_ntt[index % n]
                 };
 
-                r_pow_i_ntt.mul_acc_ntt_domain(monomial_ntt, a_j_ntt, ctx);
+                r_pow_i_ntt.mul_acc_ntt_domain(monomial_ntt, input_ntt, ctx);
             }
 
             let r_pow_i_scaled = r_pow_i_ntt.mul_ntt_domain(&pack_params.mod_inv_poly_ntt, ctx);
@@ -911,11 +938,24 @@ pub fn packing_offline(
             let table = pack_params.get_automorph_table(g_pow_i);
             apply_automorphism_ntt(&r_pow_i_scaled, table)
         })
-        .collect();
-    let mut r_all = r_all;
+        .collect()
+}
 
-    // The k-loop below already NTT-converts each gadget digit, so `bold_t_ntt` is
-    // filled there rather than in a second pass.
+/// The backward recursion of the offline phase over `r_all[i] = R[i]` in NTT form:
+/// `T[i] = G^{-1}(R[i+1])`, `R[i] += sum_k w_all[i][k] * T[i][k]`, `a_hat = R[0]`.
+/// Every way of producing `R` ends here, so their outputs cannot differ.
+pub(super) fn fold_rotations_backward(
+    pack_params: &PackParams,
+    packing_key: &PackingKeyBody,
+    mut r_all: Vec<Poly>,
+    ctx: &NttContext,
+) -> PrecompInsPIR {
+    let num_to_pack = pack_params.num_to_pack;
+    // Its constants cost a transform per digit, which fewer links than that cannot repay.
+    let last_digit = (num_to_pack > pack_params.gadget.len + 1)
+        .then(|| LastDigitNtt::derive(pack_params, ctx))
+        .flatten();
+
     let mut bold_t: Vec<Vec<Poly>> = Vec::with_capacity(num_to_pack - 1);
     let mut bold_t_ntt_rev: Vec<Vec<Poly>> = Vec::with_capacity(num_to_pack - 1);
 
@@ -926,16 +966,24 @@ pub fn packing_offline(
 
         let gadget_inv = gadget_decompose(&r_i_plus_1_coeff, &pack_params.gadget);
 
-        // Serial on purpose: at 3 gadget digits rayon measured break-even, and a fused
-        // `mul_acc3_ntt_domain` measured flat against three simple loops.
-        let mut gadget_inv_ntt: Vec<Poly> = Vec::with_capacity(gadget_inv.len());
-        for (k, t_k) in gadget_inv.iter().enumerate() {
-            let mut t_k_ntt = t_k.clone();
-            t_k_ntt.to_ntt(ctx);
-            if k < packing_key.w_all_ntt[i].len() {
-                r_all[i].mul_acc_ntt_domain(&t_k_ntt, &packing_key.w_all_ntt[i][k], ctx);
-            }
-            gadget_inv_ntt.push(t_k_ntt);
+        // Serial on purpose: handing one digit to a second thread costs more than its
+        // transform (1.5x slower measured), and a fused `mul_acc3_ntt_domain` measured
+        // flat against three simple loops.
+        let transformed = match &last_digit {
+            Some(_) => gadget_inv.len().saturating_sub(1),
+            None => gadget_inv.len(),
+        };
+        let mut gadget_inv_ntt: Vec<Poly> = gadget_inv
+            .iter()
+            .take(transformed)
+            .map(|t_k| t_k.to_ntt_new(ctx))
+            .collect();
+        if let Some(last_digit) = &last_digit {
+            gadget_inv_ntt.push(last_digit.ntt(&r_all[i + 1], &gadget_inv_ntt, ctx));
+        }
+
+        for (t_k_ntt, w_k_ntt) in gadget_inv_ntt.iter().zip(&packing_key.w_all_ntt[i]) {
+            r_all[i].mul_acc_ntt_domain(t_k_ntt, w_k_ntt, ctx);
         }
 
         bold_t.push(gadget_inv);
@@ -956,8 +1004,80 @@ pub fn packing_offline(
         bold_t_bar: vec![],
         bold_t_hat: vec![],
         num_to_pack,
-        ring_dim: n,
-        q,
+        ring_dim: pack_params.ring_dim,
+        q: pack_params.q,
+    }
+}
+
+/// The NTT of a decomposition's last digit, read off the other digits' transforms.
+///
+/// When the gadget spans the modulus (`base^len >= q`) the digits recompose to the
+/// coefficient: `sum_k base^k * T_k = R`. The NTT is linear, so
+/// `NTT(T_last) = base^-(len-1) * (NTT(R) - sum_{k<len-1} base^k * NTT(T_k))`, and
+/// `NTT(R)` is what the recursion already holds. Exact arithmetic in each limb's
+/// field gives the transform's own words for `len` pointwise products.
+struct LastDigitNtt {
+    /// `base^-(len-1)`, constant in every slot.
+    of_sum: Poly,
+    /// `-base^(k-(len-1))` for each earlier digit k.
+    of_digit: Vec<Poly>,
+}
+
+impl LastDigitNtt {
+    /// `None` when the digits do not recompose (a gadget shorter than the modulus) or
+    /// `base^(len-1)` has no inverse; every digit is then transformed.
+    fn derive(pack_params: &PackParams, ctx: &NttContext) -> Option<Self> {
+        let gadget = &pack_params.gadget;
+        let q = u128::from(pack_params.q);
+        let base = u128::from(gadget.base);
+        if base < 2 || q < 2 {
+            return None;
+        }
+        let earlier_digits = gadget.len.checked_sub(1)?;
+
+        let mut span = 1u128;
+        let mut powers = Vec::with_capacity(gadget.len);
+        let mut power = 1u128;
+        for _ in 0..gadget.len {
+            powers.push(power);
+            power = power * (base % q) % q;
+            span = span.saturating_mul(base);
+        }
+        if span < q {
+            return None;
+        }
+        let top = u64::try_from(*powers.last()?).ok()?;
+        let inverse = u128::from(mod_inverse_u64(top, pack_params.q)?);
+
+        let constant = |value: u128| -> Option<Poly> {
+            let mut poly = Poly::constant_moduli(
+                u64::try_from(value).ok()?,
+                pack_params.ring_dim,
+                &pack_params.moduli,
+            );
+            poly.to_ntt(ctx);
+            Some(poly)
+        };
+        Some(Self {
+            of_sum: constant(inverse)?,
+            of_digit: powers
+                .iter()
+                .take(earlier_digits)
+                .map(|power| constant((q - inverse * power % q) % q))
+                .collect::<Option<Vec<Poly>>>()?,
+        })
+    }
+
+    /// `sum_ntt` is `NTT(R)`; `earlier_digits_ntt` are the transforms of digits
+    /// `0..len-1`, in order.
+    fn ntt(&self, sum_ntt: &Poly, earlier_digits_ntt: &[Poly], ctx: &NttContext) -> Poly {
+        let mut last = Poly::zero_moduli(sum_ntt.dimension(), sum_ntt.moduli());
+        last.force_ntt_domain();
+        last.mul_acc_ntt_domain(sum_ntt, &self.of_sum, ctx);
+        for (digit_ntt, constant) in earlier_digits_ntt.iter().zip(&self.of_digit) {
+            last.mul_acc_ntt_domain(digit_ntt, constant, ctx);
+        }
+        last
     }
 }
 
@@ -1186,25 +1306,12 @@ pub fn packing_online_gather(
                 .to_owned(),
         );
     }
-    // A short table would end the slot walk early and drop terms.
-    let tables = pack_params
-        .gen_pows
-        .iter()
-        .take(rotations)
-        .map(|g_pow| {
-            let table = pack_params
-                .automorph_tables
-                .get(g_pow.checked_sub(1)? / 2)?;
-            (table.len() == n).then_some(table.as_slice())
-        })
-        .collect::<Option<Vec<&[usize]>>>()
-        .filter(|tables| tables.len() == rotations)
-        .ok_or_else(|| {
-            format!(
-                "online packing refused: pack params hold no full automorphism table for \
-                 one of the {rotations} rotations at ring_dim {n}"
-            )
-        })?;
+    let tables = pack_params.rotation_tables(rotations).ok_or_else(|| {
+        format!(
+            "online packing refused: pack params hold no full automorphism table for one \
+             of the {rotations} rotations at ring_dim {n}"
+        )
+    })?;
 
     let mut sum_b_ntt = Poly::zero_moduli(n, moduli);
     sum_b_ntt.to_ntt(ctx);
@@ -1684,6 +1791,104 @@ mod tests {
             assert_eq!(shared.coeffs(), legacy.coeffs(), "moduli={moduli:?}");
             assert_eq!(shared_sampler.sample(), legacy_sampler.sample());
         }
+    }
+
+    /// The recursion as its formula reads, with a forward transform per digit.
+    fn fold_rotations_transforming_every_digit(
+        pack_params: &PackParams,
+        packing_key: &PackingKeyBody,
+        mut r_all: Vec<Poly>,
+        ctx: &NttContext,
+    ) -> (Poly, Vec<Vec<Poly>>, Vec<Vec<Poly>>) {
+        let mut bold_t = Vec::new();
+        let mut bold_t_ntt = Vec::new();
+        for i in (0..pack_params.num_to_pack - 1).rev() {
+            let digits = gadget_decompose(&r_all[i + 1].from_ntt_new(ctx), &pack_params.gadget);
+            let digits_ntt: Vec<Poly> = digits.iter().map(|t| t.to_ntt_new(ctx)).collect();
+            for (t_ntt, w_ntt) in digits_ntt.iter().zip(&packing_key.w_all_ntt[i]) {
+                r_all[i] = r_all[i].add_ntt_domain(&t_ntt.mul_ntt_domain(w_ntt, ctx));
+            }
+            bold_t.push(digits);
+            bold_t_ntt.push(digits_ntt);
+        }
+        bold_t.reverse();
+        bold_t_ntt.reverse();
+        (r_all[0].from_ntt_new(ctx), bold_t, bold_t_ntt)
+    }
+
+    /// Every shipped gadget spans its modulus, so every shipped set takes the derived
+    /// digit; the one- and two-digit gadgets here do not, and must not.
+    #[test]
+    fn the_last_digit_is_derived_only_when_the_gadget_spans_the_modulus() {
+        use rand::Rng;
+        let modulus_sets = [
+            vec![crate::math::DEFAULT_Q],
+            crate::params::DEFAULT_CRT_MODULI.to_vec(),
+            crate::params::DEFAULT_Q_2CRT_30BIT.to_vec(),
+            vec![67_043_329, 132_120_577],
+        ];
+        let mut rng = ChaCha20Rng::seed_from_u64(0x4c44_4947);
+        let (mut derived, mut transformed) = (0, 0);
+        for moduli in &modulus_sets {
+            for gadget_len in 1..=4usize {
+                let params = InspireParams {
+                    crt_moduli: moduli.clone(),
+                    q: moduli.iter().product(),
+                    query_gadget_len: gadget_len,
+                    packing_gadget_len: gadget_len,
+                    ..test_params()
+                };
+                let ctx = params.ntt_context();
+                let spans = (1u128 << (20 * gadget_len)) >= u128::from(params.q);
+                for gamma in [2usize, 16] {
+                    let pack_params = PackParams::try_new(&params, gamma).unwrap();
+                    let keys = OfflinePackingKeys::generate(&pack_params, [7; 32]);
+                    assert_eq!(
+                        LastDigitNtt::derive(&pack_params, &ctx).is_some(),
+                        spans,
+                        "moduli {moduli:?} gadget_len {gadget_len}"
+                    );
+                    for pattern in 0..4 {
+                        let r_all: Vec<Poly> = (0..gamma)
+                            .map(|_| {
+                                let mut words = Vec::with_capacity(256 * moduli.len());
+                                for &modulus in moduli {
+                                    let hot = rng.gen_range(0..256);
+                                    words.extend((0..256).map(|slot| match pattern {
+                                        0 => rng.gen_range(0..modulus),
+                                        1 => modulus - 1,
+                                        2 => 0,
+                                        _ => u64::from(slot == hot) * (modulus - 1),
+                                    }));
+                                }
+                                let mut poly = Poly::from_crt_coeffs(words, moduli);
+                                poly.force_ntt_domain();
+                                poly
+                            })
+                            .collect();
+                        let (a_hat, bold_t, bold_t_ntt) = fold_rotations_transforming_every_digit(
+                            &pack_params,
+                            &keys,
+                            r_all.clone(),
+                            &ctx,
+                        );
+                        let folded = fold_rotations_backward(&pack_params, &keys, r_all, &ctx);
+                        assert!(
+                            folded.a_hat == a_hat
+                                && folded.bold_t == bold_t
+                                && folded.bold_t_ntt == bold_t_ntt,
+                            "moduli {moduli:?} gadget_len {gadget_len} gamma {gamma} pattern {pattern}"
+                        );
+                        if spans {
+                            derived += 1;
+                        } else {
+                            transformed += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!((derived, transformed), (64, 64));
     }
 
     #[test]

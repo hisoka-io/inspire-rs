@@ -785,72 +785,59 @@ fn pack_shard(
         ));
     }
     seat.require_width(pack_params)?;
-    let d = crs.ring_dim();
     let ctx = crs.params.ntt_context();
+    let mut profile = RegionProfile::start();
 
-    let profile = RespondDebugSwitches::get().profile;
-    let t_extprod_start = profile.then(std::time::Instant::now);
+    let (precomp, b_poly) = if let Some(store) = shard.packing_store() {
+        let folding_ciphertext = rgsw
+            .rows
+            .first()
+            .ok_or_else(|| pir_err!("plaintext-multiply query has no ciphertext row"))?;
+        let refused = |e: String| pir_err!("shard {}: {e}", shard.id);
+        let checked = store
+            .check_columns_and_fold_b(pack_params, &shard.polynomials, &folding_ciphertext.b)
+            .map_err(refused)?;
+        profile.lap("column_check_us");
+        let precomp = checked
+            .packing_offline(offline_keys, &folding_ciphertext.a, &ctx)
+            .map_err(refused)?;
+        (precomp, checked.into_b_poly())
+    } else {
+        let column_ciphertexts = plaintext_multiply_columns(rgsw, shard, &ctx)?;
+        profile.lap("extprod_us");
 
-    let column_ciphertexts = plaintext_multiply_columns(rgsw, shard, &ctx)?;
+        let lwe_cts: Vec<_> = column_ciphertexts
+            .iter()
+            .map(crate::rlwe::RlweCiphertext::sample_extract_coeff0)
+            .collect();
+        profile.lap("extract_coeff0_us");
 
-    let t_extprod_end = t_extprod_start.map(|s| s.elapsed());
-    let t_extract_start = t_extprod_end.map(|_| std::time::Instant::now());
+        // InspiRING consumes the RLWE a-polynomials, not the LWE a-vectors: the latter
+        // are negacyclic extractions with a different structure.
+        let a_ct_tilde: Vec<Poly> = column_ciphertexts
+            .iter()
+            .map(|rlwe| rlwe.a.clone())
+            .collect();
 
-    let lwe_cts: Vec<_> = column_ciphertexts
-        .iter()
-        .map(crate::rlwe::RlweCiphertext::sample_extract_coeff0)
-        .collect();
-
-    let t_extract_end = t_extract_start.map(|s| s.elapsed());
-    let t_bpoly_start = t_extract_end.map(|_| std::time::Instant::now());
-
-    // InspiRING consumes the RLWE a-polynomials, not the LWE a-vectors: the latter are
-    // negacyclic extractions with a different structure.
-    let a_ct_tilde: Vec<Poly> = column_ciphertexts
-        .iter()
-        .map(|rlwe| rlwe.a.clone())
-        .collect();
-
-    let mut b_coeffs = vec![0u64; d];
-    for (i, lwe) in lwe_cts.iter().enumerate() {
-        if i < d {
-            b_coeffs[i] = lwe.b;
+        let d = crs.ring_dim();
+        let mut b_coeffs = vec![0u64; d];
+        for (i, lwe) in lwe_cts.iter().enumerate() {
+            if i < d {
+                b_coeffs[i] = lwe.b;
+            }
         }
-    }
-    let b_poly = Poly::from_coeffs_moduli(b_coeffs, crs.params.moduli());
+        let b_poly = Poly::from_coeffs_moduli(b_coeffs, crs.params.moduli());
+        profile.lap("bpoly_us");
 
-    let t_bpoly_end = t_bpoly_start.map(|s| s.elapsed());
-    let t_packoff_start = t_bpoly_end.map(|_| std::time::Instant::now());
-
-    let precomp = packing_offline(pack_params, offline_keys, &a_ct_tilde, &ctx);
-
-    let t_packoff_end = t_packoff_start.map(|s| s.elapsed());
-    let t_packonline_start = t_packoff_end.map(|_| std::time::Instant::now());
+        let precomp = packing_offline(pack_params, offline_keys, &a_ct_tilde, &ctx);
+        (precomp, b_poly)
+    };
+    profile.lap("pack_offline_us");
 
     let packed = packing_online_gather(&precomp, pack_params, seat.y_body_ntt(), &b_poly, &ctx)
         .map_err(|e| pir_err!("{e}"))?;
-
-    let t_packonline_end = t_packonline_start.map(|s| s.elapsed());
-
-    // Microseconds per field.
-    if let (Some(e), Some(x), Some(b), Some(po), Some(pn)) = (
-        t_extprod_end,
-        t_extract_end,
-        t_bpoly_end,
-        t_packoff_end,
-        t_packonline_end,
-    ) {
-        eprintln!(
-            "RAVEN_PROFILE num_cols={} extprod_us={} extract_coeff0_us={} \
-             bpoly_us={} pack_offline_us={} pack_online_us={}",
-            num_columns,
-            e.as_micros(),
-            x.as_micros(),
-            b.as_micros(),
-            po.as_micros(),
-            pn.as_micros()
-        );
-    }
+    profile.lap("pack_online_us");
+    profile.print(num_columns);
 
     Ok(ServerResponse {
         ciphertext: packed,
@@ -1285,6 +1272,43 @@ pub fn respond_sequential(
         packing_mode: None,
         packed_coefficients: None,
     })
+}
+
+/// Wall time of each region of one respond, in microseconds; inert unless the profile
+/// switch is set.
+struct RegionProfile {
+    clock: Option<std::time::Instant>,
+    regions: Vec<(&'static str, u128)>,
+}
+
+impl RegionProfile {
+    fn start() -> Self {
+        Self {
+            clock: RespondDebugSwitches::get()
+                .profile
+                .then(std::time::Instant::now),
+            regions: Vec::new(),
+        }
+    }
+
+    /// Close the region that began at the previous lap.
+    fn lap(&mut self, region: &'static str) {
+        if let Some(clock) = &mut self.clock {
+            self.regions.push((region, clock.elapsed().as_micros()));
+            *clock = std::time::Instant::now();
+        }
+    }
+
+    fn print(&self, num_columns: usize) {
+        if self.clock.is_some() {
+            let regions: Vec<String> = self
+                .regions
+                .iter()
+                .map(|(region, micros)| format!("{region}={micros}"))
+                .collect();
+            eprintln!("RAVEN_PROFILE num_cols={num_columns} {}", regions.join(" "));
+        }
+    }
 }
 
 /// Measurement switch on the respond path, read from the environment once per process so no

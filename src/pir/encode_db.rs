@@ -134,10 +134,7 @@ pub fn encode_database(
             polynomials.push(poly);
         }
 
-        shards.push(ShardData {
-            id: shard_id,
-            polynomials,
-        });
+        shards.push(ShardData::new(shard_id, polynomials));
 
         entry_offset += actual_entries;
         shard_id += 1;

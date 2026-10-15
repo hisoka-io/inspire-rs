@@ -25,10 +25,12 @@
 use super::error::{pir_err, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::inspiring::{PackParams, PackingKeyBody};
+use std::sync::Arc;
+
+use crate::inspiring::{PackParams, PackingKeyBody, ShardPackingStore};
 use crate::ks::{generate_automorphism_ks_matrix, KeySwitchingMatrix};
 use crate::math::gaussian::os_seeded_chacha;
-use crate::math::{GaussianSampler, Poly};
+use crate::math::{GaussianSampler, NttContext, Poly};
 use crate::params::{InspireParams, ShardConfig};
 use crate::rgsw::GadgetVector;
 use crate::rlwe::RlweSecretKey;
@@ -245,6 +247,71 @@ pub struct ShardData {
     pub id: u32,
     /// Database entries encoded as polynomial coefficients
     pub polynomials: Vec<Poly>,
+    /// Never persisted: a decoded shard packs per query until its store is rebuilt.
+    #[serde(skip)]
+    packing_store: Option<Arc<ShardPackingStore>>,
+}
+
+impl ShardData {
+    /// A shard over `polynomials`, with no packing store.
+    pub fn new(id: u32, polynomials: Vec<Poly>) -> Self {
+        Self {
+            id,
+            polynomials,
+            packing_store: None,
+        }
+    }
+
+    /// Fold the InspiRING offline phase's first step over this shard's columns, so
+    /// every later respond reads it instead of recomputing it. Responses keep their
+    /// bytes. The store is as large as the columns.
+    ///
+    /// The store answers for the columns as they are now. A respond checks them
+    /// against it and refuses when `polynomials` has changed since; call this again
+    /// after any change.
+    ///
+    /// ```
+    /// use raven_inspire::inspiring::ShardPackingStore;
+    /// use raven_inspire::math::GaussianSampler;
+    /// use raven_inspire::params::InspireParams;
+    /// use raven_inspire::{setup, ServerInspiringCache};
+    ///
+    /// let params = InspireParams::secure_128_d2048();
+    /// let database = vec![7u8; params.ring_dim * 32];
+    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
+    /// let (crs, mut encoded, _secret_key) = setup(&params, &database, 32, &mut sampler)?;
+    /// let cache = ServerInspiringCache::new(&crs, &encoded)?;
+    /// for shard in &mut encoded.shards {
+    ///     shard.precompute_packing(cache.pack_params(), &params.ntt_context())?;
+    /// }
+    /// let held = encoded.shards[0]
+    ///     .packing_store()
+    ///     .map(ShardPackingStore::payload_bytes);
+    /// assert_eq!(held, Some(16 * 2048 * 8));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The columns are not coefficient-form polynomials of the width and ring
+    /// `pack_params` describes, or the platform entropy source fails. The shard keeps
+    /// the store it had.
+    pub fn precompute_packing(&mut self, pack_params: &PackParams, ctx: &NttContext) -> Result<()> {
+        let store = ShardPackingStore::build(pack_params, &self.polynomials, ctx)
+            .map_err(|e| pir_err!("shard {}: {e}", self.id))?;
+        self.packing_store = Some(Arc::new(store));
+        Ok(())
+    }
+
+    /// The store built by [`Self::precompute_packing`], if any.
+    pub fn packing_store(&self) -> Option<&ShardPackingStore> {
+        self.packing_store.as_deref()
+    }
+
+    /// Release the packing store; responds go back to packing per query.
+    pub fn drop_packing_store(&mut self) {
+        self.packing_store = None;
+    }
 }
 
 /// PIR.Setup(1^λ, D) → (crs, D', sk)

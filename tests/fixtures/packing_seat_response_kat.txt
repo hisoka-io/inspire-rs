@@ -40,6 +40,13 @@ RESP d2048 entry=512 seed=0x52455301 index=2047 len=17358 fnv=0x6b8b62314640ec21
 RESP d2048 entry=512 seed=0x52455301 index=2048 len=17358 fnv=0xcaf433d4691fc6f8
 RESP d2048 entry=512 seed=0x52455301 index=4113 len=17358 fnv=0x34cffbbbadf10aa9
 RESP d2048 entry=512 seed=0x52455301 index=6143 len=17358 fnv=0x7cf93ecfe402c998
+SESSIONKEY d2048 entry=1024 seed=0x52455300 len=46252 fnv=0xf84acf5ee182abf1
+RESP d2048 entry=1024 seed=0x52455300 index=0 len=19278 fnv=0x520475e4426f0366
+RESP d2048 entry=1024 seed=0x52455300 index=1 len=19278 fnv=0xb377c0853a47c096
+RESP d2048 entry=1024 seed=0x52455300 index=2047 len=19278 fnv=0xfea225e0d57c12a4
+RESP d2048 entry=1024 seed=0x52455300 index=2048 len=19278 fnv=0xbdbcdd2f8f247d56
+RESP d2048 entry=1024 seed=0x52455300 index=4113 len=19278 fnv=0x384cfbcd7d9452fa
+RESP d2048 entry=1024 seed=0x52455300 index=6143 len=19278 fnv=0xca8f3c4b67d0a8a8
 SESSIONKEY d256-single-l3 entry=2 seed=0x534d4102 len=5932 fnv=0x2161e90cd3eb82d8
 RESP d256-single-l3 entry=2 seed=0x534d4102 index=0 len=2006 fnv=0x1f6b20019c2e63e8
 RESP d256-single-l3 entry=2 seed=0x534d4102 index=255 len=2006 fnv=0x7c38bfe7df2bb220

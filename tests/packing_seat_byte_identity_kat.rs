@@ -36,6 +36,13 @@ use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 
 const RECORDED: &str = include_str!("fixtures/packing_seat_response_kat.txt");
 
+/// Whether the replayed shards fold offline-packing step 1 over their columns first.
+#[derive(Clone, Copy, Debug)]
+enum Packing {
+    PerQuery,
+    FromShardStores,
+}
+
 /// Replays one recorded cell through every responder and returns the lines it serves,
 /// in the fixture's format.
 fn served_lines(
@@ -44,8 +51,29 @@ fn served_lines(
     entry_size: usize,
     seed: u64,
     indices: &[u64],
+    packing: Packing,
 ) -> Vec<String> {
     let mut cell = Cell::build(params, entry_size, seed);
+    if matches!(packing, Packing::FromShardStores) {
+        for shard in &mut cell.encoded.shards {
+            shard
+                .precompute_packing(cell.cache.pack_params(), &params.ntt_context())
+                .expect("precompute");
+        }
+    }
+    let stores = cell
+        .encoded
+        .shards
+        .iter()
+        .filter(|shard| shard.packing_store().is_some())
+        .count();
+    assert_eq!(
+        stores,
+        match packing {
+            Packing::PerQuery => 0,
+            Packing::FromShardStores => cell.encoded.shards.len(),
+        }
+    );
     let mut lines = Vec::new();
 
     let keys = cell.wire_keys();
@@ -138,25 +166,34 @@ fn recorded_count(tag: &str) -> usize {
 fn production_cells_serve_the_recorded_bytes() {
     let params = InspireParams::secure_128_d2048();
     let d = params.ring_dim as u64;
-    let mut served = 0;
-    for entry_size in [32usize, 256, 512] {
-        for seed in [0x5245_5300u64, 0x5245_5301] {
-            let lines = served_lines(
-                "d2048",
-                &params,
-                entry_size,
-                seed,
-                &[0, 1, d - 1, d, 2 * d + 17, 3 * d - 1],
-            );
-            assert_recorded(&lines);
-            served += lines.len();
+    for packing in [Packing::PerQuery, Packing::FromShardStores] {
+        let mut served = 0;
+        let cells: [(usize, &[u64]); 4] = [
+            (32, &[0x5245_5300, 0x5245_5301]),
+            (256, &[0x5245_5300, 0x5245_5301]),
+            (512, &[0x5245_5300, 0x5245_5301]),
+            (1024, &[0x5245_5300]),
+        ];
+        for (entry_size, seeds) in cells {
+            for &seed in seeds {
+                let lines = served_lines(
+                    "d2048",
+                    &params,
+                    entry_size,
+                    seed,
+                    &[0, 1, d - 1, d, 2 * d + 17, 3 * d - 1],
+                    packing,
+                );
+                assert_recorded(&lines);
+                served += lines.len();
+            }
         }
+        assert_eq!(
+            served,
+            recorded_count("d2048"),
+            "{packing:?}: every recorded line is replayed"
+        );
     }
-    assert_eq!(
-        served,
-        recorded_count("d2048"),
-        "every recorded line is replayed"
-    );
 }
 
 #[test]
@@ -164,23 +201,26 @@ fn every_modulus_set_serves_the_recorded_bytes() {
     for (name, moduli) in modulus_sets() {
         let params = params_for(256, &moduli, 3);
         let tag = format!("d256-{name}-l3");
-        let mut served = 0;
-        for entry_size in [2usize, 4, 32, 64, 256] {
-            let lines = served_lines(
-                &tag,
-                &params,
-                entry_size,
-                0x534d_4100 + entry_size as u64,
-                &[0, 255, 256, 511, 700],
+        for packing in [Packing::PerQuery, Packing::FromShardStores] {
+            let mut served = 0;
+            for entry_size in [2usize, 4, 32, 64, 256] {
+                let lines = served_lines(
+                    &tag,
+                    &params,
+                    entry_size,
+                    0x534d_4100 + entry_size as u64,
+                    &[0, 255, 256, 511, 700],
+                    packing,
+                );
+                assert_recorded(&lines);
+                served += lines.len();
+            }
+            assert_eq!(
+                served,
+                recorded_count(&tag),
+                "{tag} {packing:?}: every recorded line is replayed"
             );
-            assert_recorded(&lines);
-            served += lines.len();
         }
-        assert_eq!(
-            served,
-            recorded_count(&tag),
-            "{tag}: every recorded line is replayed"
-        );
     }
 }
 

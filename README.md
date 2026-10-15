@@ -49,6 +49,12 @@ server keeps a registered key as three polynomials (49,152 bytes at d=2048, at a
 width). `ClientSession::query_batch` sends any number of queries under that one key, inline or
 by handle, and `respond_seeded_batch` answers them.
 
+A server can fold the first step of the packing offline phase over a shard's columns ahead of
+the queries with `ShardData::precompute_packing`. Responses keep their bytes and that step's
+per-query work drops from gamma^2 pointwise products to gamma. The store is as large as the
+shard's columns (gamma x 16 KiB at d=2048). Every respond checks the columns against the store
+and refuses a shard edited after the fold until it is folded again.
+
 ## Parameters and sizes
 
 `InspireParams::secure_128_d2048` uses ring dimension 2048, a single 60-bit prime
