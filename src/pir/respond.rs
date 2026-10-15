@@ -784,7 +784,7 @@ fn pack_shard(
             shard.id
         ));
     }
-    seat.require_width(pack_params)?;
+    seat.require_shape(pack_params)?;
     // The recursion pairs digit k with mask row k and stops at the shorter of the two.
     let key_rows = pack_params.key_rows();
     if offline_keys.w_all_ntt.len() + 1 != num_columns
@@ -1740,6 +1740,16 @@ mod tests {
         assert_eq!(helper.matches("env::var_os(").count(), 1);
     }
 
+    /// Every way a responder could rebuild rotations per query instead of reading the
+    /// shared tables: the rotation formula, the kernel that takes its output, and the
+    /// one-call packers that run both.
+    fn per_query_rotation_paths(production: &str) -> Vec<&'static str> {
+        ["generate_rotations", "packing_online(", "pack_inspiring"]
+            .into_iter()
+            .filter(|rotation_rebuild| production.contains(rotation_rebuild))
+            .collect()
+    }
+
     /// A seat holds no rotations and no coefficient-form body, so the only way a
     /// responder could rebuild rotations per query is by calling the rotation formula.
     #[test]
@@ -1747,13 +1757,50 @@ mod tests {
         let (production, _tests) = include_str!("respond.rs")
             .split_once("#[cfg(test)]\nmod tests")
             .expect("test module");
-        for rotation_rebuild in ["generate_rotations", "packing_online("] {
-            assert!(
-                !production.contains(rotation_rebuild),
-                "respond.rs reaches the per-query rotation formula through {rotation_rebuild}"
-            );
-        }
+        assert_eq!(
+            per_query_rotation_paths(production),
+            Vec::<&str>::new(),
+            "respond.rs reaches the per-query rotation formula"
+        );
         assert_eq!(production.matches("packing_online_gather(").count(), 1);
+    }
+
+    /// The pin above must see each slow entry point, or a responder could adopt one
+    /// unnoticed.
+    #[test]
+    fn the_seat_kernel_pin_sees_every_slow_packer() {
+        let slow_calls = [
+            (
+                "generate_rotations(pack_params, &keys.y_body)",
+                "generate_rotations",
+            ),
+            (
+                "packing_online(&precomp, &y_all, &b_poly, &ctx)",
+                "packing_online(",
+            ),
+            (
+                "crate::inspiring::pack_inspiring(lwes, pack, offline, y, params)",
+                "pack_inspiring",
+            ),
+            (
+                "pack_inspiring_partial(lwes, k_g, params)",
+                "pack_inspiring",
+            ),
+            (
+                "pack_inspiring_full(lwes, k_g, k_h, params)",
+                "pack_inspiring",
+            ),
+            (
+                "pack_inspiring_legacy(lwes, precomp, k_g, params)",
+                "pack_inspiring",
+            ),
+        ];
+        for (call, seen_as) in slow_calls {
+            let planted = format!("fn respond_slowly() {{\n    let packed = {call};\n}}\n");
+            assert_eq!(per_query_rotation_paths(&planted), [seen_as], "{call}");
+        }
+        let kernel = "packing_online_gather(&precomp, pack_params, seat.y_body_ntt(), b, &ctx)";
+        assert!(per_query_rotation_paths(kernel).is_empty());
     }
 
     #[test]

@@ -29,8 +29,8 @@ use raven_inspire::math::{GaussianSampler, NttContext, Poly};
 use raven_inspire::params::InspireParams;
 use raven_inspire::pir::{
     respond_seeded_inspiring, respond_seeded_inspiring_cached,
-    respond_seeded_inspiring_cached_with_session, PackingKeySeat, ServerResponse,
-    ServerSessionStore,
+    respond_seeded_inspiring_cached_with_session, respond_seeded_with_seat, PackingKeySeat,
+    ServerResponse, ServerSessionStore,
 };
 use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 
@@ -662,6 +662,57 @@ fn a_seat_from_another_width_is_refused_at_respond() {
         message.contains("16") && message.contains("32"),
         "{message}"
     );
+}
+
+/// A seat at the server's gamma but built on another ring, or for another gadget, is
+/// named as such before any packing work, with and without a per-shard store.
+#[test]
+fn a_seat_from_another_ring_or_gadget_is_refused_by_name() {
+    let sets = modulus_sets();
+    let params = params_for(256, &sets[0].1, 3);
+    let mut cell = Cell::build(&params, 64, 0x5249_4e00);
+    let gamma = cell.cache.pack_params().num_to_pack;
+    let query = cell.next_query(5);
+
+    let mut stored = cell.encoded.clone();
+    for shard in &mut stored.shards {
+        shard
+            .precompute_packing(cell.cache.pack_params(), &params.ntt_context())
+            .expect("precompute");
+    }
+
+    let other_ring = params_for(256, &sets[1].1, 3);
+    let other_gadget = InspireParams {
+        approximate_packing_gadget: true,
+        ..params.clone()
+    };
+    for (foreign, key_rows) in [(&other_ring, 3usize), (&other_gadget, 2)] {
+        let mut sampler = GaussianSampler::with_seed(foreign.sigma, 0x5249_4e01);
+        let secret_key = RlweSecretKey::generate(foreign, &mut sampler);
+        let keys = ClientPackingKeys::generate(&secret_key, foreign, gamma, [5; 32], &mut sampler)
+            .expect("legal width");
+        let seat = PackingKeySeat::from_wire(
+            keys,
+            &PackParams::try_new(foreign, gamma).expect("pack params"),
+            &foreign.ntt_context(),
+        )
+        .expect("a well-formed seat for its own shape");
+        assert_eq!(seat.num_to_pack(), gamma, "only the ring or gadget differs");
+
+        for encoded in [&cell.encoded, &stored] {
+            let message = respond_seeded_with_seat(&cell.crs, encoded, &query, &cell.cache, &seat)
+                .expect_err("a foreign seat must be refused")
+                .to_string();
+            assert!(
+                message.contains("seat is for another ring or gadget")
+                    && message.contains(&format!("holds {key_rows} key rows"))
+                    && message.contains(&format!("{:?}", foreign.moduli()))
+                    && message.contains(&format!("{:?}", params.moduli())),
+                "{message}"
+            );
+            assert!(!message.contains("online packing"), "{message}");
+        }
+    }
 }
 
 /// A cache built for one table shape must not pack another table's shard.

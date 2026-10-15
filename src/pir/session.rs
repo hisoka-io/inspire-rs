@@ -559,10 +559,33 @@ impl PackingKeySeat {
         &self.y_body_ntt
     }
 
-    /// A seat registered under one gamma must not pack under another: the generator
-    /// differs, so the tables would rotate the key under the wrong automorphism.
-    pub(crate) fn require_width(&self, pack_params: &PackParams) -> Result<()> {
-        require_matching_width(self.num_to_pack, pack_params.num_to_pack)
+    /// A seat packs only under the shape it was built for. Another gamma rotates the
+    /// key under the wrong automorphism. Another ring or row count is refused by the
+    /// online kernel too, but only once the offline phase has been paid for.
+    pub(crate) fn require_shape(&self, pack_params: &PackParams) -> Result<()> {
+        require_matching_width(self.num_to_pack, pack_params.num_to_pack)?;
+        let on_ring = |y: &Poly| {
+            y.dimension() == pack_params.ring_dim && y.moduli() == pack_params.moduli.as_slice()
+        };
+        if self.y_body_ntt.len() == pack_params.key_rows() && self.y_body_ntt.iter().all(on_ring) {
+            return Ok(());
+        }
+        let seat_ring = self
+            .y_body_ntt
+            .iter()
+            .find(|y| !on_ring(y))
+            .or(self.y_body_ntt.first());
+        Err(pir_err!(
+            "packing-key seat is for another ring or gadget: it holds {} key rows on \
+             ring_dim {:?} moduli {:?}, the server packs {} rows on ring_dim {} moduli {:?}. \
+             The client must re-derive its packing keys against the current CRS.",
+            self.y_body_ntt.len(),
+            seat_ring.map(Poly::dimension),
+            seat_ring.map(Poly::moduli),
+            pack_params.key_rows(),
+            pack_params.ring_dim,
+            pack_params.moduli
+        ))
     }
 }
 
