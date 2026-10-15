@@ -3,31 +3,42 @@
     reason = "test-target assertions; an abort is the failure report"
 )]
 
-use raven_inspire::inspiring::ClientPackingKeys;
+use raven_inspire::inspiring::{ClientPackingKeys, PackParams};
+use raven_inspire::math::GaussianSampler;
+use raven_inspire::params::{InspireParams, SecurityLevel};
+use raven_inspire::pir::PackingKeySeat;
+use raven_inspire::rlwe::RlweSecretKey;
 use raven_inspire::ServerSessionStore;
 
-fn empty_keys() -> ClientPackingKeys {
-    ClientPackingKeys {
-        y_body: Vec::new(),
-        z_body: Vec::new(),
-        y_all: Vec::new(),
-        y_all_ntt: Vec::new(),
-        y_bar_all: Vec::new(),
-        y_bar_all_ntt: Vec::new(),
-        full_key: false,
-        num_to_pack: 1,
-    }
+fn seat() -> PackingKeySeat {
+    let params = InspireParams {
+        ring_dim: 256,
+        q: 1_152_921_504_606_830_593,
+        crt_moduli: vec![1_152_921_504_606_830_593],
+        p: 65_537,
+        sigma: 6.4,
+        gadget_base: 1 << 20,
+        query_gadget_len: 3,
+        packing_gadget_len: 3,
+        security_level: SecurityLevel::Bits128,
+    };
+    let mut sampler = GaussianSampler::with_seed(params.sigma, 3);
+    let secret_key = RlweSecretKey::generate(&params, &mut sampler);
+    let keys = ClientPackingKeys::generate(&secret_key, &params, 16, [1; 32], &mut sampler)
+        .expect("16 is a legal width");
+    let pack_params = PackParams::try_new(&params, 16).expect("pack params");
+    PackingKeySeat::from_wire(keys, &pack_params, &params.ntt_context()).expect("seat")
 }
 
 #[test]
 fn a_flushed_handle_is_not_reissued_to_a_new_store() {
     let retired_store = ServerSessionStore::new();
-    let stale = retired_store.register(empty_keys()).expect("first handle");
+    let stale = retired_store.register(seat()).expect("first handle");
     drop(retired_store);
 
     let replacement_store = ServerSessionStore::new();
     let live = replacement_store
-        .register(empty_keys())
+        .register(seat())
         .expect("replacement handle");
 
     assert_ne!(
@@ -52,7 +63,7 @@ fn independent_store_allocations_are_strictly_monotonic() {
     let mut handles = Vec::new();
     for _ in 0..8 {
         let store = ServerSessionStore::new();
-        handles.push(store.register(empty_keys()).expect("fresh handle").0);
+        handles.push(store.register(seat()).expect("fresh handle").0);
     }
 
     assert!(
@@ -64,8 +75,8 @@ fn independent_store_allocations_are_strictly_monotonic() {
 #[test]
 fn removal_updates_occupancy_and_is_idempotent() {
     let store = ServerSessionStore::new();
-    let removed_handle = store.register(empty_keys()).expect("removed handle");
-    let retained_handle = store.register(empty_keys()).expect("retained handle");
+    let removed_handle = store.register(seat()).expect("removed handle");
+    let retained_handle = store.register(seat()).expect("retained handle");
     assert_eq!(store.len(), 2);
 
     assert!(store.remove(removed_handle).expect("first removal"));

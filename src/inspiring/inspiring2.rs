@@ -4,13 +4,15 @@
 //!
 //! Key split across the parties, all derived from the public `w_seed`:
 //! - server offline holds `w_mask` and its rotations `w_all`, giving `a_hat` + `bold_t`
-//! - the client's query carries `y_body = tau_g(s)*G - s*w_mask + error` and rotations
-//! - server online computes `y_all * bold_t + b_poly`
+//! - the client uploads `y_body = tau_g(s)*G - s*w_mask + error`
+//! - server online computes `y_all * bold_t + b_poly`, with `y_all[i] = tau_{g^i}(y_body)`
+//!   read as an index permutation of `y_body` in NTT form
 //!
 //! Ported from eprint 2025/1352 and
 //! <https://github.com/google/private-membership/tree/main/research/InsPIRe>.
 
 use crate::lwe::LweCiphertext;
+use crate::math::modular::csubq;
 use crate::math::{GaussianSampler, NttContext, Poly};
 use crate::params::InspireParams;
 use crate::rgsw::{gadget_decompose, GadgetVector};
@@ -164,7 +166,13 @@ impl PackParams {
                 ring_dim: n,
             });
         }
-        Self::build(params, num_to_pack, (2 * n / num_to_pack) + 1)
+        Self::build(params, num_to_pack, Self::partial_generator(n, num_to_pack))
+    }
+
+    /// `2n/gamma + 1`, whose powers have order gamma in Z*_{2n}; the server's rotation
+    /// tables and the client's key body must walk the same one.
+    fn partial_generator(ring_dim: usize, num_to_pack: usize) -> usize {
+        (2 * ring_dim / num_to_pack) + 1
     }
 
     /// Parameters for full packing (gamma = n).
@@ -616,8 +624,9 @@ impl OfflinePackingKeys {
     }
 }
 
-/// Client-side packing keys shipped with a query. Only `y_body` and `z_body` cross the
-/// wire; the rotations are derived on both sides.
+/// Client packing keys as they cross the wire. The server keeps them as a
+/// [`crate::pir::PackingKeySeat`] and reads every rotation through the automorphism
+/// tables, so neither side expands one.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(try_from = "ClientPackingKeysWire")]
 pub struct ClientPackingKeys {
@@ -629,25 +638,13 @@ pub struct ClientPackingKeys {
     /// prefix shifts every later read.
     #[serde(default)]
     pub z_body: Vec<Poly>,
-    /// `y_all[i] = tau_{g^i}(y_body)`, consumed by `packing_online`.
-    #[serde(skip_serializing, skip_deserializing)]
-    pub y_all: Vec<Vec<Poly>>,
-    /// `y_all` in NTT form.
-    #[serde(skip_serializing, skip_deserializing)]
-    pub y_all_ntt: Vec<Vec<Poly>>,
-    /// Conjugate rotations, full packing only.
-    #[serde(skip_serializing, skip_deserializing)]
-    pub y_bar_all: Vec<Vec<Poly>>,
-    /// `y_bar_all` in NTT form.
-    #[serde(skip_serializing, skip_deserializing)]
-    pub y_bar_all_ntt: Vec<Vec<Poly>>,
     /// Whether these keys are for full packing.
     pub full_key: bool,
     /// gamma.
     pub num_to_pack: usize,
 }
 
-/// The serialized fields of [`ClientPackingKeys`], in order, so the bytes are unchanged.
+/// [`ClientPackingKeys`] before its bodies are checked.
 #[derive(Deserialize)]
 struct ClientPackingKeysWire {
     y_body: Vec<Poly>,
@@ -693,10 +690,6 @@ impl TryFrom<ClientPackingKeysWire> for ClientPackingKeys {
         Ok(Self {
             y_body: wire.y_body,
             z_body: wire.z_body,
-            y_all: Vec::new(),
-            y_all_ntt: Vec::new(),
-            y_bar_all: Vec::new(),
-            y_bar_all_ntt: Vec::new(),
             full_key: wire.full_key,
             num_to_pack: wire.num_to_pack,
         })
@@ -705,66 +698,61 @@ impl TryFrom<ClientPackingKeysWire> for ClientPackingKeys {
 
 impl ClientPackingKeys {
     /// Derive packing keys from the secret key and the CRS `w_seed`.
+    ///
+    /// Reads the ring, the gadget and the generator only, so a client never builds
+    /// [`PackParams`] and its automorphism tables.
+    ///
+    /// Call once per secret key: `w_mask` is fixed by the seed, so a second key under
+    /// the same secret repeats the mask with fresh error. [`crate::pir::ClientSession`]
+    /// builds its key once and resends those bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`PackParamsError::IllegalWidth`] when `num_to_pack` is not a legal partial
+    /// packing width at `params.ring_dim`.
+    ///
+    /// ```
+    /// use raven_inspire::inspiring::ClientPackingKeys;
+    /// use raven_inspire::math::GaussianSampler;
+    /// use raven_inspire::params::InspireParams;
+    /// use raven_inspire::rlwe::RlweSecretKey;
+    ///
+    /// let params = InspireParams::secure_128_d2048();
+    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 1);
+    /// let secret_key = RlweSecretKey::generate(&params, &mut sampler);
+    /// let keys = ClientPackingKeys::generate(&secret_key, &params, 16, [7; 32], &mut sampler)?;
+    /// assert_eq!(keys.y_body.len(), params.packing_gadget_len);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn generate(
         sk: &RlweSecretKey,
-        pack_params: &PackParams,
+        params: &InspireParams,
+        num_to_pack: usize,
         w_seed: [u8; 32],
         sampler: &mut GaussianSampler,
-    ) -> Self {
-        let n = pack_params.ring_dim;
-        let q = pack_params.q;
-        let num_to_pack = pack_params.num_to_pack;
-        let gadget_len = pack_params.gadget.len;
-        let ctx = NttContext::with_moduli(n, &pack_params.moduli);
-
-        let w_mask = generate_mask_from_seed(w_seed, n, q, &pack_params.moduli, gadget_len);
-
-        let gen_pow = pack_params.gen_pows[1];
-        let y_body = generate_ksk_body(sk, gen_pow, &pack_params.gadget, &w_mask, sampler, &ctx);
-
-        let y_body_ntt: Vec<Poly> = y_body
-            .iter()
-            .map(|p| {
-                let mut pn = p.clone();
-                pn.to_ntt(&ctx);
-                pn
-            })
-            .collect();
-
-        let mut y_all = Vec::with_capacity(num_to_pack - 1);
-        let mut y_all_ntt = Vec::with_capacity(num_to_pack - 1);
-        for i in 0..(num_to_pack - 1) {
-            let g_pow_i = pack_params.gen_pows[i];
-            let table = pack_params.get_automorph_table(g_pow_i);
-
-            let rotated_ntt: Vec<Poly> = y_body_ntt
-                .iter()
-                .map(|poly_ntt| apply_automorphism_ntt(poly_ntt, table))
-                .collect();
-
-            let rotated: Vec<Poly> = rotated_ntt
-                .iter()
-                .map(|p| {
-                    let mut pc = p.clone();
-                    pc.from_ntt(&ctx);
-                    pc
-                })
-                .collect();
-
-            y_all.push(rotated);
-            y_all_ntt.push(rotated_ntt);
+    ) -> Result<Self, PackParamsError> {
+        let n = params.ring_dim;
+        if !PackParams::is_legal_width(n, num_to_pack) {
+            return Err(PackParamsError::IllegalWidth {
+                num_to_pack,
+                ring_dim: n,
+            });
         }
+        let q = params.q;
+        let moduli = params.moduli();
+        let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
+        let ctx = NttContext::with_moduli(n, moduli);
 
-        Self {
+        let w_mask = generate_mask_from_seed(w_seed, n, q, moduli, gadget.len);
+        let generator = PackParams::partial_generator(n, num_to_pack) % (2 * n);
+        let y_body = generate_ksk_body(sk, generator, &gadget, &w_mask, sampler, &ctx);
+
+        Ok(Self {
             y_body,
             z_body: vec![],
-            y_all,
-            y_all_ntt,
-            y_bar_all: vec![],
-            y_bar_all_ntt: vec![],
             full_key: false,
             num_to_pack,
-        }
+        })
     }
 
     /// [`Self::generate`] for full packing; `z_body` uses the conjugation index 2n-1.
@@ -777,7 +765,6 @@ impl ClientPackingKeys {
     ) -> Self {
         let n = pack_params.ring_dim;
         let q = pack_params.q;
-        let num_to_pack_half = n / 2;
         let two_n = 2 * n;
         let gadget_len = pack_params.gadget.len;
         let ctx = NttContext::with_moduli(n, &pack_params.moduli);
@@ -789,68 +776,9 @@ impl ClientPackingKeys {
         let y_body = generate_ksk_body(sk, gen_pow, &pack_params.gadget, &w_mask, sampler, &ctx);
         let z_body = generate_ksk_body(sk, two_n - 1, &pack_params.gadget, &v_mask, sampler, &ctx);
 
-        let y_body_ntt: Vec<Poly> = y_body
-            .iter()
-            .map(|p| {
-                let mut pn = p.clone();
-                pn.to_ntt(&ctx);
-                pn
-            })
-            .collect();
-
-        let mut y_all = Vec::with_capacity(num_to_pack_half - 1);
-        let mut y_all_ntt = Vec::with_capacity(num_to_pack_half - 1);
-        let mut y_bar_all = Vec::with_capacity(num_to_pack_half - 1);
-        let mut y_bar_all_ntt = Vec::with_capacity(num_to_pack_half - 1);
-
-        for i in 0..(num_to_pack_half - 1) {
-            let g_pow_i = pack_params.gen_pows[i];
-            let neg_g_pow_i = (two_n - g_pow_i) % two_n;
-
-            let table_pos = pack_params.get_automorph_table(g_pow_i);
-            let table_neg = pack_params.get_automorph_table(neg_g_pow_i);
-
-            // Apply both automorphisms simultaneously in NTT domain
-            let mut rotated_ntt = Vec::with_capacity(gadget_len);
-            let mut rotated_bar_ntt = Vec::with_capacity(gadget_len);
-
-            for poly_ntt in &y_body_ntt {
-                let (pos, neg) = apply_automorphism_ntt_double(poly_ntt, table_pos, table_neg);
-                rotated_ntt.push(pos);
-                rotated_bar_ntt.push(neg);
-            }
-
-            // Convert to coefficient form
-            let rotated: Vec<Poly> = rotated_ntt
-                .iter()
-                .map(|p| {
-                    let mut pc = p.clone();
-                    pc.from_ntt(&ctx);
-                    pc
-                })
-                .collect();
-            let rotated_bar: Vec<Poly> = rotated_bar_ntt
-                .iter()
-                .map(|p| {
-                    let mut pc = p.clone();
-                    pc.from_ntt(&ctx);
-                    pc
-                })
-                .collect();
-
-            y_all.push(rotated);
-            y_all_ntt.push(rotated_ntt);
-            y_bar_all.push(rotated_bar);
-            y_bar_all_ntt.push(rotated_bar_ntt);
-        }
-
         Self {
             y_body,
             z_body,
-            y_all,
-            y_all_ntt,
-            y_bar_all,
-            y_bar_all_ntt,
             full_key: true,
             num_to_pack: n,
         }
@@ -1191,29 +1119,107 @@ pub fn packing_online(
     RlweCiphertext::from_parts(precomp.a_hat.clone(), final_b)
 }
 
-/// [`packing_online`] with the client rotations already in NTT form.
-pub fn packing_online_ntt(
+/// [`packing_online`] over `y_body` alone, in NTT form: rotation i of digit k is read
+/// as `y_body_ntt[k][table_i[j]]`, because an automorphism permutes NTT slots. The
+/// output is byte-identical to [`packing_online`] over `generate_rotations(y_body)`.
+///
+/// # Errors
+///
+/// The key body, `bold_t_ntt` or `b_poly` is not the shape `pack_params` describes.
+/// [`packing_online`] skips what is missing, which packs a wrong plaintext.
+pub fn packing_online_gather(
     precomp: &PrecompInsPIR,
-    y_all_ntt: &[Vec<Poly>],
+    pack_params: &PackParams,
+    y_body_ntt: &[Poly],
     b_poly: &Poly,
     ctx: &NttContext,
-) -> RlweCiphertext {
-    let n = precomp.ring_dim;
-    let num_to_pack = precomp.num_to_pack;
-    let moduli = precomp.a_hat.moduli();
+) -> Result<RlweCiphertext, String> {
+    let n = pack_params.ring_dim;
+    let moduli = pack_params.moduli.as_slice();
+    let rotations = pack_params.num_to_pack.saturating_sub(1);
+    let digits = y_body_ntt.len();
+
+    if ctx.dimension() != n || ctx.moduli() != moduli {
+        return Err(format!(
+            "online packing refused: NTT context is for ring_dim {} moduli {:?}, pack \
+             params are for ring_dim {n} moduli {moduli:?}",
+            ctx.dimension(),
+            ctx.moduli()
+        ));
+    }
+    if precomp.num_to_pack != pack_params.num_to_pack
+        || precomp.ring_dim != n
+        || precomp.bold_t_ntt.len() != rotations
+    {
+        return Err(format!(
+            "online packing refused: offline output has gamma {} at ring_dim {} with {} \
+             NTT-form rotation rows, pack params expect gamma {} at ring_dim {n} with \
+             {rotations}",
+            precomp.num_to_pack,
+            precomp.ring_dim,
+            precomp.bold_t_ntt.len(),
+            pack_params.num_to_pack
+        ));
+    }
+    let on_ring = |poly: &Poly| poly.dimension() == n && poly.moduli() == moduli;
+    if digits != pack_params.gadget.len || !y_body_ntt.iter().all(|y| y.is_ntt() && on_ring(y)) {
+        return Err(format!(
+            "online packing refused: the key body must be {} NTT-form polynomials on the \
+             pack-params ring, got {digits}",
+            pack_params.gadget.len
+        ));
+    }
+    if let Some(row) = precomp
+        .bold_t_ntt
+        .iter()
+        .position(|t_i| t_i.len() != digits || !t_i.iter().all(|t| t.is_ntt() && on_ring(t)))
+    {
+        return Err(format!(
+            "online packing refused: offline rotation row {row} is not {digits} NTT-form \
+             digits on the pack-params ring"
+        ));
+    }
+    if b_poly.is_ntt() || !on_ring(b_poly) || precomp.a_hat.is_ntt() || !on_ring(&precomp.a_hat) {
+        return Err(
+            "online packing refused: b and a_hat must be coefficient-form polynomials on \
+             the pack-params ring"
+                .to_owned(),
+        );
+    }
+    // A short table would end the slot walk early and drop terms.
+    let tables = pack_params
+        .gen_pows
+        .iter()
+        .take(rotations)
+        .map(|g_pow| {
+            let table = pack_params
+                .automorph_tables
+                .get(g_pow.checked_sub(1)? / 2)?;
+            (table.len() == n).then_some(table.as_slice())
+        })
+        .collect::<Option<Vec<&[usize]>>>()
+        .filter(|tables| tables.len() == rotations)
+        .ok_or_else(|| {
+            format!(
+                "online packing refused: pack params hold no full automorphism table for \
+                 one of the {rotations} rotations at ring_dim {n}"
+            )
+        })?;
 
     let mut sum_b_ntt = Poly::zero_moduli(n, moduli);
     sum_b_ntt.to_ntt(ctx);
 
-    for i in 0..(num_to_pack - 1) {
-        if i < y_all_ntt.len() && i < precomp.bold_t.len() {
-            for (k, t_k) in precomp.bold_t[i].iter().enumerate() {
-                if k < y_all_ntt[i].len() {
-                    let mut t_ntt = t_k.clone();
-                    t_ntt.to_ntt(ctx);
-
-                    let term = y_all_ntt[i][k].mul_ntt_domain(&t_ntt, ctx);
-                    sum_b_ntt = sum_b_ntt.add_ntt_domain(&term);
+    for (m, &modulus) in moduli.iter().enumerate() {
+        let limb = m * n..(m + 1) * n;
+        let acc = &mut sum_b_ntt.coeffs_mut()[limb.clone()];
+        for (t_i, table) in precomp.bold_t_ntt.iter().zip(&tables) {
+            for (y_k, t_k) in y_body_ntt.iter().zip(t_i) {
+                // Sliced per limb first, so a table entry cannot reach another limb.
+                let y = &y_k.coeffs()[limb.clone()];
+                let t = &t_k.coeffs()[limb.clone()];
+                for ((acc_j, &source), &t_j) in acc.iter_mut().zip(*table).zip(t) {
+                    let product = ctx.pointwise_mul_single_at(y[source], t_j, m);
+                    *acc_j = csubq(*acc_j + product, modulus);
                 }
             }
         }
@@ -1222,76 +1228,7 @@ pub fn packing_online_ntt(
     sum_b_ntt.from_ntt(ctx);
     let final_b = b_poly + &sum_b_ntt;
 
-    RlweCiphertext::from_parts(precomp.a_hat.clone(), final_b)
-}
-
-/// [`packing_online`] with both `bold_t_ntt` and `y_all_ntt` pre-converted, so the
-/// loop is pure pointwise multiply-accumulate.
-pub fn packing_online_fully_ntt(
-    precomp: &PrecompInsPIR,
-    y_all_ntt: &[Vec<Poly>],
-    b_poly: &Poly,
-    ctx: &NttContext,
-) -> RlweCiphertext {
-    let n = precomp.ring_dim;
-    let num_to_pack = precomp.num_to_pack;
-    let moduli = precomp.a_hat.moduli();
-
-    let mut sum_b_ntt = Poly::zero_moduli(n, moduli);
-    sum_b_ntt.to_ntt(ctx);
-
-    for i in 0..(num_to_pack - 1) {
-        if i < y_all_ntt.len() && i < precomp.bold_t_ntt.len() {
-            for k in 0..precomp.bold_t_ntt[i].len() {
-                if k < y_all_ntt[i].len() {
-                    let term = y_all_ntt[i][k].mul_ntt_domain(&precomp.bold_t_ntt[i][k], ctx);
-                    sum_b_ntt = sum_b_ntt.add_ntt_domain(&term);
-                }
-            }
-        }
-    }
-
-    sum_b_ntt.from_ntt(ctx);
-    let final_b = b_poly + &sum_b_ntt;
-
-    RlweCiphertext::from_parts(precomp.a_hat.clone(), final_b)
-}
-
-impl ClientPackingKeys {
-    /// Rebuild the `y_all*` rotations a wire round-trip dropped, once per session
-    /// instead of once per respond call. No-op when both are already populated.
-    pub fn ensure_server_derivatives(&mut self, pack_params: &PackParams, ctx: &NttContext) {
-        if !self.y_all.is_empty() && !self.y_all_ntt.is_empty() {
-            return;
-        }
-        if self.y_body.is_empty() {
-            return;
-        }
-        let y_all_coeff = if self.y_all.is_empty() {
-            generate_rotations(pack_params, &self.y_body)
-        } else {
-            self.y_all.clone()
-        };
-        let y_all_ntt: Vec<Vec<Poly>> = y_all_coeff
-            .iter()
-            .map(|inner| {
-                inner
-                    .iter()
-                    .map(|poly| {
-                        let mut pn = poly.clone();
-                        pn.to_ntt(ctx);
-                        pn
-                    })
-                    .collect()
-            })
-            .collect();
-        if self.y_all.is_empty() {
-            self.y_all = y_all_coeff;
-        }
-        if self.y_all_ntt.is_empty() {
-            self.y_all_ntt = y_all_ntt;
-        }
-    }
+    Ok(RlweCiphertext::from_parts(precomp.a_hat.clone(), final_b))
 }
 
 /// `y_all[i] = tau_{g^i}(y_body)` for i in `0..gamma-1`.

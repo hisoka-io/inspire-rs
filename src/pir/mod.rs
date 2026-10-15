@@ -18,15 +18,16 @@ pub use encode_db::{
 };
 pub use extract::{extract, extract_inspiring, extract_two_packing, extract_with_variant};
 pub use query::{
-    query, query_seeded, ClientQuery, ClientState, PackingMode, SeededClientQuery,
-    ServerSessionHandle,
+    query, query_seeded, ClientQuery, ClientState, PackingKeySource, PackingMode, SeededBatchQuery,
+    SeededClientQuery, SeededQueryBatch, ServerSessionHandle,
 };
 pub use respond::{
-    respond, respond_inspiring, respond_inspiring_cached, respond_inspiring_cached_with_session,
-    respond_one_packing, respond_seeded, respond_seeded_inspiring, respond_seeded_inspiring_cached,
-    respond_seeded_inspiring_cached_with_session, respond_seeded_packed,
+    resolve_packing_seat, respond, respond_inspiring, respond_inspiring_cached,
+    respond_inspiring_cached_with_session, respond_one_packing, respond_seeded,
+    respond_seeded_batch, respond_seeded_inspiring, respond_seeded_inspiring_cached,
+    respond_seeded_inspiring_cached_with_session, respond_seeded_packed, respond_seeded_with_seat,
     respond_seeded_with_variant, respond_sequential, respond_with_variant, ServerInspiringCache,
     ServerResponse,
 };
-pub use session::{ClientSession, ServerSessionStore, SessionResidue};
+pub use session::{ClientSession, PackingKeySeat, ServerSessionStore, SessionResidue};
 pub use setup::{setup, setup_with_rng, EncodedDatabase, InspireCrs, ServerCrs, ShardData};

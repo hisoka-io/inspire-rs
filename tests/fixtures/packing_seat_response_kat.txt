@@ -1,0 +1,162 @@
+SESSIONKEY d2048 entry=32 seed=0x52455300 len=46252 fnv=0x9e958ba4e2568f3d
+RESP d2048 entry=32 seed=0x52455300 index=0 len=15558 fnv=0x489604bfd7e6eabb
+RESP d2048 entry=32 seed=0x52455300 index=1 len=15558 fnv=0x0a9e87bd160dd50c
+RESP d2048 entry=32 seed=0x52455300 index=2047 len=15558 fnv=0x8132ca6d8c333be0
+RESP d2048 entry=32 seed=0x52455300 index=2048 len=15558 fnv=0xbb76ed1cb7732e00
+RESP d2048 entry=32 seed=0x52455300 index=4113 len=15558 fnv=0x676f2a2a458b8694
+RESP d2048 entry=32 seed=0x52455300 index=6143 len=15558 fnv=0xe47c0ad90025fb22
+SESSIONKEY d2048 entry=32 seed=0x52455301 len=46252 fnv=0x1df1f9a279c7c4ee
+RESP d2048 entry=32 seed=0x52455301 index=0 len=15558 fnv=0x0e3901ea4b02cfa6
+RESP d2048 entry=32 seed=0x52455301 index=1 len=15558 fnv=0xd47fd1e8c00c5e09
+RESP d2048 entry=32 seed=0x52455301 index=2047 len=15558 fnv=0xdafb2395509b9a43
+RESP d2048 entry=32 seed=0x52455301 index=2048 len=15558 fnv=0xc7b8f6b599fca02b
+RESP d2048 entry=32 seed=0x52455301 index=4113 len=15558 fnv=0x226c2b43ee6e0ee8
+RESP d2048 entry=32 seed=0x52455301 index=6143 len=15558 fnv=0x049a6e91c36f0e9d
+SESSIONKEY d2048 entry=256 seed=0x52455300 len=46252 fnv=0x3fa0a444548defc9
+RESP d2048 entry=256 seed=0x52455300 index=0 len=16398 fnv=0xf763c7794b63ffe1
+RESP d2048 entry=256 seed=0x52455300 index=1 len=16398 fnv=0x0d87cbe2d0e0d223
+RESP d2048 entry=256 seed=0x52455300 index=2047 len=16398 fnv=0x75db98d933017261
+RESP d2048 entry=256 seed=0x52455300 index=2048 len=16398 fnv=0xa4cf840d945f187a
+RESP d2048 entry=256 seed=0x52455300 index=4113 len=16398 fnv=0x207625efc8f9d4af
+RESP d2048 entry=256 seed=0x52455300 index=6143 len=16398 fnv=0x03a2b9e8608bc3df
+SESSIONKEY d2048 entry=256 seed=0x52455301 len=46252 fnv=0x7c25ef3de45809b0
+RESP d2048 entry=256 seed=0x52455301 index=0 len=16398 fnv=0xb4a8f1e57d01e02f
+RESP d2048 entry=256 seed=0x52455301 index=1 len=16398 fnv=0x6118cfe6d9dfeb03
+RESP d2048 entry=256 seed=0x52455301 index=2047 len=16398 fnv=0xac2b9586c1516dba
+RESP d2048 entry=256 seed=0x52455301 index=2048 len=16398 fnv=0xd32e4df9c33d9dd1
+RESP d2048 entry=256 seed=0x52455301 index=4113 len=16398 fnv=0xae3fa5101adf34ad
+RESP d2048 entry=256 seed=0x52455301 index=6143 len=16398 fnv=0x731af782a726290f
+SESSIONKEY d2048 entry=512 seed=0x52455300 len=46252 fnv=0x708600fe1199a414
+RESP d2048 entry=512 seed=0x52455300 index=0 len=17358 fnv=0x81c5e016b24a9826
+RESP d2048 entry=512 seed=0x52455300 index=1 len=17358 fnv=0x65adf6d97a4d7c89
+RESP d2048 entry=512 seed=0x52455300 index=2047 len=17358 fnv=0x9b689e73e852d48c
+RESP d2048 entry=512 seed=0x52455300 index=2048 len=17358 fnv=0xbd4f0d5d8b5abb94
+RESP d2048 entry=512 seed=0x52455300 index=4113 len=17358 fnv=0x04a65d6256a83f54
+RESP d2048 entry=512 seed=0x52455300 index=6143 len=17358 fnv=0xe1a6be6936ad7871
+SESSIONKEY d2048 entry=512 seed=0x52455301 len=46252 fnv=0x7422d215a3e6b46c
+RESP d2048 entry=512 seed=0x52455301 index=0 len=17358 fnv=0xb541b327cb5793b3
+RESP d2048 entry=512 seed=0x52455301 index=1 len=17358 fnv=0xf00f8ab62d3fb7a6
+RESP d2048 entry=512 seed=0x52455301 index=2047 len=17358 fnv=0x6b8b62314640ec21
+RESP d2048 entry=512 seed=0x52455301 index=2048 len=17358 fnv=0xcaf433d4691fc6f8
+RESP d2048 entry=512 seed=0x52455301 index=4113 len=17358 fnv=0x34cffbbbadf10aa9
+RESP d2048 entry=512 seed=0x52455301 index=6143 len=17358 fnv=0x7cf93ecfe402c998
+SESSIONKEY d256-single-l3 entry=2 seed=0x534d4102 len=5932 fnv=0x2161e90cd3eb82d8
+RESP d256-single-l3 entry=2 seed=0x534d4102 index=0 len=2006 fnv=0x1f6b20019c2e63e8
+RESP d256-single-l3 entry=2 seed=0x534d4102 index=255 len=2006 fnv=0x7c38bfe7df2bb220
+RESP d256-single-l3 entry=2 seed=0x534d4102 index=256 len=2006 fnv=0x980e93840f955207
+RESP d256-single-l3 entry=2 seed=0x534d4102 index=511 len=2006 fnv=0x091494d110cdb79c
+RESP d256-single-l3 entry=2 seed=0x534d4102 index=700 len=2006 fnv=0x73240e30c7851138
+SESSIONKEY d256-single-l3 entry=4 seed=0x534d4104 len=5932 fnv=0xdb8f1d6c80af1c00
+RESP d256-single-l3 entry=4 seed=0x534d4104 index=0 len=2013 fnv=0x93f9c070cdad56e8
+RESP d256-single-l3 entry=4 seed=0x534d4104 index=255 len=2013 fnv=0x93cc33a07925d416
+RESP d256-single-l3 entry=4 seed=0x534d4104 index=256 len=2013 fnv=0x165af28c9020fb4c
+RESP d256-single-l3 entry=4 seed=0x534d4104 index=511 len=2013 fnv=0x29c38ebd43ae8a10
+RESP d256-single-l3 entry=4 seed=0x534d4104 index=700 len=2013 fnv=0x7c2d65af6576ba9d
+SESSIONKEY d256-single-l3 entry=32 seed=0x534d4120 len=5932 fnv=0xdd8ae41049496451
+RESP d256-single-l3 entry=32 seed=0x534d4120 index=0 len=2118 fnv=0x4463d9e9dc54264e
+RESP d256-single-l3 entry=32 seed=0x534d4120 index=255 len=2118 fnv=0xf6eb37d317819100
+RESP d256-single-l3 entry=32 seed=0x534d4120 index=256 len=2118 fnv=0x9a9920bac0cd55eb
+RESP d256-single-l3 entry=32 seed=0x534d4120 index=511 len=2118 fnv=0x761b395a7a02123a
+RESP d256-single-l3 entry=32 seed=0x534d4120 index=700 len=2118 fnv=0xe7664755ff4b8b36
+SESSIONKEY d256-single-l3 entry=64 seed=0x534d4140 len=5932 fnv=0x94fa823c2be371fc
+RESP d256-single-l3 entry=64 seed=0x534d4140 index=0 len=2238 fnv=0xd1c040984b84eb7a
+RESP d256-single-l3 entry=64 seed=0x534d4140 index=255 len=2238 fnv=0x68bacc31d6cda38f
+RESP d256-single-l3 entry=64 seed=0x534d4140 index=256 len=2238 fnv=0xaa287257ef9c7202
+RESP d256-single-l3 entry=64 seed=0x534d4140 index=511 len=2238 fnv=0x3d8594d23e9fbdc3
+RESP d256-single-l3 entry=64 seed=0x534d4140 index=700 len=2238 fnv=0xc87dce2d241233b1
+SESSIONKEY d256-single-l3 entry=256 seed=0x534d4200 len=5932 fnv=0xd5cdc3af691d4d6d
+RESP d256-single-l3 entry=256 seed=0x534d4200 index=0 len=2958 fnv=0x546f5ee5761d4705
+RESP d256-single-l3 entry=256 seed=0x534d4200 index=255 len=2958 fnv=0x5db4e79955200400
+RESP d256-single-l3 entry=256 seed=0x534d4200 index=256 len=2958 fnv=0xbe3dbd2d8abe7e52
+RESP d256-single-l3 entry=256 seed=0x534d4200 index=511 len=2958 fnv=0x62f670d75cf34b34
+RESP d256-single-l3 entry=256 seed=0x534d4200 index=700 len=2958 fnv=0xa8b5a386f6db3217
+SESSIONKEY d256-upstream2-l3 entry=2 seed=0x534d4102 len=5572 fnv=0x43e33eb09caa72bb
+RESP d256-upstream2-l3 entry=2 seed=0x534d4102 index=0 len=1885 fnv=0xbc95be0243cee4a3
+RESP d256-upstream2-l3 entry=2 seed=0x534d4102 index=255 len=1885 fnv=0xf4293e63b02ea8a9
+RESP d256-upstream2-l3 entry=2 seed=0x534d4102 index=256 len=1885 fnv=0x1a871e51f6ed679d
+RESP d256-upstream2-l3 entry=2 seed=0x534d4102 index=511 len=1885 fnv=0xd2c2811ebcff6b12
+RESP d256-upstream2-l3 entry=2 seed=0x534d4102 index=700 len=1885 fnv=0x42a2bad9f5a6514f
+SESSIONKEY d256-upstream2-l3 entry=4 seed=0x534d4104 len=5572 fnv=0x42f65ccc035a0acd
+RESP d256-upstream2-l3 entry=4 seed=0x534d4104 index=0 len=1892 fnv=0xf6c8df2c00246ebf
+RESP d256-upstream2-l3 entry=4 seed=0x534d4104 index=255 len=1892 fnv=0x31127a90143541a0
+RESP d256-upstream2-l3 entry=4 seed=0x534d4104 index=256 len=1892 fnv=0x2801cf3fc4ae887e
+RESP d256-upstream2-l3 entry=4 seed=0x534d4104 index=511 len=1892 fnv=0xd31fc5b967e78405
+RESP d256-upstream2-l3 entry=4 seed=0x534d4104 index=700 len=1892 fnv=0x522095d324a7f5b8
+SESSIONKEY d256-upstream2-l3 entry=32 seed=0x534d4120 len=5572 fnv=0xd8904839c2fb3496
+RESP d256-upstream2-l3 entry=32 seed=0x534d4120 index=0 len=1990 fnv=0x8299f0e9354d20b1
+RESP d256-upstream2-l3 entry=32 seed=0x534d4120 index=255 len=1990 fnv=0xf848fe7a3bef0fba
+RESP d256-upstream2-l3 entry=32 seed=0x534d4120 index=256 len=1990 fnv=0xf07045c080981fc3
+RESP d256-upstream2-l3 entry=32 seed=0x534d4120 index=511 len=1990 fnv=0x4362b58aa1f444c9
+RESP d256-upstream2-l3 entry=32 seed=0x534d4120 index=700 len=1990 fnv=0x6356fbc9ff11688c
+SESSIONKEY d256-upstream2-l3 entry=64 seed=0x534d4140 len=5572 fnv=0x1457ef8aa651cfbc
+RESP d256-upstream2-l3 entry=64 seed=0x534d4140 index=0 len=2102 fnv=0x7a59d14620564f6b
+RESP d256-upstream2-l3 entry=64 seed=0x534d4140 index=255 len=2102 fnv=0x7d71f906edc3bd27
+RESP d256-upstream2-l3 entry=64 seed=0x534d4140 index=256 len=2102 fnv=0xe59d87ed1a615665
+RESP d256-upstream2-l3 entry=64 seed=0x534d4140 index=511 len=2102 fnv=0xd16d88a21f3a6084
+RESP d256-upstream2-l3 entry=64 seed=0x534d4140 index=700 len=2102 fnv=0xcb8c40623e95342d
+SESSIONKEY d256-upstream2-l3 entry=256 seed=0x534d4200 len=5572 fnv=0x0b67ea532f52fe8d
+RESP d256-upstream2-l3 entry=256 seed=0x534d4200 index=0 len=2774 fnv=0x42da18307363465e
+RESP d256-upstream2-l3 entry=256 seed=0x534d4200 index=255 len=2774 fnv=0xccefc486814ced99
+RESP d256-upstream2-l3 entry=256 seed=0x534d4200 index=256 len=2774 fnv=0x1a7e596ff7babd55
+RESP d256-upstream2-l3 entry=256 seed=0x534d4200 index=511 len=2774 fnv=0x8816abf567c5a090
+RESP d256-upstream2-l3 entry=256 seed=0x534d4200 index=700 len=2774 fnv=0xcb64234a79405618
+SESSIONKEY d256-thirty2-l3 entry=2 seed=0x534d4102 len=5956 fnv=0x94a18656cd11325a
+RESP d256-thirty2-l3 entry=2 seed=0x534d4102 index=0 len=2014 fnv=0x5c4048801dcf541c
+RESP d256-thirty2-l3 entry=2 seed=0x534d4102 index=255 len=2014 fnv=0x0b6e51de83fa4204
+RESP d256-thirty2-l3 entry=2 seed=0x534d4102 index=256 len=2014 fnv=0x84f0a0b9c91197d7
+RESP d256-thirty2-l3 entry=2 seed=0x534d4102 index=511 len=2014 fnv=0x9673cb7f0d7f7534
+RESP d256-thirty2-l3 entry=2 seed=0x534d4102 index=700 len=2014 fnv=0x593c1978b1887068
+SESSIONKEY d256-thirty2-l3 entry=4 seed=0x534d4104 len=5956 fnv=0x332d26d62abfcf3d
+RESP d256-thirty2-l3 entry=4 seed=0x534d4104 index=0 len=2021 fnv=0x8669dfdf169962e0
+RESP d256-thirty2-l3 entry=4 seed=0x534d4104 index=255 len=2021 fnv=0x5b5b781dbcc7468b
+RESP d256-thirty2-l3 entry=4 seed=0x534d4104 index=256 len=2021 fnv=0x48382af6886f24e3
+RESP d256-thirty2-l3 entry=4 seed=0x534d4104 index=511 len=2021 fnv=0xe0178f2131be2e95
+RESP d256-thirty2-l3 entry=4 seed=0x534d4104 index=700 len=2021 fnv=0xc8fd57b7d4aa0b94
+SESSIONKEY d256-thirty2-l3 entry=32 seed=0x534d4120 len=5956 fnv=0x79df99b20cd913f7
+RESP d256-thirty2-l3 entry=32 seed=0x534d4120 index=0 len=2126 fnv=0x5d4e25f1a4b18301
+RESP d256-thirty2-l3 entry=32 seed=0x534d4120 index=255 len=2126 fnv=0x78bd380e7772c38e
+RESP d256-thirty2-l3 entry=32 seed=0x534d4120 index=256 len=2126 fnv=0x97e06b602536c04d
+RESP d256-thirty2-l3 entry=32 seed=0x534d4120 index=511 len=2126 fnv=0xa2e1de719c47896f
+RESP d256-thirty2-l3 entry=32 seed=0x534d4120 index=700 len=2126 fnv=0x44c9d8d40d0b5d20
+SESSIONKEY d256-thirty2-l3 entry=64 seed=0x534d4140 len=5956 fnv=0x432888a011114288
+RESP d256-thirty2-l3 entry=64 seed=0x534d4140 index=0 len=2246 fnv=0xa01ed8796d4ac733
+RESP d256-thirty2-l3 entry=64 seed=0x534d4140 index=255 len=2246 fnv=0x46f20928cf90962f
+RESP d256-thirty2-l3 entry=64 seed=0x534d4140 index=256 len=2246 fnv=0xd55ad3ecde4f57f2
+RESP d256-thirty2-l3 entry=64 seed=0x534d4140 index=511 len=2246 fnv=0xbf7d8f9c076a7719
+RESP d256-thirty2-l3 entry=64 seed=0x534d4140 index=700 len=2246 fnv=0x055a6692a3ec528b
+SESSIONKEY d256-thirty2-l3 entry=256 seed=0x534d4200 len=5956 fnv=0xad1d5b2c623251e2
+RESP d256-thirty2-l3 entry=256 seed=0x534d4200 index=0 len=2966 fnv=0xba5e054c9c97845c
+RESP d256-thirty2-l3 entry=256 seed=0x534d4200 index=255 len=2966 fnv=0x4a02bfd09cd8afae
+RESP d256-thirty2-l3 entry=256 seed=0x534d4200 index=256 len=2966 fnv=0x38d607e3c4b916ee
+RESP d256-thirty2-l3 entry=256 seed=0x534d4200 index=511 len=2966 fnv=0xf7a77c36f66fd3f4
+RESP d256-thirty2-l3 entry=256 seed=0x534d4200 index=700 len=2966 fnv=0xcf6c3cfacba5d353
+SESSIONKEY d256-adaptive2-l3 entry=2 seed=0x534d4102 len=5380 fnv=0x7000d5309168ea05
+RESP d256-adaptive2-l3 entry=2 seed=0x534d4102 index=0 len=1821 fnv=0x55329d519cca7b1b
+RESP d256-adaptive2-l3 entry=2 seed=0x534d4102 index=255 len=1821 fnv=0xd71f2863f7d7cb62
+RESP d256-adaptive2-l3 entry=2 seed=0x534d4102 index=256 len=1821 fnv=0x844a8853229896e4
+RESP d256-adaptive2-l3 entry=2 seed=0x534d4102 index=511 len=1821 fnv=0x9539f3f0ca483a0e
+RESP d256-adaptive2-l3 entry=2 seed=0x534d4102 index=700 len=1821 fnv=0x3496d3a62e4c3056
+SESSIONKEY d256-adaptive2-l3 entry=4 seed=0x534d4104 len=5380 fnv=0x787aa227d9fe50ff
+RESP d256-adaptive2-l3 entry=4 seed=0x534d4104 index=0 len=1828 fnv=0x0e35a5516349491b
+RESP d256-adaptive2-l3 entry=4 seed=0x534d4104 index=255 len=1828 fnv=0x49cd67bf1eee8513
+RESP d256-adaptive2-l3 entry=4 seed=0x534d4104 index=256 len=1828 fnv=0x6bfd3aaf7aa053ef
+RESP d256-adaptive2-l3 entry=4 seed=0x534d4104 index=511 len=1828 fnv=0x75599bd09e629464
+RESP d256-adaptive2-l3 entry=4 seed=0x534d4104 index=700 len=1828 fnv=0x13893ab5581d6892
+SESSIONKEY d256-adaptive2-l3 entry=32 seed=0x534d4120 len=5380 fnv=0x34d78219903e11a6
+RESP d256-adaptive2-l3 entry=32 seed=0x534d4120 index=0 len=1922 fnv=0xfb4914ccc6f6b764
+RESP d256-adaptive2-l3 entry=32 seed=0x534d4120 index=255 len=1922 fnv=0x0da925791ce25974
+RESP d256-adaptive2-l3 entry=32 seed=0x534d4120 index=256 len=1922 fnv=0x7591fd841a4b719d
+RESP d256-adaptive2-l3 entry=32 seed=0x534d4120 index=511 len=1922 fnv=0xd2e928a49a56f448
+RESP d256-adaptive2-l3 entry=32 seed=0x534d4120 index=700 len=1922 fnv=0x7ccdd1613afd47cd
+SESSIONKEY d256-adaptive2-l3 entry=64 seed=0x534d4140 len=5380 fnv=0xf3ab8103d96e1e31
+RESP d256-adaptive2-l3 entry=64 seed=0x534d4140 index=0 len=2030 fnv=0x4d72a7484e7869af
+RESP d256-adaptive2-l3 entry=64 seed=0x534d4140 index=255 len=2030 fnv=0x04fef3ae45ec2599
+RESP d256-adaptive2-l3 entry=64 seed=0x534d4140 index=256 len=2030 fnv=0x6371df7fb95f89c7
+RESP d256-adaptive2-l3 entry=64 seed=0x534d4140 index=511 len=2030 fnv=0xe5241be25104cc8b
+RESP d256-adaptive2-l3 entry=64 seed=0x534d4140 index=700 len=2030 fnv=0xf069dd1a3d037c5a
+SESSIONKEY d256-adaptive2-l3 entry=256 seed=0x534d4200 len=5380 fnv=0x11d421cd4179acdd
+RESP d256-adaptive2-l3 entry=256 seed=0x534d4200 index=0 len=2678 fnv=0x45574d924a416e55
+RESP d256-adaptive2-l3 entry=256 seed=0x534d4200 index=255 len=2678 fnv=0x1609fdf4f353bb58
+RESP d256-adaptive2-l3 entry=256 seed=0x534d4200 index=256 len=2678 fnv=0x17858155f7b109f5
+RESP d256-adaptive2-l3 entry=256 seed=0x534d4200 index=511 len=2678 fnv=0xf201883afb15f2fd
+RESP d256-adaptive2-l3 entry=256 seed=0x534d4200 index=700 len=2678 fnv=0x5934a019f709e33b

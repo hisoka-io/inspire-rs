@@ -445,7 +445,7 @@ fn the_query_path_neither_branches_on_nor_indexes_by_the_local_index() {
         (QUERY_SRC, "fn seeded_query_with_gadget"),
         (QUERY_SRC, "pub fn query("),
         (SESSION_SRC, "pub fn query("),
-        (SESSION_SRC, "pub fn query_seeded("),
+        (SESSION_SRC, "fn seeded_row("),
     ];
     for (src, header) in bodies {
         let body = item_source(src, header);
@@ -468,6 +468,38 @@ fn the_query_path_neither_branches_on_nor_indexes_by_the_local_index() {
         "query_seeded",
         &["seeded_query_with_gadget(crs, global_index, shard_config, rlwe_sk, sampler)"],
         "the seeded query must stay a forward to the pinned body",
+    );
+
+    let session_forward = "self.seeded_row(global_index, shard_config, sampler)";
+    let seeded = item_source(SESSION_SRC, "pub fn query_seeded(");
+    deny_query_body(seeded, "session query_seeded");
+    let batch = item_source(SESSION_SRC, "pub fn query_batch(");
+    for (wrapper, site) in [
+        (seeded, "session query_seeded"),
+        (batch, "session query_batch"),
+    ] {
+        require(
+            wrapper,
+            site,
+            &[session_forward],
+            "the session's seeded queries must stay a forward to the pinned body",
+        );
+        deny(
+            wrapper,
+            site,
+            &["local_index", "index_to_shard", "inverse_monomial"],
+            "only the pinned body may turn the index into a monomial",
+        );
+    }
+    // Once as the loop binding, once as the forwarded argument: the batch hands each
+    // index on and does nothing else with it.
+    assert_eq!(
+        batch
+            .replace("global_indices", "")
+            .matches("global_index")
+            .count(),
+        2,
+        "query_batch uses an index beyond forwarding it:\n{batch}"
     );
 }
 
@@ -1297,6 +1329,8 @@ fn dispatch_free_bodies() -> Vec<(&'static str, &'static str)> {
         (QUERY_SRC, "pub fn query_seeded("),
         (SESSION_SRC, "pub fn query("),
         (SESSION_SRC, "pub fn query_seeded("),
+        (SESSION_SRC, "pub fn query_batch("),
+        (SESSION_SRC, "fn seeded_row("),
     ]
 }
 
@@ -1597,6 +1631,8 @@ fn the_extractor_returns_whole_item_bodies() {
         (QUERY_SRC, "pub fn query_seeded("),
         (SESSION_SRC, "pub fn query("),
         (SESSION_SRC, "pub fn query_seeded("),
+        (SESSION_SRC, "pub fn query_batch("),
+        (SESSION_SRC, "fn seeded_row("),
         (rgsw_impls().0, "pub fn encrypt_with_rng<"),
         (rgsw_impls().1, "pub fn encrypt_with_rng<"),
     ];

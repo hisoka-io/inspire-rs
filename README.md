@@ -43,8 +43,11 @@ let response = respond_seeded_inspiring(&crs, &db, &query)?;
 let record = extract_inspiring(&crs, &state, &response, entry_size)?;
 ```
 
-`ClientSession` caches the packing material so repeated queries skip it. It can register
-the ~48 KiB of packing keys with a `ServerSessionStore` once and send a handle afterwards.
+`ClientSession` builds its packing keys once and reuses them for every query. It can register
+the ~48 KiB of packing keys with a `ServerSessionStore` once and send a handle afterwards; the
+server keeps a registered key as three polynomials (49,152 bytes at d=2048, at any record
+width). `ClientSession::query_batch` sends any number of queries under that one key, inline or
+by handle, and `respond_seeded_batch` answers them.
 
 ## Parameters and sizes
 
@@ -56,6 +59,8 @@ record are independent of database size:
 |---|---:|
 | First query, packing keys inline | 61,735 |
 | Query carrying a session handle | 15,491 |
+| Batch of n queries, packing keys inline | 46,264 + 15,477 n |
+| Batch of n queries by session handle | 20 + 15,477 n |
 | Response, mod-switched to a 36-bit modulus | 10,446 |
 | Response, unswitched | 17,358 |
 

@@ -258,8 +258,10 @@ fn direct_store_refuses_ntt_flag_in_wire_z_body() {
         "coefficient-domain packing-key z_body[0] required",
     );
 
+    let cache = ServerInspiringCache::new(&crs, &encoded).expect("valid server cache");
     let store = ServerSessionStore::new();
-    let Err(error) = store.register(keys) else {
+    let Err(error) = store.register_server_side(keys, cache.pack_params(), &params.ntt_context())
+    else {
         panic!("forged z_body polynomial was registered");
     };
     assert!(

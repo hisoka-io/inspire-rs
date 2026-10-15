@@ -605,25 +605,18 @@ fn every_inspiring_responder_refuses_packing_keys_on_the_wrong_ring() {
 
         let store = ServerSessionStore::new();
         let keys = seeded.inspiring_packing_keys.clone().expect("keys");
-        let handle = store
-            .register(keys)
-            .expect("store accepts coefficient-domain keys");
-        let mut by_handle = seeded.clone();
-        by_handle.inspiring_packing_keys = None;
-        by_handle.session_handle = Some(handle);
         assert_refused(
-            "session-resolved keys",
+            "session registration",
             || {
-                respond_seeded_inspiring_cached_with_session(
-                    &fx.crs,
-                    &fx.encoded,
-                    &by_handle,
-                    &fx.cache,
-                    Some(&store),
+                store.register_server_side(
+                    keys,
+                    fx.cache.pack_params(),
+                    &fx.crs.params.ntt_context(),
                 )
             },
             needle,
         );
+        assert!(store.is_empty(), "a refused key must not take a seat");
     }
 }
 

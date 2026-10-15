@@ -1,7 +1,7 @@
-//! Byte budget for the d=2048 client session, separating serialized bytes from
-//! the `#[serde(skip)]` rotation and automorph tables that stay resident. Holds
-//! the CRS under 2 MiB and decodes a query through a round-tripped CRS, which is
-//! what actually catches a `ServerCrs` wire-format change.
+//! Byte budget for the d=2048 session: what the client transfers, and what the
+//! server keeps per client and per table. Holds the CRS under 2 MiB and decodes a
+//! query through a round-tripped CRS, which is what actually catches a `ServerCrs`
+//! wire-format change.
 
 #![allow(
     clippy::expect_used,
@@ -11,7 +11,7 @@
 use raven_inspire::inspiring::{ClientPackingKeys, PackParams};
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::InspireParams;
-use raven_inspire::pir::{extract_inspiring, query, respond_inspiring, ServerCrs};
+use raven_inspire::pir::{extract_inspiring, query, respond_inspiring, PackingKeySeat, ServerCrs};
 use raven_inspire::setup;
 use serde::Serialize;
 
@@ -21,12 +21,6 @@ fn ssize<T: Serialize>(v: &T) -> u64 {
 
 fn mib(bytes: u64) -> f64 {
     bytes as f64 / (1024.0 * 1024.0)
-}
-
-fn poly_rows_bytes<T: Serialize>(rows: &[Vec<T>]) -> (usize, u64) {
-    let count = rows.iter().map(std::vec::Vec::len).sum();
-    let bytes = rows.iter().flat_map(|r| r.iter()).map(|p| ssize(p)).sum();
-    (count, bytes)
 }
 
 fn profile(entry_size: usize) {
@@ -44,20 +38,23 @@ fn profile(entry_size: usize) {
     let pp = PackParams::try_new(&crs.params, crs.inspiring_num_columns)
         .expect("CRS width must be legal");
     let pp_resident = ssize(&pp);
-    let keys = ClientPackingKeys::generate(&rlwe_sk, &pp, crs.inspiring_w_seed, &mut sampler);
+    let keys = ClientPackingKeys::generate(
+        &rlwe_sk,
+        &crs.params,
+        crs.inspiring_num_columns,
+        crs.inspiring_w_seed,
+        &mut sampler,
+    )
+    .expect("CRS width must be legal");
     let y_body = ssize(&keys.y_body);
     let z_body = ssize(&keys.z_body);
-    let (n_yall, y_all) = poly_rows_bytes(&keys.y_all);
-    let (_n_yall_ntt, y_all_ntt) = poly_rows_bytes(&keys.y_all_ntt);
-    let (_n_ybar, y_bar) = poly_rows_bytes(&keys.y_bar_all);
-    let (_n_ybar_ntt, y_bar_ntt) = poly_rows_bytes(&keys.y_bar_all_ntt);
+    let seat = PackingKeySeat::from_wire(keys, &pp, &crs.params.ntt_context()).expect("seat");
 
     let transferred = crs_total + y_body + z_body + rlwe;
-    let resident = transferred + pp_resident + y_all + y_all_ntt + y_bar + y_bar_ntt;
 
     eprintln!("================================================================");
     eprintln!(
-        "d={d}  entry_size={entry_size} B  num_columns(gamma)={}  num_to_pack={}  y_all rotations={n_yall}",
+        "d={d}  entry_size={entry_size} B  num_columns(gamma)={}  num_to_pack={}",
         crs.inspiring_num_columns, pp.num_to_pack
     );
     eprintln!("---- transferred / persisted (bincode-serialized) ----");
@@ -66,15 +63,15 @@ fn profile(entry_size: usize) {
     eprintln!("  y_body (+z_body)     {:>10.2} MiB", mib(y_body + z_body));
     eprintln!("  rlwe_sk              {:>10.2} MiB", mib(rlwe));
     eprintln!("  >>> TRANSFERRED      {:>10.2} MiB", mib(transferred));
-    eprintln!("---- resident-only (serde-skip, RAM) ----");
-    eprintln!("  pack_params tables   {:>10.2} MiB", mib(pp_resident));
-    eprintln!("  y_all                {:>10.2} MiB", mib(y_all));
-    eprintln!("  y_all_ntt            {:>10.2} MiB", mib(y_all_ntt));
+    eprintln!("---- server resident ----");
     eprintln!(
-        "  y_bar_all (+ntt)     {:>10.2} MiB",
-        mib(y_bar + y_bar_ntt)
+        "  pack_params tables   {:>10.2} MiB  (per table)",
+        mib(pp_resident)
     );
-    eprintln!("  >>> RESIDENT TOTAL   {:>10.2} MiB", mib(resident));
+    eprintln!(
+        "  packing-key seat     {:>10} B    (per client)",
+        seat.resident_bytes()
+    );
 
     // a CRS past 2 MiB means a public matrix re-entered the wire format
     assert!(

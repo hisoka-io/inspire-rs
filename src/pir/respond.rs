@@ -3,14 +3,23 @@
 use crate::par_prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::inspiring::{packing_online, packing_online_fully_ntt};
+use std::sync::Arc;
+
+use crate::inspiring::{
+    packing_offline, packing_online_gather, ClientPackingKeys, OfflinePackingKeys, PackParams,
+};
 use crate::math::poly::{pack_coefficients_tight, unpack_coefficients_tight, TightBytes};
 use crate::math::{NttContext, Poly};
 use crate::params::InspireVariant;
+use crate::rgsw::{RgswCiphertext, SeededRgswCiphertext};
 use crate::rlwe::RlweCiphertext;
 
 use super::error::{pir_err, Result};
-use super::query::{ClientQuery, PackingMode, SeededClientQuery};
+use super::query::{
+    ClientQuery, PackingKeySource, PackingMode, SeededBatchQuery, SeededClientQuery,
+    SeededQueryBatch, ServerSessionHandle,
+};
+use super::session::{PackingKeySeat, ServerSessionStore};
 use super::setup::{EncodedDatabase, ServerCrs, ShardData};
 
 /// Server response: the packed ciphertext, or one ciphertext per column.
@@ -457,13 +466,17 @@ fn require_crs_rgsw_gadget(
     crs: &ServerCrs,
     query: &ClientQuery,
 ) -> Result<()> {
-    require_rgsw_shape(
-        operation,
-        crs,
-        &query.rgsw_ciphertext.gadget,
-        query.rgsw_ciphertext.rows.len(),
-    )?;
-    for (row_index, row) in query.rgsw_ciphertext.rows.iter().enumerate() {
+    require_rgsw_rows(operation, crs, &query.rgsw_ciphertext)?;
+    require_inline_key_shape(crs, query.inspiring_packing_keys.as_ref())
+}
+
+fn require_rgsw_rows(
+    operation: &'static str,
+    crs: &ServerCrs,
+    rgsw: &RgswCiphertext,
+) -> Result<()> {
+    require_rgsw_shape(operation, crs, &rgsw.gadget, rgsw.rows.len())?;
+    for (row_index, row) in rgsw.rows.iter().enumerate() {
         for (component, poly) in [("a", &row.a), ("b", &row.b)] {
             require_rgsw_polynomial_shape(operation, crs, poly, row_index, component)?;
             if poly.is_ntt() {
@@ -474,13 +487,6 @@ fn require_crs_rgsw_gadget(
             }
         }
     }
-    if let Some(keys) = query.inspiring_packing_keys.as_ref() {
-        crate::pir::session::require_wire_packing_body_shape(
-            keys,
-            crs.params.ring_dim,
-            crs.params.moduli(),
-        )?;
-    }
     Ok(())
 }
 
@@ -489,13 +495,17 @@ fn require_seeded_crs_rgsw_gadget(
     crs: &ServerCrs,
     query: &SeededClientQuery,
 ) -> Result<()> {
-    require_rgsw_shape(
-        operation,
-        crs,
-        &query.rgsw_ciphertext.gadget,
-        query.rgsw_ciphertext.rows.len(),
-    )?;
-    for (row_index, row) in query.rgsw_ciphertext.rows.iter().enumerate() {
+    require_seeded_rgsw_rows(operation, crs, &query.rgsw_ciphertext)?;
+    require_inline_key_shape(crs, query.inspiring_packing_keys.as_ref())
+}
+
+fn require_seeded_rgsw_rows(
+    operation: &'static str,
+    crs: &ServerCrs,
+    rgsw: &SeededRgswCiphertext,
+) -> Result<()> {
+    require_rgsw_shape(operation, crs, &rgsw.gadget, rgsw.rows.len())?;
+    for (row_index, row) in rgsw.rows.iter().enumerate() {
         require_rgsw_polynomial_shape(operation, crs, &row.b, row_index, "b")?;
         if row.b.is_ntt() {
             return Err(pir_err!(
@@ -504,14 +514,17 @@ fn require_seeded_crs_rgsw_gadget(
             ));
         }
     }
-    if let Some(keys) = query.inspiring_packing_keys.as_ref() {
+    Ok(())
+}
+
+fn require_inline_key_shape(crs: &ServerCrs, keys: Option<&ClientPackingKeys>) -> Result<()> {
+    keys.map_or(Ok(()), |keys| {
         crate::pir::session::require_wire_packing_body_shape(
             keys,
             crs.params.ring_dim,
             crs.params.moduli(),
-        )?;
-    }
-    Ok(())
+        )
+    })
 }
 
 fn require_rgsw_polynomial_shape(
@@ -570,12 +583,11 @@ fn require_rgsw_shape(
 }
 
 fn plaintext_multiply_columns(
-    query: &ClientQuery,
+    rgsw: &RgswCiphertext,
     shard: &ShardData,
     ctx: &NttContext,
 ) -> Result<Vec<RlweCiphertext>> {
-    let folding_ciphertext = query
-        .rgsw_ciphertext
+    let folding_ciphertext = rgsw
         .rows
         .first()
         .ok_or_else(|| pir_err!("plaintext-multiply query has no ciphertext row"))?;
@@ -584,6 +596,18 @@ fn plaintext_multiply_columns(
         .par_iter()
         .map(|db_poly| folding_ciphertext.poly_mul(db_poly, ctx))
         .collect())
+}
+
+fn checked_shard<'a>(
+    operation: &'static str,
+    crs: &ServerCrs,
+    encoded_db: &'a EncodedDatabase,
+    shard_id: u32,
+) -> Result<&'a ShardData> {
+    require_shard_geometry(operation, crs, encoded_db)?;
+    let shard = require_dense_shard(operation, encoded_db, shard_id)?;
+    require_shard_width(operation, crs, shard)?;
+    Ok(shard)
 }
 
 /// Respond with one RLWE ciphertext per column, in parallel.
@@ -599,7 +623,7 @@ pub fn respond(
     let shard = require_dense_shard("respond", encoded_db, query.shard_id)?;
     require_shard_width("respond", crs, shard)?;
 
-    let column_ciphertexts = plaintext_multiply_columns(query, shard, &ctx)?;
+    let column_ciphertexts = plaintext_multiply_columns(&query.rgsw_ciphertext, shard, &ctx)?;
 
     let combined = if column_ciphertexts.len() == 1 {
         column_ciphertexts[0].clone()
@@ -686,7 +710,7 @@ pub fn respond_one_packing(
     let shard = require_dense_shard("respond_one_packing", encoded_db, query.shard_id)?;
     require_shard_width("respond_one_packing", crs, shard)?;
 
-    let column_ciphertexts = plaintext_multiply_columns(query, shard, &ctx)?;
+    let column_ciphertexts = plaintext_multiply_columns(&query.rgsw_ciphertext, shard, &ctx)?;
 
     let lwe_cts: Vec<_> = column_ciphertexts
         .iter()
@@ -714,29 +738,71 @@ pub fn respond_inspiring(
     encoded_db: &EncodedDatabase,
     query: &ClientQuery,
 ) -> Result<ServerResponse> {
-    use crate::inspiring::{generate_rotations, packing_offline, OfflinePackingKeys, PackParams};
+    const OPERATION: &str = "respond_inspiring";
+    require_crs_rgsw_gadget(OPERATION, crs, query)?;
+    let keys = require_inline_keys(query)?;
+    let shard = checked_shard(OPERATION, crs, encoded_db, query.shard_id)?;
 
-    require_crs_rgsw_gadget("respond_inspiring", crs, query)?;
+    let pack_params = PackParams::try_new(&crs.params, shard.polynomials.len())
+        .map_err(|e| pir_err!("shard column count is not a legal InspiRING width: {e}"))?;
+    let offline_keys = OfflinePackingKeys::generate(&pack_params, crs.inspiring_w_seed);
+    let seat = PackingKeySeat::from_wire(keys.clone(), &pack_params, &crs.params.ntt_context())?;
+
+    pack_shard(
+        crs,
+        shard,
+        &query.rgsw_ciphertext,
+        &pack_params,
+        &offline_keys,
+        &seat,
+    )
+}
+
+fn require_inline_keys(query: &ClientQuery) -> Result<&ClientPackingKeys> {
+    query
+        .inspiring_packing_keys
+        .as_ref()
+        .ok_or_else(|| pir_err!("InspiRING client packing keys missing from query"))
+}
+
+/// The one InspiRING responder body: fold the shard under the query, then pack the
+/// columns under `seat`. Inline and registered keys both arrive here as a seat.
+fn pack_shard(
+    crs: &ServerCrs,
+    shard: &ShardData,
+    rgsw: &RgswCiphertext,
+    pack_params: &PackParams,
+    offline_keys: &OfflinePackingKeys,
+    seat: &PackingKeySeat,
+) -> Result<ServerResponse> {
+    let num_columns = shard.polynomials.len();
+    if pack_params.num_to_pack != num_columns {
+        return Err(pir_err!(
+            "InspiRING pack params are for gamma = {}, shard {} holds {num_columns} columns; \
+             refusing to pack under a cache built for another table shape",
+            pack_params.num_to_pack,
+            shard.id
+        ));
+    }
+    seat.require_width(pack_params)?;
     let d = crs.ring_dim();
     let ctx = crs.params.ntt_context();
 
-    let client_packing_keys = query
-        .inspiring_packing_keys
-        .as_ref()
-        .ok_or_else(|| pir_err!("InspiRING client packing keys missing from query"))?;
+    let profile = RespondDebugSwitches::get().profile;
+    let t_extprod_start = profile.then(std::time::Instant::now);
 
-    require_shard_geometry("respond_inspiring", crs, encoded_db)?;
-    let shard = require_dense_shard("respond_inspiring", encoded_db, query.shard_id)?;
-    require_shard_width("respond_inspiring", crs, shard)?;
+    let column_ciphertexts = plaintext_multiply_columns(rgsw, shard, &ctx)?;
 
-    let column_ciphertexts = plaintext_multiply_columns(query, shard, &ctx)?;
+    let t_extprod_end = t_extprod_start.map(|s| s.elapsed());
+    let t_extract_start = t_extprod_end.map(|_| std::time::Instant::now());
 
     let lwe_cts: Vec<_> = column_ciphertexts
         .iter()
         .map(crate::rlwe::RlweCiphertext::sample_extract_coeff0)
         .collect();
 
-    let num_columns = lwe_cts.len();
+    let t_extract_end = t_extract_start.map(|s| s.elapsed());
+    let t_bpoly_start = t_extract_end.map(|_| std::time::Instant::now());
 
     // InspiRING consumes the RLWE a-polynomials, not the LWE a-vectors: the latter are
     // negacyclic extractions with a different structure.
@@ -753,33 +819,38 @@ pub fn respond_inspiring(
     }
     let b_poly = Poly::from_coeffs_moduli(b_coeffs, crs.params.moduli());
 
-    let pack_params = PackParams::try_new(&crs.params, num_columns)
-        .map_err(|e| pir_err!("shard column count is not a legal InspiRING width: {e}"))?;
-    let offline_keys = OfflinePackingKeys::generate(&pack_params, crs.inspiring_w_seed);
-    let precomp = packing_offline(&pack_params, &offline_keys, &a_ct_tilde, &ctx);
+    let t_bpoly_end = t_bpoly_start.map(|s| s.elapsed());
+    let t_packoff_start = t_bpoly_end.map(|_| std::time::Instant::now());
 
-    // The wire format drops y_all, so re-derive it from y_body when absent.
-    // Inlined keys bypass `register_server_side`, so the geometry guard has to run here
-    // too or a width mismatch returns a successful response carrying wrong plaintext.
-    crate::pir::session::ensure_packing_width_matches(client_packing_keys, &pack_params)?;
-    let derived_y_all = if client_packing_keys.y_all.is_empty() {
-        if client_packing_keys.y_body.is_empty() {
-            return Err(pir_err!(
-                "InspiRING packing keys invalid: y_all and y_body are both empty"
-            ));
-        }
-        Some(generate_rotations(
-            &pack_params,
-            &client_packing_keys.y_body,
-        ))
-    } else {
-        None
-    };
-    let y_all: &[Vec<Poly>] = derived_y_all
-        .as_deref()
-        .unwrap_or(&client_packing_keys.y_all);
+    let precomp = packing_offline(pack_params, offline_keys, &a_ct_tilde, &ctx);
 
-    let packed = packing_online(&precomp, y_all, &b_poly, &ctx);
+    let t_packoff_end = t_packoff_start.map(|s| s.elapsed());
+    let t_packonline_start = t_packoff_end.map(|_| std::time::Instant::now());
+
+    let packed = packing_online_gather(&precomp, pack_params, seat.y_body_ntt(), &b_poly, &ctx)
+        .map_err(|e| pir_err!("{e}"))?;
+
+    let t_packonline_end = t_packonline_start.map(|s| s.elapsed());
+
+    // Microseconds per field.
+    if let (Some(e), Some(x), Some(b), Some(po), Some(pn)) = (
+        t_extprod_end,
+        t_extract_end,
+        t_bpoly_end,
+        t_packoff_end,
+        t_packonline_end,
+    ) {
+        eprintln!(
+            "RAVEN_PROFILE num_cols={} extprod_us={} extract_coeff0_us={} \
+             bpoly_us={} pack_offline_us={} pack_online_us={}",
+            num_columns,
+            e.as_micros(),
+            x.as_micros(),
+            b.as_micros(),
+            po.as_micros(),
+            pn.as_micros()
+        );
+    }
 
     Ok(ServerResponse {
         ciphertext: packed,
@@ -946,71 +1017,20 @@ pub fn respond_inspiring_cached(
     query: &ClientQuery,
     cache: &ServerInspiringCache,
 ) -> Result<ServerResponse> {
-    use crate::inspiring::{generate_rotations, packing_offline};
-
-    require_crs_rgsw_gadget("respond_inspiring_cached", crs, query)?;
-    let d = crs.ring_dim();
-    let ctx = crs.params.ntt_context();
-
-    let client_packing_keys = query
-        .inspiring_packing_keys
-        .as_ref()
-        .ok_or_else(|| pir_err!("InspiRING client packing keys missing from query"))?;
-
-    require_shard_geometry("respond_inspiring_cached", crs, encoded_db)?;
-    let shard = require_dense_shard("respond_inspiring_cached", encoded_db, query.shard_id)?;
-    require_shard_width("respond_inspiring_cached", crs, shard)?;
-
-    let column_ciphertexts = plaintext_multiply_columns(query, shard, &ctx)?;
-
-    let lwe_cts: Vec<_> = column_ciphertexts
-        .iter()
-        .map(crate::rlwe::RlweCiphertext::sample_extract_coeff0)
-        .collect();
-
-    let a_ct_tilde: Vec<Poly> = column_ciphertexts
-        .iter()
-        .map(|rlwe| rlwe.a.clone())
-        .collect();
-
-    let mut b_coeffs = vec![0u64; d];
-    for (i, lwe) in lwe_cts.iter().enumerate() {
-        if i < d {
-            b_coeffs[i] = lwe.b;
-        }
-    }
-    let b_poly = Poly::from_coeffs_moduli(b_coeffs, crs.params.moduli());
-
-    let precomp = packing_offline(&cache.pack_params, &cache.offline_keys, &a_ct_tilde, &ctx);
-
-    // Inlined keys bypass `register_server_side`, so the geometry guard has to run here
-    // too or a width mismatch returns a successful response carrying wrong plaintext.
-    crate::pir::session::ensure_packing_width_matches(client_packing_keys, &cache.pack_params)?;
-    let derived_y_all = if client_packing_keys.y_all.is_empty() {
-        if client_packing_keys.y_body.is_empty() {
-            return Err(pir_err!(
-                "InspiRING packing keys invalid: y_all and y_body are both empty"
-            ));
-        }
-        Some(generate_rotations(
-            &cache.pack_params,
-            &client_packing_keys.y_body,
-        ))
-    } else {
-        None
-    };
-    let y_all: &[Vec<Poly>] = derived_y_all
-        .as_deref()
-        .unwrap_or(&client_packing_keys.y_all);
-
-    let packed = packing_online(&precomp, y_all, &b_poly, &ctx);
-
-    Ok(ServerResponse {
-        ciphertext: packed,
-        column_ciphertexts: vec![],
-        packing_mode: Some(PackingMode::Inspiring),
-        packed_coefficients: packed_coefficient_count(cache.pack_params.num_to_pack)?,
-    })
+    const OPERATION: &str = "respond_inspiring_cached";
+    require_crs_rgsw_gadget(OPERATION, crs, query)?;
+    let keys = require_inline_keys(query)?;
+    let shard = checked_shard(OPERATION, crs, encoded_db, query.shard_id)?;
+    let seat =
+        PackingKeySeat::from_wire(keys.clone(), &cache.pack_params, &crs.params.ntt_context())?;
+    pack_shard(
+        crs,
+        shard,
+        &query.rgsw_ciphertext,
+        &cache.pack_params,
+        &cache.offline_keys,
+        &seat,
+    )
 }
 
 /// Seeded sibling of [`respond_inspiring_cached`].
@@ -1032,32 +1052,14 @@ pub fn respond_inspiring_cached_with_session(
     encoded_db: &EncodedDatabase,
     query: &ClientQuery,
     cache: &ServerInspiringCache,
-    session_store: Option<&super::session::ServerSessionStore>,
+    session_store: Option<&ServerSessionStore>,
 ) -> Result<ServerResponse> {
-    use crate::inspiring::{generate_rotations, packing_offline};
+    const OPERATION: &str = "respond_inspiring_cached_with_session";
+    require_crs_rgsw_gadget(OPERATION, crs, query)?;
 
-    require_crs_rgsw_gadget("respond_inspiring_cached_with_session", crs, query)?;
-    let d = crs.ring_dim();
-    let ctx = crs.params.ntt_context();
-
-    let resolved_keys = match (&query.inspiring_packing_keys, query.session_handle) {
-        (Some(inline), None) => PackingKeys::Inline(inline),
-        (None, Some(handle)) => {
-            let store = session_store.ok_or_else(|| {
-                pir_err!(
-                    "query references session_handle {:?} but no \
-                     ServerSessionStore was supplied to respond_*_with_session",
-                    handle
-                )
-            })?;
-            let arc = store.get(handle)?.ok_or_else(|| {
-                pir_err!(
-                    "ServerSessionStore has no entry for session_handle {:?}",
-                    handle
-                )
-            })?;
-            PackingKeys::Owned(arc)
-        }
+    let key = match (&query.inspiring_packing_keys, query.session_handle) {
+        (Some(inline), None) => ResolvedKey::Inline(inline),
+        (None, Some(handle)) => ResolvedKey::Registered(registered_seat(handle, session_store)?),
         (Some(_), Some(h)) => {
             return Err(pir_err!(
                 "query has both inlined inspiring_packing_keys AND \
@@ -1072,141 +1074,128 @@ pub fn respond_inspiring_cached_with_session(
             ))
         }
     };
-    let client_packing_keys = resolved_keys.as_ref();
 
-    require_shard_geometry("respond_inspiring_cached_with_session", crs, encoded_db)?;
-    let shard = require_dense_shard(
-        "respond_inspiring_cached_with_session",
-        encoded_db,
-        query.shard_id,
-    )?;
-    require_shard_width("respond_inspiring_cached_with_session", crs, shard)?;
+    let shard = checked_shard(OPERATION, crs, encoded_db, query.shard_id)?;
+    let seat = key.into_seat(crs, cache)?;
+    pack_shard(
+        crs,
+        shard,
+        &query.rgsw_ciphertext,
+        &cache.pack_params,
+        &cache.offline_keys,
+        &seat,
+    )
+}
 
-    let profile = RespondDebugSwitches::get().profile;
-    let t_extprod_start = if profile {
-        Some(std::time::Instant::now())
-    } else {
-        None
-    };
+/// A query's packing key after lookup: inline keys still to be checked into a
+/// request-scoped seat, or the seat a handle was registered under.
+enum ResolvedKey<'a> {
+    Inline(&'a ClientPackingKeys),
+    Registered(Arc<PackingKeySeat>),
+}
 
-    let column_ciphertexts = plaintext_multiply_columns(query, shard, &ctx)?;
-
-    let t_extprod_end = t_extprod_start.map(|s| s.elapsed());
-
-    let t_extract_start = t_extprod_end.map(|_| std::time::Instant::now());
-
-    let lwe_cts: Vec<_> = column_ciphertexts
-        .iter()
-        .map(crate::rlwe::RlweCiphertext::sample_extract_coeff0)
-        .collect();
-
-    let t_extract_end = t_extract_start.map(|s| s.elapsed());
-
-    let num_columns = lwe_cts.len();
-
-    let t_bpoly_start = t_extract_end.map(|_| std::time::Instant::now());
-
-    let a_ct_tilde: Vec<Poly> = column_ciphertexts
-        .iter()
-        .map(|rlwe| rlwe.a.clone())
-        .collect();
-
-    let mut b_coeffs = vec![0u64; d];
-    for (i, lwe) in lwe_cts.iter().enumerate() {
-        if i < d {
-            b_coeffs[i] = lwe.b;
+impl ResolvedKey<'_> {
+    fn into_seat(
+        self,
+        crs: &ServerCrs,
+        cache: &ServerInspiringCache,
+    ) -> Result<Arc<PackingKeySeat>> {
+        match self {
+            Self::Inline(keys) => Ok(Arc::new(PackingKeySeat::from_wire(
+                keys.clone(),
+                &cache.pack_params,
+                &crs.params.ntt_context(),
+            )?)),
+            Self::Registered(seat) => Ok(seat),
         }
     }
-    let b_poly = Poly::from_coeffs_moduli(b_coeffs, crs.params.moduli());
+}
 
-    let t_bpoly_end = t_bpoly_start.map(|s| s.elapsed());
-
-    let t_packoff_start = t_bpoly_end.map(|_| std::time::Instant::now());
-
-    let precomp = packing_offline(&cache.pack_params, &cache.offline_keys, &a_ct_tilde, &ctx);
-
-    let t_packoff_end = t_packoff_start.map(|s| s.elapsed());
-
-    let t_packonline_start = t_packoff_end.map(|_| std::time::Instant::now());
-
-    // Inlined keys bypass `register_server_side`, so the geometry guard has to run here
-    // too or a width mismatch returns a successful response carrying wrong plaintext.
-    crate::pir::session::ensure_packing_width_matches(client_packing_keys, &cache.pack_params)?;
-    let derived_y_all = if client_packing_keys.y_all.is_empty() {
-        if client_packing_keys.y_body.is_empty() {
-            return Err(pir_err!(
-                "InspiRING packing keys invalid: y_all and y_body are both empty"
-            ));
-        }
-        Some(generate_rotations(
-            &cache.pack_params,
-            &client_packing_keys.y_body,
-        ))
-    } else {
-        None
-    };
-    let y_all: &[Vec<Poly>] = derived_y_all
-        .as_deref()
-        .unwrap_or(&client_packing_keys.y_all);
-
-    // y_all_ntt is `#[serde(skip)]`, so it is populated only in-process; when it is
-    // there the fully-NTT path avoids a per-call `to_ntt`.
-    let force_packing_online = RespondDebugSwitches::get().force_packing_online;
-    let packed = if !force_packing_online
-        && !client_packing_keys.y_all_ntt.is_empty()
-        && derived_y_all.is_none()
-    {
-        packing_online_fully_ntt(&precomp, &client_packing_keys.y_all_ntt, &b_poly, &ctx)
-    } else {
-        packing_online(&precomp, y_all, &b_poly, &ctx)
-    };
-
-    let t_packonline_end = t_packonline_start.map(|s| s.elapsed());
-
-    if profile {
-        // Microseconds per field.
-        if let (Some(e), Some(x), Some(b), Some(po), Some(pn)) = (
-            t_extprod_end,
-            t_extract_end,
-            t_bpoly_end,
-            t_packoff_end,
-            t_packonline_end,
-        ) {
-            eprintln!(
-                "RAVEN_PROFILE num_cols={} extprod_us={} extract_coeff0_us={} \
-                 bpoly_us={} pack_offline_us={} pack_online_us={}",
-                num_columns,
-                e.as_micros(),
-                x.as_micros(),
-                b.as_micros(),
-                po.as_micros(),
-                pn.as_micros()
-            );
-        }
-    }
-
-    Ok(ServerResponse {
-        ciphertext: packed,
-        column_ciphertexts: vec![],
-        packing_mode: Some(PackingMode::Inspiring),
-        packed_coefficients: packed_coefficient_count(num_columns)?,
+fn registered_seat(
+    handle: ServerSessionHandle,
+    session_store: Option<&ServerSessionStore>,
+) -> Result<Arc<PackingKeySeat>> {
+    let store = session_store.ok_or_else(|| {
+        pir_err!(
+            "query references session_handle {:?} but no \
+             ServerSessionStore was supplied to respond_*_with_session",
+            handle
+        )
+    })?;
+    store.get(handle)?.ok_or_else(|| {
+        pir_err!(
+            "ServerSessionStore has no entry for session_handle {:?}",
+            handle
+        )
     })
 }
 
-/// Holds inlined keys by reference or store-resolved keys by `Arc`, so neither path
-/// clones the ~48 KiB payload.
-enum PackingKeys<'a> {
-    Inline(&'a crate::inspiring::ClientPackingKeys),
-    Owned(std::sync::Arc<crate::inspiring::ClientPackingKeys>),
-}
-
-impl PackingKeys<'_> {
-    fn as_ref(&self) -> &crate::inspiring::ClientPackingKeys {
-        match self {
-            PackingKeys::Inline(k) => k,
-            PackingKeys::Owned(arc) => arc.as_ref(),
+/// The seat a batch is answered under: checked out of its inline key for this request
+/// only, or looked up by handle. A dispatcher resolves once and passes the seat to
+/// [`respond_seeded_with_seat`] per query.
+///
+/// # Errors
+///
+/// The inline key does not match the cache's packing shape, or the handle names no
+/// registered seat.
+pub fn resolve_packing_seat(
+    crs: &ServerCrs,
+    cache: &ServerInspiringCache,
+    packing_key: &PackingKeySource,
+    session_store: Option<&ServerSessionStore>,
+) -> Result<Arc<PackingKeySeat>> {
+    match packing_key {
+        PackingKeySource::Inline(keys) => ResolvedKey::Inline(keys),
+        PackingKeySource::Registered(handle) => {
+            ResolvedKey::Registered(registered_seat(*handle, session_store)?)
         }
     }
+    .into_seat(crs, cache)
+}
+
+/// Answer one query of a batch under an already resolved seat.
+pub fn respond_seeded_with_seat(
+    crs: &ServerCrs,
+    encoded_db: &EncodedDatabase,
+    query: &SeededBatchQuery,
+    cache: &ServerInspiringCache,
+    seat: &PackingKeySeat,
+) -> Result<ServerResponse> {
+    const OPERATION: &str = "respond_seeded_with_seat";
+    require_seeded_rgsw_rows(OPERATION, crs, &query.rgsw_ciphertext)?;
+    let rgsw = query.rgsw_ciphertext.expand();
+    require_rgsw_rows(OPERATION, crs, &rgsw)?;
+    let shard = checked_shard(OPERATION, crs, encoded_db, query.shard_id)?;
+    pack_shard(
+        crs,
+        shard,
+        &rgsw,
+        &cache.pack_params,
+        &cache.offline_keys,
+        seat,
+    )
+}
+
+/// Answer every query of `batch` under its one packing key, in order. Each response
+/// is the bytes the same query gets when it carries that key inline on its own.
+///
+/// # Errors
+///
+/// The key does not resolve to a seat, or any one query is refused; no partial
+/// result is returned.
+pub fn respond_seeded_batch(
+    crs: &ServerCrs,
+    encoded_db: &EncodedDatabase,
+    batch: &SeededQueryBatch,
+    cache: &ServerInspiringCache,
+    session_store: Option<&ServerSessionStore>,
+) -> Result<Vec<ServerResponse>> {
+    let seat = resolve_packing_seat(crs, cache, batch.packing_key(), session_store)?;
+    batch
+        .queries()
+        .iter()
+        .map(|query| respond_seeded_with_seat(crs, encoded_db, query, cache, &seat))
+        .collect()
 }
 
 /// Seeded sibling of [`respond_inspiring_cached_with_session`].
@@ -1215,7 +1204,7 @@ pub fn respond_seeded_inspiring_cached_with_session(
     encoded_db: &EncodedDatabase,
     query: &SeededClientQuery,
     cache: &ServerInspiringCache,
-    session_store: Option<&super::session::ServerSessionStore>,
+    session_store: Option<&ServerSessionStore>,
 ) -> Result<ServerResponse> {
     require_seeded_crs_rgsw_gadget("respond_seeded_inspiring_cached_with_session", crs, query)?;
     let expanded = query.expand();
@@ -1298,15 +1287,12 @@ pub fn respond_sequential(
     })
 }
 
-/// Measurement switches on the respond path, read from the environment once per process so no
+/// Measurement switch on the respond path, read from the environment once per process so no
 /// query pays for the lookup and a variable set later cannot change a running server.
 #[derive(Clone, Copy, Debug)]
 struct RespondDebugSwitches {
     /// `RAVEN_PROFILE_RESPOND`: a per-region stderr breakdown of every respond.
     profile: bool,
-    /// `RAVEN_FORCE_PACKING_ONLINE`: pin the coefficient-domain packing fallback, so the
-    /// wire-format delta can be measured.
-    force_packing_online: bool,
 }
 
 impl RespondDebugSwitches {
@@ -1314,7 +1300,6 @@ impl RespondDebugSwitches {
         static SWITCHES: std::sync::OnceLock<RespondDebugSwitches> = std::sync::OnceLock::new();
         *SWITCHES.get_or_init(|| Self {
             profile: std::env::var_os("RAVEN_PROFILE_RESPOND").is_some(),
-            force_packing_online: std::env::var_os("RAVEN_FORCE_PACKING_ONLINE").is_some(),
         })
     }
 }
@@ -1688,12 +1673,10 @@ mod tests {
         }
         let first = RespondDebugSwitches::get();
         std::env::remove_var("RAVEN_PROFILE_RESPOND");
-        std::env::remove_var("RAVEN_FORCE_PACKING_ONLINE");
         let later = RespondDebugSwitches::get();
-        assert_eq!((first.profile, first.force_packing_online), (true, true));
-        assert_eq!(
-            (later.profile, later.force_packing_online),
-            (true, true),
+        assert!(first.profile);
+        assert!(
+            later.profile,
             "a switch cleared after the first respond reached a later one"
         );
         println!("{SWITCH_PROBE_RAN}");
@@ -1712,7 +1695,23 @@ mod tests {
             !outside.contains("env::var"),
             "respond.rs reads the environment outside RespondDebugSwitches"
         );
-        assert_eq!(helper.matches("env::var_os(").count(), 2);
+        assert_eq!(helper.matches("env::var_os(").count(), 1);
+    }
+
+    /// A seat holds no rotations and no coefficient-form body, so the only way a
+    /// responder could rebuild rotations per query is by calling the rotation formula.
+    #[test]
+    fn responders_pack_only_through_the_seat_kernel() {
+        let (production, _tests) = include_str!("respond.rs")
+            .split_once("#[cfg(test)]\nmod tests")
+            .expect("test module");
+        for rotation_rebuild in ["generate_rotations", "packing_online("] {
+            assert!(
+                !production.contains(rotation_rebuild),
+                "respond.rs reaches the per-query rotation formula through {rotation_rebuild}"
+            );
+        }
+        assert_eq!(production.matches("packing_online_gather(").count(), 1);
     }
 
     #[test]
@@ -1729,7 +1728,6 @@ mod tests {
             ])
             .env(SWITCH_PROBE, "1")
             .env("RAVEN_PROFILE_RESPOND", "1")
-            .env("RAVEN_FORCE_PACKING_ONLINE", "1")
             .output()
             .expect("run the probe");
         let stdout = String::from_utf8_lossy(&output.stdout);

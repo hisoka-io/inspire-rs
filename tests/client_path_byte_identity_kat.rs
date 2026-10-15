@@ -16,7 +16,7 @@
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use raven_inspire::inspiring::{ClientPackingKeys, PackParams};
+use raven_inspire::inspiring::{generate_rotations, ClientPackingKeys, PackParams};
 use raven_inspire::lwe::LweSecretKey;
 use raven_inspire::math::{GaussianSampler, NttContext, Poly};
 use raven_inspire::params::{
@@ -112,11 +112,11 @@ fn client_path_digests(moduli: &[u64]) -> Vec<(String, u64)> {
     let ct = RlweCiphertext::encrypt(&sk, &message, delta, a, &error, &ctx);
     out.push(("rlwe encrypt".to_owned(), digest_serde(&ct)));
 
-    let pack_params = PackParams::try_new(&params, 16).expect("pack params");
-    let keys = ClientPackingKeys::generate(&sk, &pack_params, [5u8; 32], &mut sampler);
+    let keys = ClientPackingKeys::generate(&sk, &params, 16, [5u8; 32], &mut sampler)
+        .expect("16 is a legal width");
     out.push(("packing keys".to_owned(), digest_serde(&keys)));
-    let y_all: Vec<u64> = keys
-        .y_all
+    let pack_params = PackParams::try_new(&params, 16).expect("pack params");
+    let y_all: Vec<u64> = generate_rotations(&pack_params, &keys.y_body)
         .iter()
         .flatten()
         .flat_map(|p| p.coeffs().iter().copied())

@@ -1,7 +1,5 @@
 //! A serialized `ClientSession` residue must carry only CRS, secret key and
-//! y_body, rehydrate without rebuilding `pack_params`, and still decode the
-//! planted entry - the server re-derives `y_all` from y_body, so the client
-//! never needs the multi-hundred-MiB automorph tables on the query path.
+//! y_body, and a rehydrated session must still decode the planted entry.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -25,7 +23,7 @@ fn d256_params() -> InspireParams {
 }
 
 #[test]
-fn residue_round_trip_rehydrated_session_decodes_without_pack_params() {
+fn residue_round_trip_rehydrated_session_decodes() {
     let params = d256_params();
     let num_entries = 64usize;
     let entry_size = 32usize;
@@ -41,11 +39,6 @@ fn residue_round_trip_rehydrated_session_decodes_without_pack_params() {
         session.has_inspiring_packing(),
         "d=256 setup must enable InspiRING packing for this test to exercise the residue path"
     );
-    assert!(
-        session.pack_params().is_some(),
-        "a fresh session holds pack_params"
-    );
-
     let residue = session.to_residue();
     let bytes = bincode::serialize(&residue).expect("serialize residue");
     // d=256 has no large tables; this only catches a table-shaped payload
@@ -57,10 +50,6 @@ fn residue_round_trip_rehydrated_session_decodes_without_pack_params() {
 
     let residue2 = bincode::deserialize(&bytes).expect("deserialize residue");
     let session2 = ClientSession::from_residue(residue2).expect("rehydrate consistent residue");
-    assert!(
-        session2.pack_params().is_none(),
-        "a rehydrated session must NOT rebuild pack_params"
-    );
     assert!(
         session2.has_inspiring_packing(),
         "a rehydrated session keeps its packing keys"
@@ -108,7 +97,6 @@ fn residue_round_trip_preserves_tree_only_none_packing() {
         !session2.has_inspiring_packing(),
         "the None packing-keys shape must survive the residue round-trip"
     );
-    assert!(session2.pack_params().is_none());
 
     for session in [&session, &session2] {
         for message in [

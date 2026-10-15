@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::inspiring::{ClientPackingKeys, PackParams};
+use crate::inspiring::ClientPackingKeys;
 use crate::lwe::LweSecretKey;
 use crate::math::GaussianSampler;
 use crate::params::ShardConfig;
@@ -135,6 +135,79 @@ pub struct SeededClientQuery {
     pub session_handle: Option<ServerSessionHandle>,
 }
 
+/// Where the one packing key of a [`SeededQueryBatch`] comes from.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum PackingKeySource {
+    /// Carried in the request; the server holds it only while answering.
+    Inline(ClientPackingKeys),
+    /// Uploaded earlier and registered under this handle.
+    Registered(ServerSessionHandle),
+}
+
+/// One row request inside a [`SeededQueryBatch`]. It has no key field: the batch's
+/// key serves it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "SeededBatchQueryWire")]
+pub struct SeededBatchQuery {
+    /// Target shard; the server routes the query by it.
+    pub shard_id: u32,
+    /// Seeded one-row encrypted scaled inverse monomial.
+    pub rgsw_ciphertext: SeededRgswCiphertext,
+}
+
+#[derive(Deserialize)]
+struct SeededBatchQueryWire {
+    shard_id: u32,
+    rgsw_ciphertext: SeededRgswCiphertext,
+}
+
+impl TryFrom<SeededBatchQueryWire> for SeededBatchQuery {
+    type Error = super::error::PirError;
+
+    fn try_from(wire: SeededBatchQueryWire) -> Result<Self> {
+        require_coefficient_rows(
+            wire.rgsw_ciphertext
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(index, row)| (index, "b", &row.b)),
+        )?;
+        Ok(Self {
+            shard_id: wire.shard_id,
+            rgsw_ciphertext: wire.rgsw_ciphertext,
+        })
+    }
+}
+
+/// Any number of InspiRING queries under one packing key.
+///
+/// Clients build one through [`crate::pir::ClientSession::query_batch`], which always
+/// attaches the session's one set of keys; servers receive it off the wire.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SeededQueryBatch {
+    packing_key: PackingKeySource,
+    queries: Vec<SeededBatchQuery>,
+}
+
+impl SeededQueryBatch {
+    pub(super) fn new(packing_key: PackingKeySource, queries: Vec<SeededBatchQuery>) -> Self {
+        Self {
+            packing_key,
+            queries,
+        }
+    }
+
+    /// The key every query in the batch is answered under.
+    pub fn packing_key(&self) -> &PackingKeySource {
+        &self.packing_key
+    }
+
+    /// The row requests, in the order their responses come back.
+    pub fn queries(&self) -> &[SeededBatchQuery] {
+        &self.queries
+    }
+}
+
 #[derive(Deserialize)]
 struct ClientQueryWire {
     shard_id: u32,
@@ -236,14 +309,14 @@ fn generate_packing_keys(
     sampler: &mut GaussianSampler,
 ) -> Result<ClientPackingKeys> {
     ensure_inspiring_query_width(crs)?;
-    let pack_params = PackParams::try_new(&crs.params, crs.inspiring_num_columns)
-        .map_err(|e| pir_err!("CRS carries an unusable InspiRING width: {e}"))?;
-    Ok(ClientPackingKeys::generate(
+    ClientPackingKeys::generate(
         rlwe_sk,
-        &pack_params,
+        &crs.params,
+        crs.inspiring_num_columns,
         crs.inspiring_w_seed,
         sampler,
-    ))
+    )
+    .map_err(|e| pir_err!("CRS carries an unusable InspiRING width: {e}"))
 }
 
 fn ensure_inspiring_query_width(crs: &ServerCrs) -> Result<()> {
@@ -271,6 +344,9 @@ pub(super) fn ensure_query_shard_geometry(
 }
 
 /// Build a query for `global_index` plus the client state needed to extract it.
+///
+/// Generates its own packing keys, so call it once per secret key;
+/// [`crate::pir::ClientSession`] sends any number of queries under one key.
 pub fn query(
     crs: &ServerCrs,
     global_index: u64,
@@ -316,6 +392,7 @@ pub fn query(
 }
 
 /// `query` in the compact seeded form; the server must `expand()` before processing.
+/// Like [`query`], once per secret key.
 pub fn query_seeded(
     crs: &ServerCrs,
     global_index: u64,

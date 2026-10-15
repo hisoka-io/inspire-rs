@@ -330,14 +330,11 @@ impl CostEstimator {
             InspireVariant::NoPacking | InspireVariant::OnePacking => (0, 0, 0),
             InspireVariant::TwoPacking => {
                 // `ClientPackingKeys::generate` builds y_body as gadget_len rows
-                // of tau_g(s)*g^k - s*w_mask[k] + error, then rotates the set
-                // into gamma-1 automorphism copies - so the work scales with
-                // gamma*gadget_len, not with gamma alone, and the rotations are
-                // automorphisms rather than poly multiplications. 2*gamma is a
-                // coarse stand-in: op counts are advisory, while the byte counts
-                // are pinned to the wire by tests/cost_model_matches_the_wire.rs.
-                let gamma = self.num_columns as u64;
-                (gamma * 2, gamma * 2, gamma * 2)
+                // of tau_g(s)*g^k - s*w_mask[k] + error: one NTT of s, then per
+                // row an NTT of the mask, a product and the NTT back. A session
+                // builds the key once; counting it per query is the upper bound.
+                let digits = self.params.packing_gadget_len as u64;
+                (2 * digits + 1, digits, 2 * digits)
             }
         };
 
@@ -434,11 +431,12 @@ impl CostEstimator {
                 //   NTTs: γ forward (a_ct), (γ-1) inverse (for decomp),
                 //          (γ-1)*l forward (t_k), 1 inverse (a_hat)
                 //
-                // Online phase (packing_online):
-                //   (γ-1)*l iterations: mul_ntt_domain + add_ntt_domain
+                // Online phase (packing_online_gather):
+                //   (gamma-1)*l pointwise multiply-accumulates, y_body read through
+                //   the automorphism tables
                 //   → (γ-1)*l poly_muls, (γ-1)*l poly_adds
                 //   Plus 1 poly_add (final b_poly addition)
-                //   NTTs: 2*(γ-1)*l forward (y_ntt, t_ntt) + 1 inverse (sum_b)
+                //   NTTs: l forward (y_body of an inline key) + 1 inverse (sum_b)
 
                 let gm1 = gamma.saturating_sub(1); // γ - 1
 
@@ -458,10 +456,7 @@ impl CostEstimator {
                 // Online
                 let online_poly_muls = gm1.saturating_mul(ell);
                 let online_poly_adds = gm1.saturating_mul(ell).saturating_add(1);
-                let online_ntts = 2u64
-                    .saturating_mul(gm1)
-                    .saturating_mul(ell)
-                    .saturating_add(1);
+                let online_ntts = ell.saturating_add(1);
 
                 OpCounts {
                     ntt_transforms: offline_ntts.saturating_add(online_ntts),
@@ -513,11 +508,10 @@ impl CostEstimator {
 
         // InspiRING packing keys: only `y_body` crosses the wire, and it holds
         // one polynomial per gadget digit - `ClientPackingKeys::generate` builds
-        // it from `pack_params.gadget`, and `register_client_packing_keys`
-        // refuses a query whose `y_body.len() != pack_params.gadget.len`. The
-        // `y_all` rotations are derived on both sides and never serialized, so
-        // the size scales with the gadget length, not gamma. Only sent for
-        // TwoPacking (InspiRING mode).
+        // it from the packing gadget, and the server refuses a key whose
+        // `y_body.len()` differs from its gadget length. Rotations are never
+        // materialized on either side, so the size scales with the gadget
+        // length, not gamma. Only sent for TwoPacking (InspiRING mode).
         let packing_key_bytes = match self.variant {
             InspireVariant::NoPacking | InspireVariant::OnePacking => 0,
             InspireVariant::TwoPacking => (self.params.packing_gadget_len as u64)

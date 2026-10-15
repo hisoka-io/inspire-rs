@@ -1,6 +1,6 @@
-//! Packing params and client packing keys depend only on (CRS, rlwe_sk, w_seed), never
-//! on the query index, so a session computes them once and clones them per query. The
-//! automorph-table build they hide is O(d^3).
+//! Packing keys depend only on (CRS, rlwe_sk, w_seed), never on the query index, so a
+//! client session builds them once and resends the same bytes; the server keeps each
+//! uploaded key as a [`PackingKeySeat`].
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::inspiring::{ClientPackingKeys, PackParams};
 use crate::lwe::LweSecretKey;
-use crate::math::{GaussianSampler, NttContext};
+use crate::math::{GaussianSampler, NttContext, Poly};
 use crate::params::ShardConfig;
 use crate::rgsw::{GadgetVector, RgswCiphertext, SeededRgswCiphertext};
 use crate::rlwe::RlweSecretKey;
@@ -18,24 +18,22 @@ use crate::rlwe::RlweSecretKey;
 use super::encode_db::inverse_monomial;
 use super::error::{pir_err, Result};
 use super::query::{
-    ensure_query_shard_geometry, ClientQuery, ClientState, PackingMode, SeededClientQuery,
-    ServerSessionHandle,
+    ensure_query_shard_geometry, ClientQuery, ClientState, PackingKeySource, PackingMode,
+    SeededBatchQuery, SeededClientQuery, SeededQueryBatch, ServerSessionHandle,
 };
 use super::setup::ServerCrs;
 
 /// Everything a client needs to emit many queries against one server-session CRS.
 ///
-/// Optionally compresses the wire format: [`register_with`](Self::register_with)
-/// uploads the ~48 KiB packing keys once and every later query carries a handle
-/// instead. Without it the keys are inlined per query.
+/// The session builds its packing keys once and every query, batch, upload and retry
+/// carries those same bytes. [`register_with`](Self::register_with) or a remote
+/// handshake swaps the inline keys for a handle.
 #[derive(Clone)]
 pub struct ClientSession {
     /// Owned CRS snapshot; rotating the CRS means building a new session.
     crs: ServerCrs,
     rlwe_sk: RlweSecretKey,
     lwe_sk: LweSecretKey,
-    /// Owns the O(d^3) automorph tables; `None` on a Tree-packing-only server.
-    pack_params: Option<PackParams>,
     /// `None` on a Tree-packing-only server.
     packing_keys: Option<ClientPackingKeys>,
     /// `Some` switches queries to the compact handle-referencing wire form.
@@ -53,7 +51,10 @@ impl std::fmt::Debug for ClientSession {
 }
 
 impl ClientSession {
-    /// Build a session, running the one-time packing-key work.
+    /// Build a session around `rlwe_sk`, generating its packing keys.
+    ///
+    /// Takes the secret key by value: a secret belongs to one session, which builds
+    /// the one set of packing keys under it.
     pub fn new(
         crs: ServerCrs,
         rlwe_sk: RlweSecretKey,
@@ -62,39 +63,81 @@ impl ClientSession {
         crs.validate()?;
         let lwe_sk = LweSecretKey::from_rlwe(&rlwe_sk);
 
-        let (pack_params, packing_keys) = if crs.inspiring_num_columns > 0 {
-            let pp = PackParams::try_new(&crs.params, crs.inspiring_num_columns)
-                .map_err(|e| pir_err!("CRS carries an unusable InspiRING width: {e}"))?;
-            let keys = ClientPackingKeys::generate(&rlwe_sk, &pp, crs.inspiring_w_seed, sampler);
-            (Some(pp), Some(keys))
+        let packing_keys = if crs.inspiring_num_columns > 0 {
+            Some(
+                ClientPackingKeys::generate(
+                    &rlwe_sk,
+                    &crs.params,
+                    crs.inspiring_num_columns,
+                    crs.inspiring_w_seed,
+                    sampler,
+                )
+                .map_err(|e| pir_err!("CRS carries an unusable InspiRING width: {e}"))?,
+            )
         } else {
-            (None, None)
+            None
         };
 
         Ok(Self {
             crs,
             rlwe_sk,
             lwe_sk,
-            pack_params,
             packing_keys,
             session_handle: None,
         })
     }
 
-    /// Upload the cached packing keys and switch to the compact wire format.
-    /// `Ok(None)` means there were no keys to upload.
+    /// [`Self::new`] under a secret key drawn here, for callers with no key of their
+    /// own to keep.
+    ///
+    /// ```
+    /// use raven_inspire::math::GaussianSampler;
+    /// use raven_inspire::params::InspireParams;
+    /// use raven_inspire::{setup, ClientSession};
+    ///
+    /// let params = InspireParams::secure_128_d2048();
+    /// let database = vec![0u8; params.ring_dim * 32];
+    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
+    /// let (crs, _, _) = setup(&params, &database, 32, &mut sampler)?;
+    /// let session = ClientSession::with_fresh_secret(crs, &mut sampler)?;
+    /// assert!(session.has_inspiring_packing());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn with_fresh_secret(crs: ServerCrs, sampler: &mut GaussianSampler) -> Result<Self> {
+        crs.validate()?;
+        let rlwe_sk = RlweSecretKey::generate(&crs.params, sampler);
+        Self::new(crs, rlwe_sk, sampler)
+    }
+
+    /// Register this session's packing keys with an in-process store and switch to the
+    /// compact wire format. `Ok(None)` means there were no keys to register.
     pub fn register_with(
         &mut self,
         store: &ServerSessionStore,
     ) -> Result<Option<ServerSessionHandle>> {
-        match &self.packing_keys {
-            None => Ok(None),
-            Some(keys) => {
-                let handle = store.register(keys.clone())?;
-                self.session_handle = Some(handle);
-                Ok(Some(handle))
-            }
-        }
+        let Some(keys) = &self.packing_keys else {
+            return Ok(None);
+        };
+        let params = &self.crs.params;
+        let seat = PackingKeySeat::build(
+            keys.clone(),
+            &PackingGeometry {
+                ring_dim: params.ring_dim,
+                moduli: params.moduli(),
+                gadget_len: params.packing_gadget_len,
+                num_to_pack: self.crs.inspiring_num_columns,
+            },
+            &params.ntt_context(),
+        )?;
+        let handle = store.register(seat)?;
+        self.session_handle = Some(handle);
+        Ok(Some(handle))
+    }
+
+    /// The packing keys to upload when registering with a remote server; the same
+    /// bytes on every call. `None` on a Tree-packing-only server.
+    pub fn packing_keys(&self) -> Option<&ClientPackingKeys> {
+        self.packing_keys.as_ref()
     }
 
     /// Current handle, or `None` if nothing was registered.
@@ -139,36 +182,6 @@ impl ClientSession {
         Ok(())
     }
 
-    /// Register with the derived `y_all*` fields stripped, mimicking what survives a
-    /// wire round-trip, so the server derives them once and later queries take the
-    /// fully-NTT respond path. In-process callers want
-    /// [`register_with`](Self::register_with) instead.
-    pub fn register_with_server_derivation(
-        &mut self,
-        store: &ServerSessionStore,
-    ) -> Result<Option<ServerSessionHandle>> {
-        let (pp, ctx, wire_keys) = match (&self.pack_params, &self.packing_keys) {
-            (Some(pp), Some(keys)) => {
-                let ctx = self.crs.params.ntt_context();
-                let wire_keys = ClientPackingKeys {
-                    y_body: keys.y_body.clone(),
-                    z_body: keys.z_body.clone(),
-                    y_all: Vec::new(),
-                    y_all_ntt: Vec::new(),
-                    y_bar_all: Vec::new(),
-                    y_bar_all_ntt: Vec::new(),
-                    full_key: keys.full_key,
-                    num_to_pack: keys.num_to_pack,
-                };
-                (pp, ctx, wire_keys)
-            }
-            _ => return Ok(None),
-        };
-        let handle = store.register_server_side(wire_keys, pp, &ctx)?;
-        self.session_handle = Some(handle);
-        Ok(Some(handle))
-    }
-
     /// Borrow the captured CRS.
     pub fn crs(&self) -> &ServerCrs {
         &self.crs
@@ -186,7 +199,7 @@ impl ClientSession {
         shard_config: &ShardConfig,
         sampler: &mut GaussianSampler,
     ) -> Result<(ClientState, ClientQuery)> {
-        self.ensure_inspiring_query_material()?;
+        self.inspiring_query_material()?;
         ensure_query_shard_geometry(&self.crs, shard_config)?;
         let d = self.crs.ring_dim();
         let q = self.crs.modulus();
@@ -231,7 +244,69 @@ impl ClientSession {
         shard_config: &ShardConfig,
         sampler: &mut GaussianSampler,
     ) -> Result<(ClientState, SeededClientQuery)> {
-        self.ensure_inspiring_query_material()?;
+        let (state, row) = self.seeded_row(global_index, shard_config, sampler)?;
+        let (inspiring_packing_keys, session_handle) = match self.session_handle {
+            Some(h) => (None, Some(h)),
+            None => (self.packing_keys.clone(), None),
+        };
+        Ok((
+            state,
+            SeededClientQuery {
+                shard_id: row.shard_id,
+                rgsw_ciphertext: row.rgsw_ciphertext,
+                packing_mode: PackingMode::Inspiring,
+                inspiring_packing_keys,
+                session_handle,
+            },
+        ))
+    }
+
+    /// One request for every index in `global_indices`, all under this session's one
+    /// set of packing keys: by handle once registered, inline before that. Building
+    /// the batch again resends the same key bytes.
+    ///
+    /// ```
+    /// use raven_inspire::math::GaussianSampler;
+    /// use raven_inspire::params::InspireParams;
+    /// use raven_inspire::{setup, ClientSession};
+    ///
+    /// let params = InspireParams::secure_128_d2048();
+    /// let database = vec![0u8; params.ring_dim * 32];
+    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
+    /// let (crs, encoded, secret_key) = setup(&params, &database, 32, &mut sampler)?;
+    /// let session = ClientSession::new(crs, secret_key, &mut sampler)?;
+    /// let (states, batch) = session.query_batch(&[3, 5], &encoded.config, &mut sampler)?;
+    /// assert_eq!((states.len(), batch.queries().len()), (2, 2));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn query_batch(
+        &self,
+        global_indices: &[u64],
+        shard_config: &ShardConfig,
+        sampler: &mut GaussianSampler,
+    ) -> Result<(Vec<ClientState>, SeededQueryBatch)> {
+        let keys = self.inspiring_query_material()?;
+        let packing_key = match self.session_handle {
+            Some(handle) => PackingKeySource::Registered(handle),
+            None => PackingKeySource::Inline(keys.clone()),
+        };
+        let mut states = Vec::with_capacity(global_indices.len());
+        let mut queries = Vec::with_capacity(global_indices.len());
+        for &global_index in global_indices {
+            let (state, row) = self.seeded_row(global_index, shard_config, sampler)?;
+            states.push(state);
+            queries.push(row);
+        }
+        Ok((states, SeededQueryBatch::new(packing_key, queries)))
+    }
+
+    fn seeded_row(
+        &self,
+        global_index: u64,
+        shard_config: &ShardConfig,
+        sampler: &mut GaussianSampler,
+    ) -> Result<(ClientState, SeededBatchQuery)> {
+        self.inspiring_query_material()?;
         ensure_query_shard_geometry(&self.crs, shard_config)?;
         let d = self.crs.ring_dim();
         let q = self.crs.modulus();
@@ -252,19 +327,11 @@ impl ClientSession {
             shard_id,
             local_index,
         };
-
-        let (inspiring_packing_keys, session_handle) = match self.session_handle {
-            Some(h) => (None, Some(h)),
-            None => (self.packing_keys.clone(), None),
-        };
         Ok((
             state,
-            SeededClientQuery {
+            SeededBatchQuery {
                 shard_id,
                 rgsw_ciphertext,
-                packing_mode: PackingMode::Inspiring,
-                inspiring_packing_keys,
-                session_handle,
             },
         ))
     }
@@ -274,24 +341,18 @@ impl ClientSession {
         self.packing_keys.is_some()
     }
 
-    fn ensure_inspiring_query_material(&self) -> Result<()> {
-        if self.packing_keys.is_none() {
-            return Err(pir_err!(
+    fn inspiring_query_material(&self) -> Result<&ClientPackingKeys> {
+        self.packing_keys.as_ref().ok_or_else(|| {
+            pir_err!(
                 "PIR query refused a zero InspiRING width: no packing material exists, and \
                  falling back to a tree-packed response would return wrong bytes under the \
                  TwoPacking extractor"
-            ));
-        }
-        Ok(())
+            )
+        })
     }
 
-    /// Borrow the cached `PackParams`.
-    pub fn pack_params(&self) -> Option<&PackParams> {
-        self.pack_params.as_ref()
-    }
-
-    /// Capture the persistable residue: no automorph tables, no derived rotations,
-    /// no handle (it is only valid against the issuing store).
+    /// Capture the persistable residue: the CRS, the secret key and the packing keys,
+    /// with no handle (it is only valid against the issuing store).
     ///
     /// The residue carries the client RLWE secret key in the clear and is not
     /// zeroized; a stolen blob plus observed traffic reveals which indices this
@@ -304,11 +365,8 @@ impl ClientSession {
         }
     }
 
-    /// Rehydrate without rebuilding the automorph tables, so the result serves
-    /// queries but not
-    /// [`register_with_server_derivation`](Self::register_with_server_derivation).
-    /// Mismatched CRS and secret-key shapes are rejected here rather than at a
-    /// later query.
+    /// Rehydrate with the captured packing keys, never regenerating them. Mismatched
+    /// CRS and secret-key shapes are rejected here rather than at a later query.
     ///
     /// # Errors
     /// The residue's CRS fails [`ServerCrs::validate`], its secret key is not a
@@ -349,7 +407,6 @@ impl ClientSession {
             crs: residue.crs,
             rlwe_sk: residue.rlwe_sk,
             lwe_sk,
-            pack_params: None,
             packing_keys: residue.packing_keys,
             session_handle: None,
         })
@@ -374,7 +431,142 @@ impl std::fmt::Debug for SessionResidue {
     }
 }
 
-/// Server-side map from [`ServerSessionHandle`] to registered packing keys.
+/// A client's packing key as the server holds it: `y_body` in NTT form and nothing
+/// derived from it. Packing reads each rotation through the automorphism tables the
+/// server shares across clients, so a seat is `gadget_len` polynomials at any gamma.
+pub struct PackingKeySeat {
+    y_body_ntt: Vec<Poly>,
+    num_to_pack: usize,
+}
+
+impl std::fmt::Debug for PackingKeySeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PackingKeySeat")
+            .field("digits", &self.y_body_ntt.len())
+            .field("num_to_pack", &self.num_to_pack)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The packing shape a key must match; `PackParams` and the CRS both describe it.
+pub(crate) struct PackingGeometry<'a> {
+    pub(crate) ring_dim: usize,
+    pub(crate) moduli: &'a [u64],
+    pub(crate) gadget_len: usize,
+    pub(crate) num_to_pack: usize,
+}
+
+impl<'a> From<&'a PackParams> for PackingGeometry<'a> {
+    fn from(pack_params: &'a PackParams) -> Self {
+        Self {
+            ring_dim: pack_params.ring_dim,
+            moduli: &pack_params.moduli,
+            gadget_len: pack_params.gadget.len,
+            num_to_pack: pack_params.num_to_pack,
+        }
+    }
+}
+
+impl PackingKeySeat {
+    /// Check uploaded keys against the server's packing shape and turn their body
+    /// into the seat, in NTT form. The only way to build a seat, so every seat has
+    /// passed these checks.
+    ///
+    /// # Errors
+    ///
+    /// The keys are not coefficient-form polynomials on the server ring, carry a
+    /// different digit count than the server gadget, or declare another gamma.
+    ///
+    /// ```
+    /// use raven_inspire::inspiring::{ClientPackingKeys, PackParams};
+    /// use raven_inspire::math::GaussianSampler;
+    /// use raven_inspire::params::InspireParams;
+    /// use raven_inspire::pir::PackingKeySeat;
+    /// use raven_inspire::rlwe::RlweSecretKey;
+    ///
+    /// let params = InspireParams::secure_128_d2048();
+    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 1);
+    /// let secret_key = RlweSecretKey::generate(&params, &mut sampler);
+    /// let keys = ClientPackingKeys::generate(&secret_key, &params, 16, [7; 32], &mut sampler)?;
+    /// let pack_params = PackParams::try_new(&params, 16)?;
+    /// let seat = PackingKeySeat::from_wire(keys, &pack_params, &params.ntt_context())?;
+    /// assert_eq!(seat.payload_bytes(), 3 * 2048 * 8);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn from_wire(
+        keys: ClientPackingKeys,
+        pack_params: &PackParams,
+        ctx: &NttContext,
+    ) -> Result<Self> {
+        Self::build(keys, &PackingGeometry::from(pack_params), ctx)
+    }
+
+    pub(crate) fn build(
+        keys: ClientPackingKeys,
+        geometry: &PackingGeometry<'_>,
+        ctx: &NttContext,
+    ) -> Result<Self> {
+        ensure_packing_width_matches(&keys, geometry)?;
+        if ctx.dimension() != geometry.ring_dim || ctx.moduli() != geometry.moduli {
+            return Err(pir_err!(
+                "packing-key seat refused: NTT context is for ring_dim {} moduli {:?}, the \
+                 packing shape is ring_dim {} moduli {:?}",
+                ctx.dimension(),
+                ctx.moduli(),
+                geometry.ring_dim,
+                geometry.moduli
+            ));
+        }
+        let mut y_body_ntt = keys.y_body;
+        for y in &mut y_body_ntt {
+            y.to_ntt(ctx);
+        }
+        Ok(Self {
+            y_body_ntt,
+            num_to_pack: keys.num_to_pack,
+        })
+    }
+
+    /// gamma the keys were built for.
+    pub fn num_to_pack(&self) -> usize {
+        self.num_to_pack
+    }
+
+    /// Bytes of key coefficients held: digits x CRT limbs x ring_dim x 8.
+    pub fn payload_bytes(&self) -> usize {
+        self.y_body_ntt
+            .iter()
+            .map(|y| std::mem::size_of_val(y.coeffs()))
+            .sum()
+    }
+
+    /// [`Self::payload_bytes`] plus the containers around it, counted by length, for
+    /// a server's per-session memory accounting.
+    pub fn resident_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self
+                .y_body_ntt
+                .iter()
+                .map(|y| {
+                    std::mem::size_of::<Poly>()
+                        + std::mem::size_of_val(y.coeffs())
+                        + std::mem::size_of_val(y.moduli())
+                })
+                .sum::<usize>()
+    }
+
+    pub(crate) fn y_body_ntt(&self) -> &[Poly] {
+        &self.y_body_ntt
+    }
+
+    /// A seat registered under one gamma must not pack under another: the generator
+    /// differs, so the tables would rotate the key under the wrong automorphism.
+    pub(crate) fn require_width(&self, pack_params: &PackParams) -> Result<()> {
+        require_matching_width(self.num_to_pack, pack_params.num_to_pack)
+    }
+}
+
+/// Server-side map from [`ServerSessionHandle`] to registered packing-key seats.
 ///
 /// `RwLock` because every query reads and registration happens once per session.
 /// The store removes explicit handles but has no automatic eviction policy.
@@ -387,13 +579,13 @@ impl std::fmt::Debug for SessionResidue {
 /// session token at the transport layer.
 #[derive(Debug, Default)]
 pub struct ServerSessionStore {
-    /// `Arc` avoids cloning the ~48 KiB payload per lookup.
+    /// `Arc` avoids cloning the seat per lookup.
     inner: RwLock<Inner>,
 }
 
 #[derive(Debug, Default)]
 struct Inner {
-    by_handle: HashMap<u64, Arc<ClientPackingKeys>>,
+    by_handle: HashMap<u64, Arc<PackingKeySeat>>,
 }
 
 #[derive(Debug)]
@@ -427,7 +619,7 @@ impl HandleAllocator {
 
 static SESSION_HANDLE_ALLOCATOR: HandleAllocator = HandleAllocator::new(0);
 
-pub(crate) fn require_wire_packing_body_coefficient_domain(keys: &ClientPackingKeys) -> Result<()> {
+fn require_wire_packing_body_coefficient_domain(keys: &ClientPackingKeys) -> Result<()> {
     for (body_name, polynomials) in [
         ("y_body", keys.y_body.as_slice()),
         ("z_body", keys.z_body.as_slice()),
@@ -474,51 +666,44 @@ pub(crate) fn require_wire_packing_body_shape(
     Ok(())
 }
 
-/// Refuse client packing keys whose gamma differs from the server's.
+/// Refuse client packing keys that do not match the server's packing shape.
 ///
 /// The automorphism generator is `(2n/gamma)+1`, so keys built at another gamma are
-/// rotations under a different automorphism than the `bold_t` they multiply.
-/// `packing_online` guards its loop with `if i < len` and SKIPS the shortfall rather than
-/// rejecting it, so a mismatch surfaces as a successful response carrying wrong plaintext.
-///
-/// Called from every site where client-supplied keys meet server pack params:
-/// `register_server_side` here, plus the three inlined-key respond paths.
+/// rotations under a different automorphism than the `bold_t` they multiply, and a key
+/// with fewer polynomials than gadget digits cannot key-switch every digit. Either
+/// would pack a wrong plaintext.
 ///
 /// # Errors
 /// [`crate::pir::Result`] error naming the mismatched key domain, material, or width.
 pub(crate) fn ensure_packing_width_matches(
     keys: &ClientPackingKeys,
-    pack_params: &PackParams,
+    geometry: &PackingGeometry<'_>,
 ) -> Result<()> {
-    require_wire_packing_body_shape(keys, pack_params.ring_dim, &pack_params.moduli)?;
-    // The key MATERIAL, not just the declared width. `generate_rotations` sizes the
-    // outer vector from the server's gamma, but each rotation is `y_body.len()` long,
-    // and `packing_online`'s inner loop skips every digit `k >= y_all[i].len()`. A short
-    // `y_body` under a correct `num_to_pack` therefore drops terms from the packing sum
-    // and returns wrong plaintext as a success - the same failure the gamma check exists
-    // to stop, reached by a field the gamma check never reads.
-    if keys.y_body.len() != pack_params.gadget.len {
+    require_wire_packing_body_shape(keys, geometry.ring_dim, geometry.moduli)?;
+    // The key MATERIAL, not just the declared width: gamma is a self-reported label,
+    // `y_body` is what the packing sum reads.
+    if keys.y_body.len() != geometry.gadget_len {
         return Err(pir_err!(
             "packing-key material mismatch: client sent {} y_body polynomials, server \
-             gadget has {} digits. `packing_online` skips every digit past the shorter \
-             of the two, so the packing sum would silently lose terms and extraction \
-             would return wrong bytes with no error. The client must re-derive its \
-             packing keys against the current CRS.",
+             gadget has {} digits, and every digit needs its key polynomial. The client \
+             must re-derive its packing keys against the current CRS.",
             keys.y_body.len(),
-            pack_params.gadget.len
+            geometry.gadget_len
         ));
     }
-    if keys.num_to_pack == pack_params.num_to_pack {
+    require_matching_width(keys.num_to_pack, geometry.num_to_pack)
+}
+
+fn require_matching_width(key_width: usize, server_width: usize) -> Result<()> {
+    if key_width == server_width {
         return Ok(());
     }
     Err(pir_err!(
-        "packing-key width mismatch: client keys declare gamma = {}, server pack params \
-         use gamma = {}. The automorphism generator is (2n/gamma)+1, so these keys rotate \
-         under a different automorphism than the server's precomputed table and \
-         extraction would return wrong bytes with no error. The client must re-derive its \
-         packing keys against the current CRS.",
-        keys.num_to_pack,
-        pack_params.num_to_pack
+        "packing-key width mismatch: client keys declare gamma = {key_width}, server pack \
+         params use gamma = {server_width}. The automorphism generator is (2n/gamma)+1, so \
+         these keys rotate under a different automorphism than the server's precomputed \
+         table and extraction would return wrong bytes with no error. The client must \
+         re-derive its packing keys against the current CRS."
     ))
 }
 
@@ -528,38 +713,30 @@ impl ServerSessionStore {
         Self::default()
     }
 
-    /// Store `keys` under a freshly allocated, monotonically increasing handle.
-    pub fn register(&self, keys: ClientPackingKeys) -> Result<ServerSessionHandle> {
-        require_wire_packing_body_coefficient_domain(&keys)?;
+    /// Store `seat` under a freshly allocated, monotonically increasing handle.
+    pub fn register(&self, seat: PackingKeySeat) -> Result<ServerSessionHandle> {
         let mut inner = self
             .inner
             .write()
             .map_err(|_| pir_err!("ServerSessionStore: lock poisoned on register"))?;
         let handle = SESSION_HANDLE_ALLOCATOR.allocate()?;
-        inner.by_handle.insert(handle.0, Arc::new(keys));
+        inner.by_handle.insert(handle.0, Arc::new(seat));
         Ok(handle)
     }
 
-    /// Register wire-delivered keys, deriving the `y_all*` rotations that
-    /// `#[serde(skip)]` dropped so later responses take the fully-NTT path. The
-    /// derivation is skipped when they are already populated.
+    /// Check wire-delivered keys against the server's packing shape and register
+    /// their seat.
     pub fn register_server_side(
         &self,
-        mut keys: ClientPackingKeys,
+        keys: ClientPackingKeys,
         pack_params: &PackParams,
         ctx: &NttContext,
     ) -> Result<ServerSessionHandle> {
-        // Geometry must agree before any derivative is built. Not the only place the
-        // two meet: `respond_inspiring`, `respond_inspiring_cached` and
-        // `respond_inspiring_cached_with_session` accept inlined keys and pair them with
-        // server pack params too, so each calls the same guard.
-        ensure_packing_width_matches(&keys, pack_params)?;
-        keys.ensure_server_derivatives(pack_params, ctx);
-        self.register(keys)
+        self.register(PackingKeySeat::from_wire(keys, pack_params, ctx)?)
     }
 
-    /// Packing keys stored under `handle`, if any.
-    pub fn get(&self, handle: ServerSessionHandle) -> Result<Option<Arc<ClientPackingKeys>>> {
+    /// Seat stored under `handle`, if any.
+    pub fn get(&self, handle: ServerSessionHandle) -> Result<Option<Arc<PackingKeySeat>>> {
         let inner = self
             .inner
             .read()

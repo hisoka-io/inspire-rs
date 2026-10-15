@@ -299,7 +299,8 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
 #[test]
 fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
     use raven_inspire::inspiring::{
-        packing_offline, packing_online, ClientPackingKeys, OfflinePackingKeys, PackParams,
+        generate_rotations, packing_offline, packing_online, ClientPackingKeys, OfflinePackingKeys,
+        PackParams,
     };
     use raven_inspire::params::{InspireParams, SecurityLevel};
     use raven_inspire::rlwe::RlweSecretKey;
@@ -327,7 +328,10 @@ fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
     let offline_keys = OfflinePackingKeys::generate(&pack_params, w_seed);
 
     let rlwe_sk = RlweSecretKey::generate(&params, &mut sampler);
-    let client_keys = ClientPackingKeys::generate(&rlwe_sk, &pack_params, w_seed, &mut sampler);
+    let client_keys =
+        ClientPackingKeys::generate(&rlwe_sk, &params, num_columns, w_seed, &mut sampler)
+            .expect("num_columns must be a legal width");
+    let y_all = generate_rotations(&pack_params, &client_keys.y_body);
 
     let a_ct_tilde: Vec<Poly> = (0..num_columns)
         .map(|_| Poly::random_moduli(256, params.moduli()))
@@ -339,7 +343,7 @@ fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
     }
 
     let precomp = packing_offline(&pack_params, &offline_keys, &a_ct_tilde, &ctx);
-    let packed = packing_online(&precomp, &client_keys.y_all, &b_poly, &ctx);
+    let packed = packing_online(&precomp, &y_all, &b_poly, &ctx);
 
     // no reference plaintext exists for these synthetic inputs, so only shape
     // and range are asserted

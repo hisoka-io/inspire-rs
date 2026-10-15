@@ -36,7 +36,8 @@ fn keys_at(width: usize) -> (ClientPackingKeys, PackParams) {
     let pack = PackParams::try_new(&p, width).expect("legal width");
     let mut sampler = GaussianSampler::with_seed(p.sigma, 7);
     let sk = RlweSecretKey::generate(&p, &mut sampler);
-    let keys = ClientPackingKeys::generate(&sk, &pack, [3u8; 32], &mut sampler);
+    let keys =
+        ClientPackingKeys::generate(&sk, &p, width, [3u8; 32], &mut sampler).expect("legal width");
     (keys, pack)
 }
 
