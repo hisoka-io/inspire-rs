@@ -105,6 +105,9 @@ simd-packing-offline = []
 # backward compatibility; downstream consumers must opt in. See
 # `src/pir/mod_switch.rs` for the algorithm and noise-budget gate.
 mod-switch-response = []
+# Measurement code for a one-row packing key at a two-prime modulus, with its
+# noise and timing benches. Off by default: the served protocol builds without it.
+special-key-bench = []
 
 [dev-dependencies]
 proptest = "1.4"
@@ -120,13 +123,14 @@ path = "benches/spiral_mod_switch_bench.rs"
 required-features = ["mod-switch-response"]
 harness = false
 
-# Mirrors the release settings of the workspace this crate ships in.
-[profile.prod]
-inherits = "release"
-lto = "fat"
-codegen-units = 1
-panic = "abort"
+[[test]]
+name = "special_key_kat"
+required-features = ["special-key-bench"]
 
 [[example]]
-name = "howl_g_time"
-required-features = ["parallel"]
+name = "special_key_noise"
+required-features = ["special-key-bench"]
+
+[[example]]
+name = "special_key_time"
+required-features = ["special-key-bench", "parallel"]

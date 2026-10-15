@@ -3,7 +3,17 @@
 //! actually run at 28-31-bit primes next to the 60-bit ones, and the client steps.
 //!
 //! Cells of a group are interleaved round-robin with a rotating start; the load average is
-//! recorded per sample. Environment: HG_OUT (required), HG_ROUNDS, HG_WARM, HG_GROUPS.
+//! recorded per sample. Environment: KEYBENCH_OUT (required), KEYBENCH_ROUNDS, KEYBENCH_WARM,
+//! KEYBENCH_GROUPS.
+//!
+//! Every respond cell reads a per-shard step-1 table that is built before the timers start;
+//! its size per layout is written to the stats as `store_bytes` lines.
+
+// The loop bodies must land inside their `#[target_feature]` callers to be compiled for the
+// wide vector extensions; a plain `#[inline]` leaves that to the optimiser.
+#![allow(clippy::inline_always)]
+// A bench stops at the first step that fails.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fmt::Write as _;
 use std::hint::black_box;
@@ -11,17 +21,17 @@ use std::time::Instant;
 
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use raven_inspire::howl_g::{
-    body_values, decode_nibbles, expand_key_mask, expand_query_mask, keygen, mod_down,
-    nibbles_to_bytes, phase, query, recursion, respond, response_bytes, step1_direct, step1_stored,
-    GCtx, Packed, Query, Rns, Secret, Segment, Shard, Step1, Store, G121, G128,
-};
 use raven_inspire::inspiring::{
     packing_offline, packing_online_fully_ntt, ClientPackingKeys, OfflinePackingKeys, PackParams,
 };
 use raven_inspire::math::mod_q::DEFAULT_Q;
 use raven_inspire::math::{GaussianSampler, NttContext, Poly};
 use raven_inspire::rlwe::RlweSecretKey;
+use raven_inspire::special_key::{
+    body_values, decode_nibbles, expand_key_mask, expand_query_mask, keygen, mod_down,
+    nibbles_to_bytes, phase, query, recursion, respond, response_bytes, step1_direct, step1_stored,
+    PackCtx, Packed, Query, Rns, Secret, Segment, Shard, Step1, Store, SET_Q28, SET_Q29,
+};
 use raven_inspire::InspireParams;
 use rayon::prelude::*;
 
@@ -341,13 +351,13 @@ mod k32 {
 /// primes. Checked byte for byte against the crate-based path before it is timed.
 mod fast32 {
     use super::k32::{add, mm, sub, Ntt32};
-    use raven_inspire::howl_g::{
-        body_values, expand_query_mask, GCtx, Packed, Query, Rns, Segment, Store,
-    };
     use raven_inspire::math::mod_inverse;
+    use raven_inspire::special_key::{
+        body_values, expand_query_mask, PackCtx, Packed, Query, Rns, Segment, Store,
+    };
 
     pub struct Fast<'a> {
-        ctx: &'a GCtx,
+        ctx: &'a PackCtx,
         kq: Ntt32,
         kp: Ntt32,
         half_q: u32,
@@ -366,7 +376,7 @@ mod fast32 {
     }
 
     impl<'a> Fast<'a> {
-        pub fn new(ctx: &'a GCtx) -> Self {
+        pub fn new(ctx: &'a PackCtx) -> Self {
             let (q, p) = (ctx.lq.q as u32, ctx.lp.q as u32);
             assert!(p > q);
             let kq = Ntt32::new(ctx.d, q);
@@ -650,17 +660,18 @@ fn layouts(rng: &mut ChaCha20Rng) -> Vec<Layout> {
 }
 
 fn main() {
-    let out_dir = std::env::var("HG_OUT").expect("HG_OUT must name the output directory");
+    let out_dir =
+        std::env::var("KEYBENCH_OUT").expect("KEYBENCH_OUT must name the output directory");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let groups: Vec<String> = std::env::var("HG_GROUPS")
+    let groups: Vec<String> = std::env::var("KEYBENCH_GROUPS")
         .map(|v| v.split(',').map(str::to_owned).collect())
         .unwrap_or_default();
     let want = |g: &str| groups.is_empty() || groups.iter().any(|x| g.starts_with(x.as_str()));
     let mut sink = Sink {
         raw: String::from("group\tcell\tround\twall_ms\tthread_cpu_ms\tload1\n"),
         stats: String::new(),
-        rounds: env_usize("HG_ROUNDS", 40),
-        warm: env_usize("HG_WARM", 3),
+        rounds: env_usize("KEYBENCH_ROUNDS", 40),
+        warm: env_usize("KEYBENCH_WARM", 3),
     };
     let pool1 = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -682,7 +693,7 @@ fn main() {
 
     // ---- transform and multiply-accumulate kernels, per call on 2,048 coefficients
     if want("kernels") {
-        for q in [G121.0, G121.1, G128.0] {
+        for q in [SET_Q29.0, SET_Q29.1, SET_Q28.0] {
             check_k32(q);
         }
         const REP: usize = 200;
@@ -693,13 +704,13 @@ fn main() {
         let mk64 = |q: u64, rng: &mut ChaCha20Rng| -> Vec<u64> {
             (0..D).map(|_| rng.gen_range(0..q)).collect()
         };
-        let c29 = NttContext::new(D, G121.0);
-        let c31 = NttContext::new(D, G121.1);
+        let c29 = NttContext::new(D, SET_Q29.0);
+        let c31 = NttContext::new(D, SET_Q29.1);
         let c60 = NttContext::new(D, DEFAULT_Q);
-        let k29 = k32::Ntt32::new(D, G121.0 as u32);
-        let k31 = k32::Ntt32::new(D, G121.1 as u32);
-        let v29 = mk64(G121.0, &mut rng);
-        let v31 = mk64(G121.1, &mut rng);
+        let k29 = k32::Ntt32::new(D, SET_Q29.0 as u32);
+        let k31 = k32::Ntt32::new(D, SET_Q29.1 as u32);
+        let v29 = mk64(SET_Q29.0, &mut rng);
+        let v31 = mk64(SET_Q29.1, &mut rng);
         let v60 = mk64(DEFAULT_Q, &mut rng);
         let u29: Vec<u32> = v29.iter().map(|&x| x as u32).collect();
         let u31: Vec<u32> = v31.iter().map(|&x| x as u32).collect();
@@ -709,11 +720,11 @@ fn main() {
             p
         };
         let p29a = {
-            let mut p = Poly::from_coeffs(v29.clone(), G121.0);
+            let mut p = Poly::from_coeffs(v29.clone(), SET_Q29.0);
             p.to_ntt(&c29);
             p
         };
-        let two = [G121.0, G121.1];
+        let two = [SET_Q29.0, SET_Q29.1];
         let c2 = NttContext::with_moduli(D, &two);
         let p2a = {
             let mut p = Poly::from_coeffs_moduli(v29.clone(), &two);
@@ -861,7 +872,7 @@ fn main() {
 
     // ---- respond per query
     let layouts = layouts(&mut rng);
-    for (set_name, set, sigma_q) in [("g121", G121, 6.4), ("g128", G128, 3.2)] {
+    for (set_name, set, sigma_q) in [("q29", SET_Q29, 6.4), ("q28", SET_Q28, 3.2)] {
         for lay in &layouts {
             let name = format!("respond_{set_name}_{}", lay.name);
             let bname = format!("pieces_{set_name}_{}", lay.name);
@@ -869,7 +880,7 @@ fn main() {
             if !(want(&name) || want(&bname) || want(&tname)) {
                 continue;
             }
-            let ctx = GCtx::new(D, lay.gamma, set.0, set.1, 16);
+            let ctx = PackCtx::new(D, lay.gamma, set.0, set.1, 16);
             let segs: Vec<Segment<'_>> = lay
                 .shards
                 .iter()
@@ -927,6 +938,22 @@ fn main() {
 
             let fast = fast32::Fast::new(&ctx);
             let (store32, w32, key32) = (fast.store(&store), fast.mask(&w_ntt), fast.key(&key_ntt));
+            let join = |v: Vec<usize>| {
+                let parts: Vec<String> = v.iter().map(usize::to_string).collect();
+                parts.join(",")
+            };
+            let line = format!(
+                "{{\"store_bytes\":\"{set_name}_{}\",\"segments\":{},\"data_bytes_per_segment\":{},\
+                 \"table_bytes_u64\":[{}],\"table_bytes_u32\":[{}]}}",
+                lay.name,
+                segs.len(),
+                lay.shards[0].vals.len() / 2,
+                join(store.table_bytes()),
+                join(store32.iter().map(|t| size_of_val(&t[..])).collect()),
+            );
+            println!("{line}");
+            sink.stats.push_str(&line);
+            sink.stats.push('\n');
             let serve32 = |round: usize, wide: bool| -> Vec<u8> {
                 let qs: Vec<&Query> = rounds[round].iter().map(|(q, _)| q).collect();
                 let packed = if wide {
@@ -1066,6 +1093,8 @@ fn main() {
             }
 
             if want(&tname) {
+                // A cell is the wall time of the whole batch: every response in it is in
+                // flight that long. All responses of a batch read the same shard and table.
                 let batch = |pool: &rayon::ThreadPool, width: usize, r: usize| {
                     pool.install(|| {
                         let s = timed(|| {
@@ -1073,10 +1102,7 @@ fn main() {
                                 black_box(serve((r + k) % total, &Step1::Stored(&store)));
                             });
                         });
-                        Sample {
-                            wall: s.wall / width as f64,
-                            cpu: f64::NAN,
-                        }
+                        wall_only(s)
                     })
                 };
                 let batch32 = |pool: &rayon::ThreadPool, width: usize, r: usize| {
@@ -1086,10 +1112,7 @@ fn main() {
                                 black_box(serve32((r + k) % total, true));
                             });
                         });
-                        Sample {
-                            wall: s.wall / width as f64,
-                            cpu: f64::NAN,
-                        }
+                        wall_only(s)
                     })
                 };
                 let pool8 = rayon::ThreadPoolBuilder::new()
@@ -1098,21 +1121,21 @@ fn main() {
                     .unwrap();
                 let mut cells: Vec<Cell<'_>> = vec![
                     (
-                        "per_query_8_in_flight_8_threads",
+                        "batch_wall_8_in_flight_8_threads",
                         Box::new(|r| batch(&pool8, 8, r)),
                     ),
                     (
-                        "per_query_16_in_flight_16_threads",
+                        "batch_wall_16_in_flight_16_threads",
                         Box::new(|r| batch(&pool16, 16, r)),
                     ),
                 ];
                 if wide_ok() {
                     cells.push((
-                        "per_query_8_in_flight_8_threads_u32_wide",
+                        "batch_wall_8_in_flight_8_threads_u32_wide",
                         Box::new(|r| batch32(&pool8, 8, r)),
                     ));
                     cells.push((
-                        "per_query_16_in_flight_16_threads_u32_wide",
+                        "batch_wall_16_in_flight_16_threads_u32_wide",
                         Box::new(|r| batch32(&pool16, 16, r)),
                     ));
                 }
@@ -1122,13 +1145,13 @@ fn main() {
     }
 
     // ---- client steps
-    for (set_name, set, sigma_q) in [("g121", G121, 6.4), ("g128", G128, 3.2)] {
+    for (set_name, set, sigma_q) in [("q29", SET_Q29, 6.4), ("q28", SET_Q28, 3.2)] {
         let name = format!("client_{set_name}");
         if !want(&name) {
             continue;
         }
-        let server = GCtx::new(D, 1024, set.0, set.1, 16);
-        let ctx = GCtx::client(D, 1024, set.0, set.1, 16);
+        let server = PackCtx::new(D, 1024, set.0, set.1, 16);
+        let ctx = PackCtx::client(D, 1024, set.0, set.1, 16);
         let shards = [Shard::constant(D, 512, 3), Shard::constant(D, 512, -5)];
         let segs: Vec<Segment<'_>> = shards
             .iter()
@@ -1163,7 +1186,7 @@ fn main() {
         let mut cells: Vec<Cell<'_>> = vec![
             (
                 "context_two_primes",
-                Box::new(|_| timed(|| GCtx::client(D, 1024, set.0, set.1, 16))),
+                Box::new(|_| timed(|| PackCtx::client(D, 1024, set.0, set.1, 16))),
             ),
             (
                 "fresh_secret",

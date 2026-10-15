@@ -1,4 +1,4 @@
-//! PartialInspiRING with a one-row special-modulus packing key (scratch measurement code).
+//! PartialInspiRING with a one-row special-modulus packing key (measurement code).
 //!
 //! The query, the database multiply and the response live at a small modulus `q`. The
 //! packing key is one polynomial at `q * p`; the server multiplies by it at `q * p` and
@@ -18,9 +18,9 @@ use crate::math::primality::is_prime;
 use crate::math::{mod_inverse, GaussianSampler, NttContext};
 
 /// Ciphertext prime and special prime, key modulus near 2^60.
-pub const G121: (u64, u64) = (536_813_569, 2_147_389_441);
+pub const SET_Q29: (u64, u64) = (536_813_569, 2_147_389_441);
 /// Ciphertext prime and special prime, key modulus near 2^57.
-pub const G128: (u64, u64) = (268_369_921, 536_813_569);
+pub const SET_Q28: (u64, u64) = (268_369_921, 536_813_569);
 
 /// Whether `q` is a prime with a `2d`-th root of unity.
 pub fn modulus_is_usable(q: u64, d: usize) -> bool {
@@ -51,26 +51,26 @@ impl Limb {
     }
 
     /// Montgomery product.
-    #[inline(always)]
+    #[inline]
     pub fn mm(&self, a: u64, b: u64) -> u64 {
         let ab = u128::from(a) * u128::from(b);
         let m = u128::from((ab as u64).wrapping_mul(self.qinv));
         csubq(((ab + m * u128::from(self.q)) >> 64) as u64, self.q)
     }
 
-    #[inline(always)]
+    #[inline]
     fn sub(&self, a: u64, b: u64) -> u64 {
         csubq(a + self.q - b, self.q)
     }
 
     /// Residue of a signed value.
-    #[inline(always)]
+    #[inline]
     pub fn from_signed(&self, x: i64) -> u64 {
         x.rem_euclid(self.q as i64) as u64
     }
 
     /// Centred representative in `[-(q-1)/2, (q-1)/2]`.
-    #[inline(always)]
+    #[inline]
     pub fn centred(&self, x: u64) -> i64 {
         if x > self.half {
             x as i64 - self.q as i64
@@ -87,7 +87,7 @@ impl Limb {
 }
 
 /// Everything public that both sides derive from `(d, gamma, q, p)`.
-pub struct GCtx {
+pub struct PackCtx {
     /// Ring dimension.
     pub d: usize,
     /// Coefficients packed into one response.
@@ -136,7 +136,7 @@ fn derive_tables(limb: &Limb, d: usize, exps: &[usize]) -> Vec<Vec<u32>> {
         .collect()
 }
 
-impl GCtx {
+impl PackCtx {
     /// # Panics
     ///
     /// If a modulus is unusable at `d`, `gamma` is not a power of two in `[2, d/2]`, or the
@@ -193,7 +193,7 @@ impl GCtx {
     }
 
     /// Residue mod `q` of the centred representative of a residue mod `p`.
-    #[inline(always)]
+    #[inline]
     fn p_to_q_centred(&self, r: u64) -> u64 {
         let base = r % self.lq.q;
         if r > self.lp.half {
@@ -204,7 +204,7 @@ impl GCtx {
     }
 
     /// Residue mod `p` of the centred representative of a residue mod `q`.
-    #[inline(always)]
+    #[inline]
     fn q_to_p_centred(&self, c: u64) -> u64 {
         if self.lp.q > self.lq.q {
             if c > self.lq.half {
@@ -244,7 +244,7 @@ pub struct Rns {
 
 impl Rns {
     /// Both limbs to the transform domain.
-    pub fn to_ntt(&self, ctx: &GCtx) -> Self {
+    pub fn to_ntt(&self, ctx: &PackCtx) -> Self {
         let mut out = self.clone();
         ctx.lq.ctx.forward(&mut out.q);
         ctx.lp.ctx.forward(&mut out.p);
@@ -252,7 +252,7 @@ impl Rns {
     }
 
     /// Residues of a small signed polynomial.
-    pub fn from_signed(ctx: &GCtx, v: &[i64]) -> Self {
+    pub fn from_signed(ctx: &PackCtx, v: &[i64]) -> Self {
         Self {
             q: v.iter().map(|&x| ctx.lq.from_signed(x)).collect(),
             p: v.iter().map(|&x| ctx.lp.from_signed(x)).collect(),
@@ -260,7 +260,7 @@ impl Rns {
     }
 
     /// Centred value of each coefficient, composed over both limbs.
-    pub fn centred(&self, ctx: &GCtx) -> Vec<i128> {
+    pub fn centred(&self, ctx: &PackCtx) -> Vec<i128> {
         let (q, p) = (u128::from(ctx.lq.q), u128::from(ctx.lp.q));
         let q_inv_p = u128::from(mod_inverse(ctx.lq.q % ctx.lp.q, ctx.lp.q));
         let qp = q * p;
@@ -281,7 +281,7 @@ impl Rns {
 }
 
 /// The public key mask, coefficient form, expanded limb by limb from one stream.
-pub fn expand_key_mask(ctx: &GCtx, seed: [u8; 32]) -> Rns {
+pub fn expand_key_mask(ctx: &PackCtx, seed: [u8; 32]) -> Rns {
     let mut rng = ChaCha20Rng::from_seed(seed);
     let mut q = vec![0u64; ctx.d];
     let mut p = vec![0u64; ctx.d];
@@ -315,12 +315,12 @@ pub struct Secret {
 
 impl Secret {
     /// Fresh secret from the sampler.
-    pub fn sample(ctx: &GCtx, sampler: &mut GaussianSampler) -> Self {
+    pub fn sample(ctx: &PackCtx, sampler: &mut GaussianSampler) -> Self {
         Self::from_coeffs(ctx, sampler.sample_vec(ctx.d))
     }
 
     /// Secret with given coefficients.
-    pub fn from_coeffs(ctx: &GCtx, s: Vec<i64>) -> Self {
+    pub fn from_coeffs(ctx: &PackCtx, s: Vec<i64>) -> Self {
         let sq_ntt = ctx.lq.fwd_signed(&s);
         let sp_ntt = ctx.lp.fwd_signed(&s);
         Self { s, sq_ntt, sp_ntt }
@@ -329,7 +329,7 @@ impl Secret {
 
 /// `y = p * tau_g(s) - s * w + e` at `q * p`, coefficient form. Returns the key and its error.
 pub fn keygen(
-    ctx: &GCtx,
+    ctx: &PackCtx,
     sk: &Secret,
     w_seed: [u8; 32],
     sampler: &mut GaussianSampler,
@@ -372,7 +372,7 @@ pub struct Query {
 }
 
 /// The query mask in coefficient form.
-pub fn expand_query_mask(ctx: &GCtx, seed: [u8; 32]) -> Vec<u64> {
+pub fn expand_query_mask(ctx: &PackCtx, seed: [u8; 32]) -> Vec<u64> {
     let mut rng = ChaCha20Rng::from_seed(seed);
     let mut a = vec![0u64; ctx.d];
     expand_uniform(&mut rng, ctx.lq.q, &mut a);
@@ -381,7 +381,7 @@ pub fn expand_query_mask(ctx: &GCtx, seed: [u8; 32]) -> Vec<u64> {
 
 /// `b = -a*s + e + delta * X^(-index)`. Returns the query and its error.
 pub fn query(
-    ctx: &GCtx,
+    ctx: &PackCtx,
     sk: &Secret,
     index: usize,
     a_seed: [u8; 32],
@@ -457,7 +457,9 @@ impl Shard {
 /// Bytes from decoded nibbles, low nibble first.
 pub fn nibbles_to_bytes(nibbles: &[u8]) -> Vec<u8> {
     nibbles
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|n| n[0] | (n[1] << 4))
         .collect()
 }
@@ -491,7 +493,7 @@ pub fn coeff0_columns(shard: &Shard, c: &[i64]) -> Vec<i64> {
 }
 
 /// `coeff_0(b * h_j) mod q` for every packed column.
-pub fn body_values(ctx: &GCtx, segs: &[Segment<'_>], bodies: &[&[u64]]) -> Vec<u64> {
+pub fn body_values(ctx: &PackCtx, segs: &[Segment<'_>], bodies: &[&[u64]]) -> Vec<u64> {
     let mut out = Vec::with_capacity(ctx.gamma);
     for seg in segs {
         let b: Vec<i64> = bodies[seg.query]
@@ -509,7 +511,7 @@ pub fn body_values(ctx: &GCtx, segs: &[Segment<'_>], bodies: &[&[u64]]) -> Vec<u
 
 /// `R_i = tau_{g^i}( gamma^-1 * sum_j X^(j * g^(d-i)) * col_j )` in the transform domain,
 /// for columns given in coefficient form with their packed index.
-pub fn step1_row(ctx: &GCtx, i: usize, cols: &[(usize, &[u64])]) -> Vec<u64> {
+pub fn step1_row(ctx: &PackCtx, i: usize, cols: &[(usize, &[u64])]) -> Vec<u64> {
     let d = ctx.d;
     let q = ctx.lq.q;
     let e = ctx.gen_pows[(d - i) % d];
@@ -545,7 +547,7 @@ pub fn step1_row(ctx: &GCtx, i: usize, cols: &[(usize, &[u64])]) -> Vec<u64> {
 }
 
 /// Step 1 straight from the query: every column product `a * h_j`, then [`step1_row`].
-pub fn step1_direct(ctx: &GCtx, segs: &[Segment<'_>], masks_ntt: &[Vec<u64>]) -> Vec<Vec<u64>> {
+pub fn step1_direct(ctx: &PackCtx, segs: &[Segment<'_>], masks_ntt: &[Vec<u64>]) -> Vec<Vec<u64>> {
     use crate::par_prelude::*;
     let d = ctx.d;
     let mut prods: Vec<Vec<u64>> = Vec::with_capacity(ctx.gamma);
@@ -577,7 +579,7 @@ pub struct Store {
 
 impl Store {
     /// Built from the data alone; valid only for exactly these contents and this layout.
-    pub fn build(ctx: &GCtx, segs: &[Segment<'_>]) -> Self {
+    pub fn build(ctx: &PackCtx, segs: &[Segment<'_>]) -> Self {
         use crate::par_prelude::*;
         assert_eq!(gamma_of(segs), ctx.gamma);
         let d = ctx.d;
@@ -601,11 +603,16 @@ impl Store {
         }
         Self { segs: out }
     }
+
+    /// Bytes each segment's table holds: `gamma * d` words, whatever the segment's width.
+    pub fn table_bytes(&self) -> Vec<usize> {
+        self.segs.iter().map(|t| size_of_val(&t[..])).collect()
+    }
 }
 
 /// Step 1 through a [`Store`]: `R_i = sum_seg tau_{g^i}(a_seg) * store[seg][i]`.
 pub fn step1_stored(
-    ctx: &GCtx,
+    ctx: &PackCtx,
     segs: &[Segment<'_>],
     store: &Store,
     masks_ntt: &[Vec<u64>],
@@ -637,7 +644,7 @@ pub fn step1_stored(
 /// `on_step(i, c)` sees the `p`-limb coefficients of `T_i * tau_{g^i}(w)`; their centred
 /// values are the remainders of the division.
 pub fn recursion(
-    ctx: &GCtx,
+    ctx: &PackCtx,
     r: &mut [Vec<u64>],
     w_ntt: &Rns,
     keys: &[&Rns],
@@ -713,7 +720,7 @@ pub fn recursion(
 }
 
 /// `round(x / p) mod q` for `x` at `q * p` in coefficient form.
-pub fn mod_down(ctx: &GCtx, x: &Rns) -> Vec<u64> {
+pub fn mod_down(ctx: &PackCtx, x: &Rns) -> Vec<u64> {
     (0..ctx.d)
         .map(|k| {
             let r = ctx.p_to_q_centred(x.p[k]);
@@ -741,7 +748,7 @@ pub enum Step1<'a> {
 
 /// The server's whole answer to the queries of one pack.
 pub fn respond(
-    ctx: &GCtx,
+    ctx: &PackCtx,
     segs: &[Segment<'_>],
     step1: &Step1<'_>,
     w_ntt: &Rns,
@@ -772,11 +779,11 @@ pub fn respond(
 }
 
 /// `a * s + b` at `q`.
-pub fn phase(ctx: &GCtx, sk: &Secret, packed: &Packed) -> Vec<u64> {
+pub fn phase(ctx: &PackCtx, sk: &Secret, packed: &Packed) -> Vec<u64> {
     let mut a = packed.a.clone();
     ctx.lq.ctx.forward(&mut a);
-    for k in 0..ctx.d {
-        a[k] = ctx.lq.mm(a[k], sk.sq_ntt[k]);
+    for (x, &s) in a.iter_mut().zip(&sk.sq_ntt) {
+        *x = ctx.lq.mm(*x, s);
     }
     ctx.lq.ctx.inverse(&mut a);
     for (x, &b) in a.iter_mut().zip(&packed.b) {
@@ -786,7 +793,7 @@ pub fn phase(ctx: &GCtx, sk: &Secret, packed: &Packed) -> Vec<u64> {
 }
 
 /// The first `n` plaintext nibbles of a phase: `floor((x + delta/2) / delta) mod t`, recentred.
-pub fn decode_nibbles(ctx: &GCtx, phase: &[u64], n: usize) -> Vec<u8> {
+pub fn decode_nibbles(ctx: &PackCtx, phase: &[u64], n: usize) -> Vec<u8> {
     phase[..n]
         .iter()
         .map(|&x| ((((x + ctx.delta / 2) / ctx.delta) % ctx.t + ctx.t / 2) % ctx.t) as u8)
@@ -795,7 +802,7 @@ pub fn decode_nibbles(ctx: &GCtx, phase: &[u64], n: usize) -> Vec<u8> {
 
 /// The wire bytes of a response: the full mask and the first `body` coefficients, each at
 /// the bit width of `q`.
-pub fn response_bytes(ctx: &GCtx, packed: &Packed, body: usize) -> Vec<u8> {
+pub fn response_bytes(ctx: &PackCtx, packed: &Packed, body: usize) -> Vec<u8> {
     let q = [ctx.lq.q];
     let mut out =
         crate::math::poly::pack_coefficients_tight(&packed.a, &q, ctx.d).unwrap_or_default();
@@ -849,7 +856,7 @@ impl NoiseProbe {
     /// # Panics
     ///
     /// If the remainder sum could wrap the probe modulus.
-    pub fn new(ctx: &GCtx) -> Self {
+    pub fn new(ctx: &PackCtx) -> Self {
         // |sum| <= gamma * d * tailcut * p/2 must stay below half the probe modulus.
         assert!(
             (ctx.gamma as u128) * (ctx.d as u128) * 64 * u128::from(ctx.lp.q)
@@ -861,7 +868,7 @@ impl NoiseProbe {
     }
 
     /// Per-secret tables.
-    pub fn secret(&self, ctx: &GCtx, sk: &Secret) -> SecretProbe {
+    pub fn secret(&self, ctx: &PackCtx, sk: &Secret) -> SecretProbe {
         let tau_s = (0..ctx.gamma - 1)
             .map(|i| {
                 let mut v: Vec<u64> = tau_signed(&sk.s, ctx.gen_pows[i])
@@ -880,7 +887,7 @@ impl NoiseProbe {
     /// `queries[k]` is the query, its error and the row it selects.
     pub fn measure(
         &self,
-        ctx: &GCtx,
+        ctx: &PackCtx,
         segs: &[Segment<'_>],
         step1: &Step1<'_>,
         sk: &Secret,

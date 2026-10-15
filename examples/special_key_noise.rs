@@ -4,9 +4,15 @@
 //! key error before the division, and the division remainders. Worst-value shards give the
 //! noise rows; shards of 256-byte record cells give the byte-exact decode rows.
 //!
-//! Environment: HG_OUT (directory, required), HG_ROWS (comma list of substrings), HG_SECRETS,
-//! HG_PER_SECRET, HG_REC_SECRETS, HG_REC_PER, HG_THREADS, HG_SEED, HG_VECTORS (json of real
-//! record cells).
+//! The first response of every secret, and every response of the first secret, is also
+//! answered by the serving function and must equal the instrumented response.
+//!
+//! Environment: KEYBENCH_OUT (directory, required), KEYBENCH_ROWS (comma list of substrings),
+//! KEYBENCH_SECRETS, KEYBENCH_PER_SECRET, KEYBENCH_REC_SECRETS, KEYBENCH_REC_PER,
+//! KEYBENCH_THREADS, KEYBENCH_SEED, KEYBENCH_VECTORS (json of real record cells).
+
+// A bench stops at the first step that fails.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,11 +21,12 @@ use std::time::Instant;
 
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use raven_inspire::howl_g::{
-    decode_nibbles, expand_key_mask, keygen, nibbles_to_bytes, phase, query, sampler_variance,
-    GCtx, NoiseProbe, Query, Secret, Segment, Shard, Step1, Store, G121, G128,
-};
 use raven_inspire::math::GaussianSampler;
+use raven_inspire::special_key::{
+    decode_nibbles, expand_key_mask, keygen, nibbles_to_bytes, phase, query, respond,
+    sampler_variance, NoiseProbe, PackCtx, Query, Secret, Segment, Shard, Step1, Store, SET_Q28,
+    SET_Q29,
+};
 
 const D: usize = 2048;
 const T: u64 = 16;
@@ -53,56 +60,56 @@ struct Row {
 
 const ROWS: &[Row] = &[
     Row {
-        name: "g121-single",
-        set: G121,
+        name: "q29-single",
+        set: SET_Q29,
         sigma_q: 6.4,
         shape: Shape::Single,
     },
     Row {
-        name: "g121-pair",
-        set: G121,
+        name: "q29-pair",
+        set: SET_Q29,
         sigma_q: 6.4,
         shape: Shape::Pair,
     },
     Row {
-        name: "g121-dial",
-        set: G121,
+        name: "q29-dial",
+        set: SET_Q29,
         sigma_q: 6.4,
         shape: Shape::Dial,
     },
     Row {
-        name: "g128-single",
-        set: G128,
+        name: "q28-single",
+        set: SET_Q28,
         sigma_q: 3.2,
         shape: Shape::Single,
     },
     Row {
-        name: "g128-pair",
-        set: G128,
+        name: "q28-pair",
+        set: SET_Q28,
         sigma_q: 3.2,
         shape: Shape::Pair,
     },
     Row {
-        name: "g128-dial",
-        set: G128,
+        name: "q28-dial",
+        set: SET_Q28,
         sigma_q: 3.2,
         shape: Shape::Dial,
     },
     Row {
-        name: "g128q64-single",
-        set: G128,
+        name: "q28e64-single",
+        set: SET_Q28,
         sigma_q: 6.4,
         shape: Shape::Single,
     },
     Row {
-        name: "g128q64-pair",
-        set: G128,
+        name: "q28e64-pair",
+        set: SET_Q28,
         sigma_q: 6.4,
         shape: Shape::Pair,
     },
     Row {
-        name: "g128q64-dial",
-        set: G128,
+        name: "q28e64-dial",
+        set: SET_Q28,
         sigma_q: 6.4,
         shape: Shape::Dial,
     },
@@ -232,6 +239,9 @@ struct Stat {
     decode_misses: usize,
     records_checked: usize,
     records_wrong: usize,
+    /// Responses also answered by the serving function, and how many of those differed.
+    served_checked: usize,
+    served_wrong: usize,
     /// Coefficients with |err| above 3, 4, 5 expected standard deviations (worst values only).
     err_tail: [usize; 3],
     /// The same for the packing part alone.
@@ -242,7 +252,7 @@ struct Stat {
 struct Job<'a> {
     row: &'a Row,
     mode: Mode,
-    ctx: &'a GCtx,
+    ctx: &'a PackCtx,
     probe: &'a NoiseProbe,
     data: &'a Data,
     store: &'a Store,
@@ -351,6 +361,20 @@ fn run_secret(job: &Job<'_>, secret: usize) -> Vec<Stat> {
             st.identity_misses = m.identity_misses;
             st.decode_misses = m.decode_misses;
 
+            if secret == 0 || resp == 0 {
+                let plain: Vec<&Query> = made.iter().map(|(q, _, _)| q).collect();
+                let served = respond(
+                    ctx,
+                    &segs,
+                    &Step1::Stored(job.store),
+                    &w_ntt,
+                    &key_ntt,
+                    &plain,
+                );
+                st.served_checked = 1;
+                st.served_wrong = usize::from(served != m.packed);
+            }
+
             if job.mode == Mode::Records {
                 let nibbles = decode_nibbles(ctx, &phase(ctx, &sk, &m.packed), ctx.gamma);
                 let mut off = 0;
@@ -380,18 +404,19 @@ fn log2(x: f64) -> f64 {
 }
 
 fn main() {
-    let out_dir = std::env::var("HG_OUT").expect("HG_OUT must name the output directory");
+    let out_dir =
+        std::env::var("KEYBENCH_OUT").expect("KEYBENCH_OUT must name the output directory");
     std::fs::create_dir_all(&out_dir).unwrap();
-    let filter: Vec<String> = std::env::var("HG_ROWS")
+    let filter: Vec<String> = std::env::var("KEYBENCH_ROWS")
         .map(|v| v.split(',').map(str::to_owned).collect())
         .unwrap_or_default();
-    let secrets = env_usize("HG_SECRETS", 50);
-    let per_secret = env_usize("HG_PER_SECRET", 20);
-    let rec_secrets = env_usize("HG_REC_SECRETS", 20);
-    let rec_per = env_usize("HG_REC_PER", 10);
-    let threads = env_usize("HG_THREADS", 8);
-    let master = env_usize("HG_SEED", 0x4851_2026_1010) as u64;
-    let real: Vec<Vec<u8>> = std::env::var("HG_VECTORS")
+    let secrets = env_usize("KEYBENCH_SECRETS", 50);
+    let per_secret = env_usize("KEYBENCH_PER_SECRET", 20);
+    let rec_secrets = env_usize("KEYBENCH_REC_SECRETS", 20);
+    let rec_per = env_usize("KEYBENCH_REC_PER", 10);
+    let threads = env_usize("KEYBENCH_THREADS", 8);
+    let master = env_usize("KEYBENCH_SEED", 0x4851_2026_1010) as u64;
+    let real: Vec<Vec<u8>> = std::env::var("KEYBENCH_VECTORS")
         .ok()
         .map(|path| {
             let v: serde_json::Value =
@@ -413,7 +438,8 @@ fn main() {
     let mut tsv = String::from(
         "row\tmode\tsecret\tresp\tn\tsum_err2\tsum_err4\tmax_err\tsum_fold2\tsum_pack2\tmax_pack\t\
          sum_key2\tsum_round2\tsum_fold_pack\tfold_first\tidentity_misses\tdecode_misses\t\
-         records_checked\trecords_wrong\terr_gt3\terr_gt4\terr_gt5\tpack_gt3\tpack_gt4\tpack_gt5\tms\n",
+         records_checked\trecords_wrong\terr_gt3\terr_gt4\terr_gt5\tpack_gt3\tpack_gt4\tpack_gt5\tms\t\
+         served_checked\tserved_wrong\n",
     );
     let mut summary = String::new();
     let mut failures: Vec<String> = Vec::new();
@@ -431,7 +457,7 @@ fn main() {
             Shape::Single => 2 * CELL_BYTES,
             _ => 4 * CELL_BYTES,
         };
-        let ctx = GCtx::new(D, gamma, row.set.0, row.set.1, T);
+        let ctx = PackCtx::new(D, gamma, row.set.0, row.set.1, T);
         let probe = NoiseProbe::new(&ctx);
         let (q, p) = (ctx.lq.q as f64, ctx.lp.q as f64);
         let half = (ctx.delta / 2) as f64;
@@ -500,7 +526,7 @@ fn main() {
             for s in &stats {
                 writeln!(
                     tsv,
-                    "{}\t{mode_name}\t{}\t{}\t{}\t{:.6e}\t{:.6e}\t{}\t{:.6e}\t{:.6e}\t{}\t{:.6e}\t{:.6e}\t{:.6e}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}",
+                    "{}\t{mode_name}\t{}\t{}\t{}\t{:.6e}\t{:.6e}\t{}\t{:.6e}\t{:.6e}\t{}\t{:.6e}\t{:.6e}\t{:.6e}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{:.2}\t{}\t{}",
                     row.name,
                     s.secret,
                     s.resp,
@@ -525,7 +551,9 @@ fn main() {
                     s.pack_tail[0],
                     s.pack_tail[1],
                     s.pack_tail[2],
-                    s.ms
+                    s.ms,
+                    s.served_checked,
+                    s.served_wrong
                 )
                 .unwrap();
             }
@@ -547,6 +575,8 @@ fn main() {
             let decode: usize = stats.iter().map(|s| s.decode_misses).sum();
             let rec_checked: usize = stats.iter().map(|s| s.records_checked).sum();
             let rec_wrong: usize = stats.iter().map(|s| s.records_wrong).sum();
+            let served: usize = stats.iter().map(|s| s.served_checked).sum();
+            let served_wrong: usize = stats.iter().map(|s| s.served_wrong).sum();
             let tail = |f: fn(&Stat) -> [usize; 3]| -> [f64; 3] {
                 let mut t = [0usize; 3];
                 for s in &stats {
@@ -584,6 +614,7 @@ fn main() {
                  \"secrets\":{n_secrets},\"responses\":{responses},\"coefficients\":{n},\
                  \"decode_misses\":{decode},\"identity_misses\":{identity},\
                  \"records_checked\":{rec_checked},\"records_wrong\":{rec_wrong},\
+                 \"served_checked\":{served},\"served_wrong\":{served_wrong},\
                  \"log2_fold_rms\":{:.4},\"log2_fold_first_rms\":{:.4},\"log2_fold_model\":{:.4},\
                  \"log2_key_rms\":{:.4},\"log2_key_model\":{:.4},\
                  \"log2_round_rms\":{:.4},\"log2_round_model\":{:.4},\
@@ -643,6 +674,11 @@ fn main() {
             }
             if rec_wrong != 0 {
                 failures.push(format!("{name}: {rec_wrong} records not byte-exact"));
+            }
+            if served_wrong != 0 || served == 0 {
+                failures.push(format!(
+                    "{name}: {served_wrong} of {served} served responses differ from the probe"
+                ));
             }
             if mode == Mode::Records && rec_checked == 0 {
                 failures.push(format!("{name}: no record was checked"));

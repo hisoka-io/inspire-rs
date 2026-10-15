@@ -19,7 +19,6 @@ pub const fn num_columns(entry_size: usize) -> usize {
 }
 
 pub mod cost;
-pub mod howl_g;
 pub mod inspiring;
 pub mod ks;
 pub mod lwe;
@@ -29,6 +28,9 @@ pub mod params;
 pub mod pir;
 pub mod rgsw;
 pub mod rlwe;
+#[cfg(feature = "special-key-bench")]
+#[doc(hidden)]
+pub mod special_key;
 
 pub use pir::{
     encode_column, encode_database, encode_direct, extract, extract_inspiring, extract_two_packing,

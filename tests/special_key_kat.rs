@@ -2,15 +2,17 @@
 //! identity, the stored step 1 against the direct one, and dumps for an independent
 //! exact-integer reference.
 
+#![allow(clippy::unwrap_used)]
+
 use std::fmt::Write as _;
 
 use rand::{Rng, RngCore, SeedableRng};
 use rand_chacha::ChaCha20Rng;
-use raven_inspire::howl_g::{
-    expand_key_mask, expand_uniform, keygen, modulus_is_usable, query, respond, GCtx, NoiseProbe,
-    Packed, Query, Rns, Secret, Segment, Shard, Step1, Store, G121, G128,
-};
 use raven_inspire::math::GaussianSampler;
+use raven_inspire::special_key::{
+    expand_key_mask, expand_uniform, keygen, modulus_is_usable, query, respond, NoiseProbe,
+    PackCtx, Packed, Query, Rns, Secret, Segment, Shard, Step1, Store, SET_Q28, SET_Q29,
+};
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Shape {
@@ -26,7 +28,7 @@ enum Vals {
 }
 
 struct Case {
-    ctx: GCtx,
+    ctx: PackCtx,
     shards: Vec<Shard>,
     sk: Secret,
     key: Rns,
@@ -55,7 +57,7 @@ fn build(
     vals: Vals,
     seed: u64,
 ) -> Case {
-    let ctx = GCtx::new(d, gamma, q, p, 16);
+    let ctx = PackCtx::new(d, gamma, q, p, 16);
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let shards = match shape {
         Shape::Single => vec![shard(&mut rng, d, gamma, vals)],
@@ -117,10 +119,13 @@ impl Case {
     }
 }
 
-fn grid() -> Vec<(usize, usize, (u64, u64), f64, Shape)> {
+/// Ring size, packed width, prime set, query error width, shape.
+type GridCase = (usize, usize, (u64, u64), f64, Shape);
+
+fn grid() -> Vec<GridCase> {
     let mut out = Vec::new();
     for &(d, gamma) in &[(256usize, 32usize), (512, 64), (256, 128)] {
-        for &(set, sigma_q) in &[(G128, 3.2), (G121, 6.4)] {
+        for &(set, sigma_q) in &[(SET_Q28, 3.2), (SET_Q29, 6.4)] {
             for &shape in &[Shape::Single, Shape::Pair, Shape::Dial] {
                 out.push((d, gamma, set, sigma_q, shape));
             }
@@ -131,7 +136,7 @@ fn grid() -> Vec<(usize, usize, (u64, u64), f64, Shape)> {
 
 #[test]
 fn design_primes_are_usable_and_sized() {
-    for &(q, p) in &[G121, G128] {
+    for &(q, p) in &[SET_Q29, SET_Q28] {
         assert!(modulus_is_usable(q, 2048) && modulus_is_usable(p, 2048));
         assert_eq!(q % 4096, 1);
         assert_eq!(p % 4096, 1);
@@ -141,13 +146,13 @@ fn design_primes_are_usable_and_sized() {
             "special prime is at least about twice q"
         );
     }
-    assert_eq!(64 - (G121.0 - 1).leading_zeros(), 29);
-    assert_eq!(64 - (G121.1 - 1).leading_zeros(), 31);
-    assert_eq!(64 - (G128.0 - 1).leading_zeros(), 28);
-    assert_eq!(64 - (G128.1 - 1).leading_zeros(), 29);
+    assert_eq!(64 - (SET_Q29.0 - 1).leading_zeros(), 29);
+    assert_eq!(64 - (SET_Q29.1 - 1).leading_zeros(), 31);
+    assert_eq!(64 - (SET_Q28.0 - 1).leading_zeros(), 28);
+    assert_eq!(64 - (SET_Q28.1 - 1).leading_zeros(), 29);
     let bits = |(q, p): (u64, u64)| (q as f64).log2() + (p as f64).log2();
-    assert!((bits(G121) - 59.9998).abs() < 1e-3);
-    assert!((bits(G128) - 56.9995).abs() < 1e-3);
+    assert!((bits(SET_Q29) - 59.9998).abs() < 1e-3);
+    assert!((bits(SET_Q28) - 56.9995).abs() < 1e-3);
     // A composite and a prime without the root are both refused.
     assert!(!modulus_is_usable(4097, 2048), "17 * 241");
     assert!(
@@ -214,7 +219,7 @@ fn every_shape_decodes_and_meets_the_exact_error_identity() {
 
 #[test]
 fn a_wrong_key_error_breaks_the_identity_and_a_wrong_key_breaks_decode() {
-    let case = build(512, 64, G128, 3.2, Shape::Single, Vals::Random, 7);
+    let case = build(512, 64, SET_Q28, 3.2, Shape::Single, Vals::Random, 7);
     let ctx = &case.ctx;
     let segs = case.segs();
     let probe = NoiseProbe::new(ctx);
@@ -248,14 +253,14 @@ fn a_wrong_key_error_breaks_the_identity_and_a_wrong_key_breaks_decode() {
     );
 
     // A key for another secret: nothing decodes.
-    let other = build(512, 64, G128, 3.2, Shape::Single, Vals::Random, 8);
+    let other = build(512, 64, SET_Q28, 3.2, Shape::Single, Vals::Random, 8);
     let foreign = run(&other.key, &other.key_err);
     assert!(foreign.decode_misses > 32, "decode check cannot fail");
 }
 
 #[test]
 fn a_store_built_for_other_contents_gives_a_different_and_wrong_answer() {
-    let case = build(512, 64, G121, 6.4, Shape::Single, Vals::Random, 21);
+    let case = build(512, 64, SET_Q29, 6.4, Shape::Single, Vals::Random, 21);
     let ctx = &case.ctx;
     let segs = case.segs();
     let probe = NoiseProbe::new(ctx);
@@ -303,6 +308,46 @@ fn a_store_built_for_other_contents_gives_a_different_and_wrong_answer() {
     assert!(stale.decode_misses > 0 || stale.identity_misses > 0);
 }
 
+/// The step-1 table a server keeps per shard, at the served ring size. A table is `gamma * d`
+/// words however narrow its segment, and depends on where the segment sits in the pack.
+#[test]
+fn store_tables_have_the_stated_size_and_are_bound_to_their_position() {
+    const D: usize = 2048;
+    const MIB: usize = 1 << 20;
+    let mut rng = ChaCha20Rng::seed_from_u64(77);
+    let a = shard(&mut rng, D, 512, Vals::Random);
+    let b = shard(&mut rng, D, 512, Vals::Random);
+    let wide = shard(&mut rng, D / 2, 1024, Vals::Random);
+    let seg = |shard, query| Segment { shard, query };
+
+    let single = PackCtx::new(D, 512, SET_Q29.0, SET_Q29.1, 16);
+    let double = PackCtx::new(D, 1024, SET_Q29.0, SET_Q29.1, 16);
+    let lone = Store::build(&single, &[seg(&a, 0)]);
+    let ab = Store::build(&double, &[seg(&a, 0), seg(&b, 1)]);
+    let ba = Store::build(&double, &[seg(&b, 0), seg(&a, 1)]);
+    let dial = Store::build(&double, &[seg(&wide, 0)]);
+
+    assert_eq!(lone.table_bytes(), [8 * MIB]);
+    assert_eq!(ab.table_bytes(), [16 * MIB, 16 * MIB]);
+    assert_eq!(dial.table_bytes(), [16 * MIB]);
+    // The data behind one table is 2,048 cells of 256 bytes.
+    assert_eq!(a.vals.len() / 2, MIB / 2);
+
+    assert_ne!(
+        ab.segs[0], ba.segs[1],
+        "a first-position table served second"
+    );
+    assert_ne!(
+        ab.segs[1], ba.segs[0],
+        "a second-position table served first"
+    );
+    assert_ne!(
+        lone.segs[0][..],
+        ab.segs[0][..8 * MIB / 8],
+        "a single's table inside a pair's"
+    );
+}
+
 #[test]
 fn mask_expander_is_exact_and_pinned() {
     // A modulus just above 2^63 rejects almost half of all words; the survivors must be the
@@ -325,9 +370,9 @@ fn mask_expander_is_exact_and_pinned() {
     assert!(rejected > 16, "the rejection branch was not exercised");
 
     // The key mask is a fixed function of the seed: limb q first, then limb p, one stream.
-    let ctx = GCtx::new(2048, 512, G121.0, G121.1, 16);
+    let ctx = PackCtx::new(2048, 512, SET_Q29.0, SET_Q29.1, 16);
     let w = expand_key_mask(&ctx, [7u8; 32]);
-    assert!(w.q.iter().all(|&x| x < G121.0) && w.p.iter().all(|&x| x < G121.1));
+    assert!(w.q.iter().all(|&x| x < SET_Q29.0) && w.p.iter().all(|&x| x < SET_Q29.1));
     let digest =
         w.q.iter()
             .chain(&w.p)
@@ -335,7 +380,7 @@ fn mask_expander_is_exact_and_pinned() {
                 (h ^ x).wrapping_mul(0x0100_0000_01b3)
             });
     let first = [w.q[0], w.q[1], w.p[0], w.p[1]];
-    if let Ok(path) = std::env::var("HOWL_G_PIN_OUT") {
+    if let Ok(path) = std::env::var("SPECIAL_KEY_PIN_OUT") {
         std::fs::write(path, format!("{digest:#x} {first:?}\n")).unwrap();
     }
     assert_eq!(digest, PINNED_MASK_DIGEST, "first values {first:?}");
@@ -343,7 +388,7 @@ fn mask_expander_is_exact_and_pinned() {
 
 const PINNED_MASK_DIGEST: u64 = 3_556_523_134_167_814_496;
 
-fn composed(ctx: &GCtx, x: &Rns) -> Vec<u64> {
+fn composed(ctx: &PackCtx, x: &Rns) -> Vec<u64> {
     let qp = i128::from(ctx.lq.q) * i128::from(ctx.lp.q);
     x.centred(ctx)
         .iter()
@@ -393,7 +438,7 @@ fn dump(name: &str, case: &Case, packed: &Packed, dir: &str) {
         line(
             &mut out,
             &format!("qa{k}"),
-            &raven_inspire::howl_g::expand_query_mask(ctx, qr.a_seed),
+            &raven_inspire::special_key::expand_query_mask(ctx, qr.a_seed),
         );
         line(&mut out, &format!("qb{k}"), &qr.b);
         line(&mut out, &format!("qe{k}"), e);
@@ -406,75 +451,75 @@ fn dump(name: &str, case: &Case, packed: &Packed, dir: &str) {
 
 #[test]
 fn dump_cases_for_the_integer_reference() {
-    let Ok(dir) = std::env::var("HOWL_G_DUMP_DIR") else {
+    let Ok(dir) = std::env::var("SPECIAL_KEY_DUMP_DIR") else {
         return;
     };
     let cases = [
         (
-            "g128_d256_g32_single",
+            "q28_d256_g32_single",
             256,
             32,
-            G128,
+            SET_Q28,
             3.2,
             Shape::Single,
             Vals::Random,
             41,
         ),
         (
-            "g121_d512_g64_single",
+            "q29_d512_g64_single",
             512,
             64,
-            G121,
+            SET_Q29,
             6.4,
             Shape::Single,
             Vals::Random,
             42,
         ),
         (
-            "g128_d256_g64_pair",
+            "q28_d256_g64_pair",
             256,
             64,
-            G128,
+            SET_Q28,
             3.2,
             Shape::Pair,
             Vals::Random,
             43,
         ),
         (
-            "g121_d512_g64_dial",
+            "q29_d512_g64_dial",
             512,
             64,
-            G121,
+            SET_Q29,
             6.4,
             Shape::Dial,
             Vals::Random,
             44,
         ),
         (
-            "g121_d256_g128_pair_worst",
+            "q29_d256_g128_pair_worst",
             256,
             128,
-            G121,
+            SET_Q29,
             6.4,
             Shape::Pair,
             Vals::Worst,
             45,
         ),
         (
-            "g128_d256_g32_single_edge0",
+            "q28_d256_g32_single_edge0",
             256,
             32,
-            G128,
+            SET_Q28,
             3.2,
             Shape::Single,
             Vals::Worst,
             48,
         ),
         (
-            "g128_d256_g32_single_edgelast",
+            "q28_d256_g32_single_edgelast",
             256,
             32,
-            G128,
+            SET_Q28,
             3.2,
             Shape::Single,
             Vals::Random,
