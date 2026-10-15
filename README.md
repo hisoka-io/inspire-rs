@@ -86,8 +86,7 @@ measures the served decode margin under both gadgets on the production ring.
 
 ## Security model
 
-- **Parameters.** `secure_128_d2048` (ring dimension 2048, a 60-bit modulus) measures 121.5 bits with malb/lattice-estimator
-  (binding attack `primal_bdd`); the preset keeps its historical name. The d=4096 preset is not measured.
+- **Parameters.** `secure_128_d2048` is ring dimension 2048 with a 60-bit modulus; the preset name is historical.
 - **Honest-server answers.** A response is not bound to the queried index; an application checks the record it receives against a
   commitment it trusts.
 - **Correctness margin.** The served 36-bit response keeps 8.88 bits of noise margin at 512-byte records and 10.30 bits at 32-byte

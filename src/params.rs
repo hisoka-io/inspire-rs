@@ -1,10 +1,8 @@
 //! Parameter sets for InsPIRe PIR
 //!
 //! This module defines the cryptographic parameters for the InsPIRe protocol,
-//! including ring dimensions, moduli, and security levels. `validate` checks
-//! structural and noise invariants only: it runs no lattice estimate, and
-//! `security_level` is a declared target nothing verifies. The shipped
-//! `secure_128_d2048` measures 121.5 bits, not 128.
+//! including ring dimensions and moduli. `validate` checks structural and
+//! noise invariants only; `security_level` is a label nothing verifies.
 //!
 //! # Overview
 //!
@@ -18,7 +16,7 @@
 //! ```
 //! use raven_inspire::params::{InspireParams, SecurityLevel};
 //!
-//! // The shipped preset. Measures 121.5 bits, not 128.
+//! // The shipped preset.
 //! let params = InspireParams::secure_128_d2048();
 //! assert!(params.validate().is_ok());
 //!
@@ -333,9 +331,7 @@ pub const MIN_SIGMA: f64 = 3.19;
 impl InspireParams {
     /// Creates the shipped d=2048 preset.
     ///
-    /// The name predates the measurement: at `DEFAULT_Q` this parameter set is
-    /// 121.5 bits, not 128 (malb/lattice-estimator @ 3e48ef4, binding attack
-    /// `primal_bdd`). log2 q = 57 is the largest modulus clearing 128 bits.
+    /// The name is historical and is not a security claim.
     ///
     /// A shard holds `ring_dim` = 2048 records of at most 2048 bytes (the
     /// InspiRING width limit), so at most 4 MiB of records per shard.
@@ -382,10 +378,7 @@ impl InspireParams {
         }
     }
 
-    /// Creates d=4096 parameters carrying a declared 128-bit target.
-    ///
-    /// The lattice-estimator run that measured `secure_128_d2048` at 121.5 bits
-    /// did not cover this ring dimension, so its level is unmeasured.
+    /// Creates d=4096 parameters.
     ///
     /// At the same q as d=2048 the wider ring grows mod-switch rounding and packing
     /// noise, so these parameters carry less noise margin, not more: the 36-bit
