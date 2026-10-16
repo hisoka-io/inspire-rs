@@ -25,7 +25,7 @@
 use super::error::{pir_err, Result};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::inspiring::{PackParams, PackingKeyBody, ShardPackingStore};
 use crate::ks::{generate_automorphism_ks_matrix, KeySwitchingMatrix};
@@ -247,9 +247,10 @@ pub struct ShardData {
     pub id: u32,
     /// Database entries encoded as polynomial coefficients
     pub polynomials: Vec<Poly>,
-    /// Never persisted: a decoded shard packs per query until its store is rebuilt.
+    /// Never persisted: a decoded shard packs per query until its store is rebuilt. Clones
+    /// share the slot until their columns change, so a store built through one serves all.
     #[serde(skip)]
-    packing_store: Option<Arc<ShardPackingStore>>,
+    packing_store: Arc<OnceLock<ShardPackingStore>>,
 }
 
 impl ShardData {
@@ -258,7 +259,7 @@ impl ShardData {
         Self {
             id,
             polynomials,
-            packing_store: None,
+            packing_store: Arc::default(),
         }
     }
 
@@ -299,18 +300,43 @@ impl ShardData {
     pub fn precompute_packing(&mut self, pack_params: &PackParams, ctx: &NttContext) -> Result<()> {
         let store = ShardPackingStore::build(pack_params, &self.polynomials, ctx)
             .map_err(|e| pir_err!("shard {}: {e}", self.id))?;
-        self.packing_store = Some(Arc::new(store));
+        self.packing_store = Arc::new(OnceLock::from(store));
         Ok(())
     }
 
-    /// The store built by [`Self::precompute_packing`], if any.
-    pub fn packing_store(&self) -> Option<&ShardPackingStore> {
-        self.packing_store.as_deref()
+    /// [`Self::precompute_packing`] for a shard that is already shared, such as one being
+    /// served: builds only when the shard has no store, and the store reaches every clone that
+    /// shares this shard's slot. Responds pack per query until it lands. Returns whether this
+    /// call installed the store; a concurrent build of the same slot may win instead.
+    ///
+    /// Edit `polynomials` through [`Self::drop_packing_store`] first: a clone edited in place
+    /// still shares the slot, and a store built through either one is refused by the other.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::precompute_packing`].
+    pub fn precompute_packing_shared(
+        &self,
+        pack_params: &PackParams,
+        ctx: &NttContext,
+    ) -> Result<bool> {
+        if self.packing_store.get().is_some() {
+            return Ok(false);
+        }
+        let store = ShardPackingStore::build(pack_params, &self.polynomials, ctx)
+            .map_err(|e| pir_err!("shard {}: {e}", self.id))?;
+        Ok(self.packing_store.set(store).is_ok())
     }
 
-    /// Release the packing store; responds go back to packing per query.
+    /// The store built for this shard's columns, if any.
+    pub fn packing_store(&self) -> Option<&ShardPackingStore> {
+        self.packing_store.get()
+    }
+
+    /// Release the packing store, and the slot it shares with clones; responds go back to
+    /// packing per query.
     pub fn drop_packing_store(&mut self) {
-        self.packing_store = None;
+        self.packing_store = Arc::default();
     }
 }
 

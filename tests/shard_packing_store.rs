@@ -400,6 +400,53 @@ fn a_store_follows_clones_and_never_reaches_the_encoded_bytes() {
 
 /// The store is the size of the shard's columns: gamma x 16 KiB at d = 2048.
 #[test]
+fn a_store_built_through_a_shared_shard_reaches_every_clone_until_one_changes() {
+    let d = 256;
+    let mut table = LiveTable::build(2 * d);
+    let served = std::sync::Arc::new(table.encoded.clone());
+    let copy = (*served).clone();
+    let ctx = table.params.ntt_context();
+    assert!(table
+        .encoded
+        .shards
+        .iter()
+        .all(|s| s.packing_store().is_none()));
+    for shard in &served.shards {
+        assert!(shard
+            .precompute_packing_shared(table.cache.pack_params(), &ctx)
+            .unwrap());
+        assert!(
+            !shard
+                .precompute_packing_shared(table.cache.pack_params(), &ctx)
+                .unwrap(),
+            "a slot that holds a store is not rebuilt"
+        );
+    }
+    for clone in [&copy, &table.encoded] {
+        for (shared, held) in served.shards.iter().zip(&clone.shards) {
+            assert!(std::ptr::eq(
+                shared.packing_store().unwrap(),
+                held.packing_store().unwrap()
+            ));
+        }
+    }
+    assert_eq!(table.respond(d + 5).unwrap(), row_bytes(d + 5, 64));
+
+    let mut detached = copy.clone();
+    detached.shards[0].drop_packing_store();
+    assert!(detached.shards[0].packing_store().is_none());
+    assert!(copy.shards[0].packing_store().is_some());
+    assert!(detached.shards[1].packing_store().is_some());
+    assert!(detached.shards[0]
+        .precompute_packing_shared(table.cache.pack_params(), &ctx)
+        .unwrap());
+    assert!(!std::ptr::eq(
+        detached.shards[0].packing_store().unwrap(),
+        copy.shards[0].packing_store().unwrap()
+    ));
+}
+
+#[test]
 fn a_production_store_is_gamma_times_sixteen_kibibytes() {
     let params = InspireParams::secure_128_d2048();
     let ctx = params.ntt_context();
