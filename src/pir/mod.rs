@@ -17,9 +17,11 @@ pub use encode_db::{
     encode_column, encode_database, encode_direct, inverse_monomial, reconstruct_entry,
 };
 pub use extract::{extract, extract_inspiring, extract_two_packing, extract_with_variant};
+#[cfg(feature = "caller-secret-keys")]
+pub use query::{query, query_seeded};
 pub use query::{
-    query, query_seeded, ClientQuery, ClientState, PackingKeySource, PackingMode, SeededBatchQuery,
-    SeededClientQuery, SeededQueryBatch, ServerSessionHandle,
+    ClientQuery, ClientState, PackingKeySource, PackingMode, SeededBatchQuery, SeededClientQuery,
+    SeededQueryBatch, ServerSessionHandle,
 };
 pub use respond::{
     resolve_packing_seat, respond, respond_inspiring, respond_inspiring_cached,

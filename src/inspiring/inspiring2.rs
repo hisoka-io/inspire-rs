@@ -755,9 +755,9 @@ impl ClientPackingKeys {
     /// Reads the ring, the gadget and the generator only, so a client never builds
     /// [`PackParams`] and its automorphism tables.
     ///
-    /// Call once per secret key: `w_mask` is fixed by the seed, so a second key under
-    /// the same secret repeats the mask with fresh error. [`crate::pir::ClientSession`]
-    /// builds its key once and resends those bytes.
+    /// Test and KAT builds only. `w_mask` is fixed by the seed, so a second key under
+    /// the same secret repeats the mask with fresh error and leaks the secret; clients
+    /// build their one key through [`crate::pir::ClientSession::with_fresh_secret`].
     ///
     /// # Errors
     ///
@@ -779,7 +779,19 @@ impl ClientPackingKeys {
     /// assert_eq!(keys.y_body.len(), params.packing_key_rows());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    #[cfg(feature = "caller-secret-keys")]
     pub fn generate(
+        sk: &RlweSecretKey,
+        params: &InspireParams,
+        num_to_pack: usize,
+        w_seed: [u8; 32],
+        sampler: &mut GaussianSampler,
+    ) -> Result<Self, PackParamsError> {
+        Self::generate_once(sk, params, num_to_pack, w_seed, sampler)
+    }
+
+    /// The body of `generate`: one call per secret, which the caller guarantees.
+    pub(crate) fn generate_once(
         sk: &RlweSecretKey,
         params: &InspireParams,
         num_to_pack: usize,
@@ -814,36 +826,6 @@ impl ClientPackingKeys {
             full_key: false,
             num_to_pack,
         })
-    }
-
-    /// [`Self::generate`] for full packing; `z_body` uses the conjugation index 2n-1.
-    pub fn generate_full(
-        sk: &RlweSecretKey,
-        pack_params: &PackParams,
-        w_seed: [u8; 32],
-        v_seed: [u8; 32],
-        sampler: &mut GaussianSampler,
-    ) -> Self {
-        let n = pack_params.ring_dim;
-        let q = pack_params.q;
-        let two_n = 2 * n;
-        let gadget_len = pack_params.gadget.len;
-        let ctx = NttContext::with_moduli(n, &pack_params.moduli);
-
-        let w_mask = generate_mask_from_seed(w_seed, n, q, &pack_params.moduli, gadget_len);
-        let v_mask = generate_mask_from_seed(v_seed, n, q, &pack_params.moduli, gadget_len);
-
-        let gen_pow = pack_params.gen_pows[1];
-        let gadget = &pack_params.gadget;
-        let y_body = generate_ksk_body(sk, gen_pow, gadget, 0, &w_mask, sampler, &ctx);
-        let z_body = generate_ksk_body(sk, two_n - 1, gadget, 0, &v_mask, sampler, &ctx);
-
-        Self {
-            y_body,
-            z_body,
-            full_key: true,
-            num_to_pack: n,
-        }
     }
 }
 

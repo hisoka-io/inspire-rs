@@ -51,11 +51,20 @@ impl std::fmt::Debug for ClientSession {
 }
 
 impl ClientSession {
-    /// Build a session around `rlwe_sk`, generating its packing keys.
+    /// [`Self::with_fresh_secret`] under a secret the caller holds.
     ///
-    /// Takes the secret key by value: a secret belongs to one session, which builds
-    /// the one set of packing keys under it.
+    /// Test and KAT builds only: a second session on a copy of `rlwe_sk` publishes a
+    /// second packing key under the same mask, which leaks the secret.
+    #[cfg(feature = "caller-secret-keys")]
     pub fn new(
+        crs: ServerCrs,
+        rlwe_sk: RlweSecretKey,
+        sampler: &mut GaussianSampler,
+    ) -> Result<Self> {
+        Self::build(crs, rlwe_sk, sampler)
+    }
+
+    fn build(
         crs: ServerCrs,
         rlwe_sk: RlweSecretKey,
         sampler: &mut GaussianSampler,
@@ -65,7 +74,7 @@ impl ClientSession {
 
         let packing_keys = if crs.inspiring_num_columns > 0 {
             Some(
-                ClientPackingKeys::generate(
+                ClientPackingKeys::generate_once(
                     &rlwe_sk,
                     &crs.params,
                     crs.inspiring_num_columns,
@@ -87,8 +96,17 @@ impl ClientSession {
         })
     }
 
-    /// [`Self::new`] under a secret key drawn here, for callers with no key of their
-    /// own to keep.
+    /// Build a session under a secret key drawn here, and its one packing key.
+    ///
+    /// The secret and the key's error come from a fresh OS-seeded stream, never from a
+    /// caller's sampler: a seeded sampler handed in twice would give one secret two keys.
+    /// The secret never leaves the session except inside a [`SessionResidue`], which
+    /// restores the stored key and never builds another, so one secret backs one key.
+    /// A retry resends [`Self::packing_keys`]; a new key means a new session.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the platform entropy source fails, or the CRS is unusable.
     ///
     /// ```
     /// use raven_inspire::math::GaussianSampler;
@@ -97,16 +115,29 @@ impl ClientSession {
     ///
     /// let params = InspireParams::secure_128_d2048();
     /// let database = vec![0u8; params.ring_dim * 32];
-    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
+    /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
     /// let (crs, _, _) = setup(&params, &database, 32, &mut sampler)?;
-    /// let session = ClientSession::with_fresh_secret(crs, &mut sampler)?;
+    /// let session = ClientSession::with_fresh_secret(crs)?;
     /// assert!(session.has_inspiring_packing());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
-    pub fn with_fresh_secret(crs: ServerCrs, sampler: &mut GaussianSampler) -> Result<Self> {
+    pub fn with_fresh_secret(crs: ServerCrs) -> Result<Self> {
+        crs.validate()?;
+        let mut sampler = GaussianSampler::from_os_entropy(crs.params.sigma)
+            .map_err(|e| pir_err!("no session without a fresh secret: {e}"))?;
+        let rlwe_sk = RlweSecretKey::generate(&crs.params, &mut sampler);
+        Self::build(crs, rlwe_sk, &mut sampler)
+    }
+
+    /// [`Self::with_fresh_secret`] with the secret and key error drawn from `sampler`.
+    ///
+    /// Test and KAT builds only: a seeded sampler replays the secret, so two calls on
+    /// one seed publish two keys under one secret and one mask.
+    #[cfg(feature = "caller-secret-keys")]
+    pub fn with_seeded_secret(crs: ServerCrs, sampler: &mut GaussianSampler) -> Result<Self> {
         crs.validate()?;
         let rlwe_sk = RlweSecretKey::generate(&crs.params, sampler);
-        Self::new(crs, rlwe_sk, sampler)
+        Self::build(crs, rlwe_sk, sampler)
     }
 
     /// Register this session's packing keys with an in-process store and switch to the
@@ -162,9 +193,9 @@ impl ClientSession {
     ///
     /// let params = InspireParams::secure_128_d2048();
     /// let database = vec![0u8; params.ring_dim * 32];
-    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
-    /// let (crs, _, secret_key) = setup(&params, &database, 32, &mut sampler)?;
-    /// let mut session = ClientSession::new(crs, secret_key, &mut sampler)?;
+    /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
+    /// let (crs, _, _) = setup(&params, &database, 32, &mut sampler)?;
+    /// let mut session = ClientSession::with_fresh_secret(crs)?;
     /// let issued = ServerSessionHandle(42);
     /// session.install_server_session_handle(issued)?;
     /// assert_eq!(session.session_handle(), Some(issued));
@@ -272,9 +303,9 @@ impl ClientSession {
     ///
     /// let params = InspireParams::secure_128_d2048();
     /// let database = vec![0u8; params.ring_dim * 32];
-    /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
-    /// let (crs, encoded, secret_key) = setup(&params, &database, 32, &mut sampler)?;
-    /// let session = ClientSession::new(crs, secret_key, &mut sampler)?;
+    /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
+    /// let (crs, encoded, _) = setup(&params, &database, 32, &mut sampler)?;
+    /// let session = ClientSession::with_fresh_secret(crs)?;
     /// let (states, batch) = session.query_batch(&[3, 5], &encoded.config, &mut sampler)?;
     /// assert_eq!((states.len(), batch.queries().len()), (2, 2));
     /// # Ok::<(), Box<dyn std::error::Error>>(())

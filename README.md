@@ -30,20 +30,24 @@ query and InspiRING packing with two key-switching matrices. `TwoPacking` is the
 ```rust
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::InspireParams;
-use raven_inspire::{extract_inspiring, query_seeded, respond_seeded_inspiring, setup};
+use raven_inspire::{extract_inspiring, respond_seeded_inspiring, setup, ClientSession};
 
 let params = InspireParams::secure_128_d2048();
 let entry_size = 32;
 let database = vec![0u8; params.ring_dim * entry_size];
 let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
 
-let (crs, db, sk) = setup(&params, &database, entry_size, &mut sampler)?;
-let (state, query) = query_seeded(&crs, 42, &db.config, &sk, &mut sampler)?;
+let (crs, db, _) = setup(&params, &database, entry_size, &mut sampler)?;
+let session = ClientSession::with_fresh_secret(crs.clone())?;
+let (state, query) = session.query_seeded(42, &db.config, &mut sampler)?;
 let response = respond_seeded_inspiring(&crs, &db, &query)?;
 let record = extract_inspiring(&crs, &state, &response, entry_size)?;
 ```
 
-`ClientSession` builds its packing keys once and reuses them for every query. It can register
+`ClientSession::with_fresh_secret` draws the client's secret key from a fresh OS-seeded stream,
+never from a sampler the caller passes in, and builds its one set of packing keys; every query,
+retry and restored session resends those bytes. A second key under the same secret would leak it,
+so no default-build function builds a key under a secret the caller passes in. It can register
 the ~48 KiB of packing keys with a `ServerSessionStore` once and send a handle afterwards; the
 server keeps a registered key as three polynomials (49,152 bytes at d=2048, at any record
 width). `ClientSession::query_batch` sends any number of queries under that one key, inline or
@@ -83,6 +87,7 @@ measures the served decode margin under both gadgets on the production ring.
 | `parallel` | Runs the respond and packing loops on rayon. Output is byte-identical to the default sequential build. |
 | `mod-switch-response` | Response modulus switching (`pir::mod_switch`) and the matching client extractor. |
 | `simd-packing-offline` | AVX-512 IFMA52 kernel for offline packing, selected at runtime by CPUID with a scalar fallback. |
+| `caller-secret-keys` | Tests and known-answer fixtures only: `ClientSession::new`, `query`, `query_seeded` and `ClientPackingKeys::generate`, which build a packing key under a secret the caller supplies. |
 
 ## Security model
 

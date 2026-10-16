@@ -31,9 +31,9 @@ pub mod rlwe;
 
 pub use pir::{
     encode_column, encode_database, encode_direct, extract, extract_inspiring, extract_two_packing,
-    extract_with_variant, inverse_monomial, query, query_seeded, resolve_packing_seat, respond,
-    respond_inspiring, respond_inspiring_cached, respond_inspiring_cached_with_session,
-    respond_one_packing, respond_seeded, respond_seeded_batch, respond_seeded_inspiring,
+    extract_with_variant, inverse_monomial, resolve_packing_seat, respond, respond_inspiring,
+    respond_inspiring_cached, respond_inspiring_cached_with_session, respond_one_packing,
+    respond_seeded, respond_seeded_batch, respond_seeded_inspiring,
     respond_seeded_inspiring_cached, respond_seeded_inspiring_cached_with_session,
     respond_seeded_packed, respond_seeded_with_seat, respond_seeded_with_variant,
     respond_with_variant, setup, setup_with_rng, ClientQuery, ClientSession, ClientState,
@@ -41,5 +41,7 @@ pub use pir::{
     SeededClientQuery, SeededQueryBatch, ServerCrs, ServerInspiringCache, ServerResponse,
     ServerSessionHandle, ServerSessionStore, SessionResidue, ShardData,
 };
+#[cfg(feature = "caller-secret-keys")]
+pub use pir::{query, query_seeded};
 
 pub use params::{InspireParams, InspireVariant, SecurityLevel};

@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::inspiring::ClientPackingKeys;
 use crate::lwe::LweSecretKey;
-use crate::math::GaussianSampler;
 use crate::params::ShardConfig;
-use crate::rgsw::{GadgetVector, RgswCiphertext, SeededRgswCiphertext};
+use crate::rgsw::{RgswCiphertext, SeededRgswCiphertext};
 use crate::rlwe::RlweSecretKey;
+#[cfg(feature = "caller-secret-keys")]
+use crate::{math::GaussianSampler, pir::encode_db::inverse_monomial, rgsw::GadgetVector};
 
-use super::encode_db::inverse_monomial;
 use super::error::{pir_err, Result};
 use super::setup::ServerCrs;
 
@@ -25,6 +25,7 @@ pub enum PackingMode {
     Tree,
 }
 
+#[cfg(feature = "caller-secret-keys")]
 fn seeded_query_with_gadget(
     crs: &ServerCrs,
     global_index: u64,
@@ -303,6 +304,7 @@ impl SeededClientQuery {
     }
 }
 
+#[cfg(feature = "caller-secret-keys")]
 fn generate_packing_keys(
     crs: &ServerCrs,
     rlwe_sk: &RlweSecretKey,
@@ -319,6 +321,7 @@ fn generate_packing_keys(
     .map_err(|e| pir_err!("CRS carries an unusable InspiRING width: {e}"))
 }
 
+#[cfg(feature = "caller-secret-keys")]
 fn ensure_inspiring_query_width(crs: &ServerCrs) -> Result<()> {
     if crs.inspiring_num_columns == 0 {
         return Err(pir_err!(
@@ -345,8 +348,10 @@ pub(super) fn ensure_query_shard_geometry(
 
 /// Build a query for `global_index` plus the client state needed to extract it.
 ///
-/// Generates its own packing keys, so call it once per secret key;
-/// [`crate::pir::ClientSession`] sends any number of queries under one key.
+/// Test and KAT builds only: every call builds a new packing key under `rlwe_sk`, and
+/// two keys under one secret leak it. Clients query through
+/// [`crate::pir::ClientSession`], which builds its one key once.
+#[cfg(feature = "caller-secret-keys")]
 pub fn query(
     crs: &ServerCrs,
     global_index: u64,
@@ -392,7 +397,8 @@ pub fn query(
 }
 
 /// `query` in the compact seeded form; the server must `expand()` before processing.
-/// Like [`query`], once per secret key.
+/// Test and KAT builds only, like [`query`].
+#[cfg(feature = "caller-secret-keys")]
 pub fn query_seeded(
     crs: &ServerCrs,
     global_index: u64,

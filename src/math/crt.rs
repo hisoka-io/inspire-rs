@@ -83,10 +83,12 @@ pub(crate) struct CtCrtComposer {
 }
 
 impl CtCrtComposer {
-    pub(crate) fn new(q0: u64, q1: u64, q0_inv_mod_q1: u64) -> Self {
+    /// `None` when `q0 * q1` overflows u64: a wrapped `q` would reduce every
+    /// composed coefficient by the wrong modulus.
+    pub(crate) fn new(q0: u64, q1: u64, q0_inv_mod_q1: u64) -> Option<Self> {
+        let q = q0.checked_mul(q1)?;
         let q0_inv_shoup = ((u128::from(q0_inv_mod_q1) << 64) / u128::from(q1)) as u64;
-        let q = q0.wrapping_mul(q1);
-        Self {
+        Some(Self {
             q0,
             q1,
             q,
@@ -94,7 +96,7 @@ impl CtCrtComposer {
             q0_inv_shoup,
             q1_reciprocal: u64::MAX / q1,
             q_reciprocal: u64::MAX / q,
-        }
+        })
     }
 
     pub(crate) fn compose(&self, a0: u64, a1: u64) -> u64 {
@@ -136,7 +138,7 @@ mod tests {
         for (q0, q1) in [(268_369_921u64, 249_561_089u64), (67_043_329, 132_120_577)] {
             let inv = mod_inverse(q0, q1);
             let q = q0 * q1;
-            let composer = CtCrtComposer::new(q0, q1, inv);
+            let composer = CtCrtComposer::new(q0, q1, inv).expect("limb product fits u64");
             let edges = |m: u64| [0, 1, 2, m / 2 - 1, m / 2, m / 2 + 1, m - 2, m - 1];
             for a0 in edges(q0) {
                 for a1 in edges(q1) {
@@ -160,5 +162,20 @@ mod tests {
                 );
             }
         }
+    }
+    // 2^61 - 1 and 97 are coprime and multiply past u64.
+    const OVERFLOWING_PAIR: (u64, u64) = ((1 << 61) - 1, 97);
+
+    #[test]
+    fn an_overflowing_limb_pair_builds_no_composer() {
+        let (q0, q1) = OVERFLOWING_PAIR;
+        assert!(CtCrtComposer::new(q0, q1, mod_inverse(q0, q1)).is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "limb product overflows u64")]
+    fn a_poly_over_an_overflowing_limb_pair_is_refused() {
+        let (q0, q1) = OVERFLOWING_PAIR;
+        let _ = crate::math::Poly::from_crt_coeffs(vec![1, 2, 3, 4], &[q0, q1]);
     }
 }

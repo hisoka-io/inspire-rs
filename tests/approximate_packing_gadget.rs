@@ -572,8 +572,7 @@ fn the_option_survives_the_crs_and_the_session_residue() {
     let crs = ServerCrs::from_versioned_bytes(&wire).unwrap();
     assert!(crs.params.approximate_packing_gadget);
     assert_eq!(crs.params, cell.crs.params);
-    let mut sampler = GaussianSampler::with_seed(params.sigma, 5);
-    let session = ClientSession::with_fresh_secret(crs, &mut sampler).unwrap();
+    let session = ClientSession::with_fresh_secret(crs).unwrap();
     assert_eq!(session.packing_keys().unwrap().y_body.len(), 2);
 
     let residue = serde_json::to_value(cell.session.to_residue()).unwrap();

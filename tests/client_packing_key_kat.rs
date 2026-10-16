@@ -185,9 +185,8 @@ fn a_session_resends_the_key_it_built() {
 fn a_fresh_secret_gives_a_fresh_key() {
     let params = params_for(256, &modulus_sets()[0].1, 3);
     let cell = Cell::build(&params, 32, 0x4f4e_4501);
-    let mut sampler = GaussianSampler::new(params.sigma);
-    let first = ClientSession::with_fresh_secret(cell.crs.clone(), &mut sampler).expect("session");
-    let second = ClientSession::with_fresh_secret(cell.crs.clone(), &mut sampler).expect("session");
+    let first = ClientSession::with_fresh_secret(cell.crs.clone()).expect("session");
+    let second = ClientSession::with_fresh_secret(cell.crs.clone()).expect("session");
     assert_ne!(
         first.rlwe_secret_key().poly.coeffs(),
         second.rlwe_secret_key().poly.coeffs()
@@ -195,5 +194,37 @@ fn a_fresh_secret_gives_a_fresh_key() {
     assert_ne!(
         bincode::serialize(first.packing_keys().expect("keys")).unwrap(),
         bincode::serialize(second.packing_keys().expect("keys")).unwrap()
+    );
+}
+
+/// Callers that seed every sampler they hold alike still get two secrets: the fresh
+/// constructor draws from no caller stream. The seeded variant on one seed replays the
+/// secret, which is what the comparison must be able to see.
+#[test]
+fn identically_seeded_callers_still_get_different_secrets() {
+    let params = params_for(256, &modulus_sets()[0].1, 3);
+    let cell = Cell::build(&params, 32, 0x4f4e_4502);
+    let mut narrower = cell.crs.clone();
+    narrower.inspiring_num_columns /= 2;
+
+    let fresh: Vec<_> = [cell.crs.clone(), narrower.clone()]
+        .into_iter()
+        .map(|crs| ClientSession::with_fresh_secret(crs).expect("session"))
+        .collect();
+    assert_ne!(
+        fresh[0].rlwe_secret_key().poly.coeffs(),
+        fresh[1].rlwe_secret_key().poly.coeffs()
+    );
+
+    let seeded: Vec<_> = [cell.crs.clone(), narrower]
+        .into_iter()
+        .map(|crs| {
+            let mut caller = GaussianSampler::with_seed(params.sigma, 9);
+            ClientSession::with_seeded_secret(crs, &mut caller).expect("session")
+        })
+        .collect();
+    assert_eq!(
+        seeded[0].rlwe_secret_key().poly.coeffs(),
+        seeded[1].rlwe_secret_key().poly.coeffs()
     );
 }

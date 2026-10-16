@@ -105,9 +105,15 @@ simd-packing-offline = []
 # backward compatibility; downstream consumers must opt in. See
 # `src/pir/mod_switch.rs` for the algorithm and noise-budget gate.
 mod-switch-response = []
+# Builds a packing key under a secret the caller supplies: the KATs pin key bytes for a
+# fixed secret. Two keys under one secret share a mask and leak it, so no client build
+# enables this; clients build keys through `ClientSession::with_fresh_secret`.
+caller-secret-keys = []
 
 [dev-dependencies]
 proptest = "1.4"
+# Tests and benches link the library with the caller-secret entry points.
+raven-inspire = { path = ".", features = ["caller-secret-keys"] }
 
 [[bench]]
 name = "query_latency_bench"

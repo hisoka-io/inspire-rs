@@ -10,7 +10,7 @@
 //! let product = a.mul_ntt(&b, &ctx);
 //! ```
 
-use super::crt::{crt_compose_2, crt_decompose_2, crt_modulus, mod_inverse, CtCrtComposer};
+use super::crt::{crt_compose_2, crt_decompose_2, mod_inverse, CtCrtComposer};
 use super::gaussian::{
     os_seeded_chacha, os_seeded_chacha_or_abort, EntropyUnavailable, GaussianSampler,
 };
@@ -471,8 +471,13 @@ impl Poly {
             moduli.len() <= 2,
             "CRT with more than 2 moduli not supported"
         );
+        let product = moduli.iter().copied().try_fold(1u64, u64::checked_mul);
+        assert!(
+            product.is_some(),
+            "moduli {moduli:?}: limb product overflows u64, so no q represents it"
+        );
         let moduli_vec = moduli.to_vec();
-        let q = crt_modulus(&moduli_vec);
+        let q = product.unwrap_or(u64::MAX);
         let inv = if moduli_vec.len() == 2 {
             mod_inverse(moduli_vec[0], moduli_vec[1])
         } else {
@@ -804,6 +809,13 @@ impl Poly {
         assert!(!self.is_ntt, "Cannot access coefficients in NTT domain");
         if let [q0, q1] = self.moduli[..] {
             let composer = CtCrtComposer::new(q0, q1, self.crt_q0_inv_mod_q1);
+            assert!(
+                composer.is_some(),
+                "CRT limbs {q0} and {q1} multiply past u64; no composed coefficient exists"
+            );
+            let Some(composer) = composer else {
+                return Vec::new();
+            };
             let (low, high) = self.coeffs.split_at(self.dim);
             low.iter()
                 .zip(high)
