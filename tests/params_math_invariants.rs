@@ -342,8 +342,8 @@ fn security_level_is_an_advisory_serialized_label() {
     assert!(bits128.validate().is_ok());
     assert!(bits256.validate().is_ok());
     assert_ne!(
-        bincode::serialize(&bits128).expect("serialize 128-bit declaration"),
-        bincode::serialize(&bits256).expect("serialize 256-bit declaration")
+        bincode::serialize(&bits128).expect("serialize the Bits128 label"),
+        bincode::serialize(&bits256).expect("serialize the Bits256 label")
     );
 }
 

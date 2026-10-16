@@ -13,7 +13,7 @@
 //! It excludes the shard id, packing keys and handles, adaptive queries,
 //! other parameters and indices, responses, OS entropy, arbitrary nonlinear
 //! distinguishers, and every timing, cache, or power channel. A pass neither
-//! establishes 128-bit advantage nor closes known Poly/NTT residuals.
+//! establishes a bound on the advantage nor closes known Poly/NTT residuals.
 
 use rand::seq::SliceRandom;
 use rand::{RngCore, SeedableRng};

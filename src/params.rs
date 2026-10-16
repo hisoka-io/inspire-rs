@@ -35,17 +35,10 @@ use subtle::{ConditionallySelectable, ConstantTimeGreater};
 /// Default CRT moduli from the InsPIRe reference implementation.
 pub const DEFAULT_CRT_MODULI: [u64; 2] = [268_369_921, 249_561_089];
 
-/// Advisory label for the caller's intended security target.
+/// A label carried in the parameter set and its serialized form.
 ///
-/// This label neither selects nor validates parameters.
-///
-/// # Variants
-///
-/// * `Bits128` - declares a 128-bit target
-/// * `Bits256` - declares a 256-bit target
-///
-/// Both are declarations. No code reads this field and `validate` runs no
-/// lattice estimate, so a variant here is not evidence of the level it names.
+/// This label neither selects nor validates parameters. No code reads it and
+/// `validate` does not check it; the variant names are kept for the wire.
 ///
 /// # Example
 ///
@@ -56,9 +49,9 @@ pub const DEFAULT_CRT_MODULI: [u64; 2] = [268_369_921, 249_561_089];
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecurityLevel {
-    /// Declared 128-bit target. Not validated; see the type-level note.
+    /// A label; not validated. See the type-level note.
     Bits128,
-    /// Declared 256-bit target. Not validated; see the type-level note.
+    /// A label; not validated. See the type-level note.
     Bits256,
 }
 
@@ -123,7 +116,7 @@ pub enum InspireVariant {
 /// * `gadget_base` - Base for gadget decomposition (typically 2^20)
 /// * `query_gadget_len` / `packing_gadget_len` - Gadget digits per role
 /// * `approximate_packing_gadget` - the InspiRING packing key skips the lowest digit
-/// * `security_level` - declared target; never read, never validated
+/// * `security_level` - a label; never read, never validated
 ///
 /// # Example
 ///
@@ -197,7 +190,7 @@ pub struct InspireParams {
     /// set, and a set with it on serializes to a layout of its own.
     pub approximate_packing_gadget: bool,
 
-    /// Advisory security target; serialized but not validated or dispatched on.
+    /// A label; serialized but not validated or dispatched on.
     pub security_level: SecurityLevel,
 }
 
