@@ -80,14 +80,40 @@ server rounds the lowest gadget digit away and the key has no row for it. The ke
 30,855 + 15,477 n bytes. The presets leave the option off. `benches/approximate_gadget_noise.rs`
 measures the served decode margin under both gadgets on the production ring.
 
+## Special-modulus parameter set
+
+`special_modulus` is a second parameter set for short records: ring dimension 2048, a 29-bit
+ciphertext prime, plaintext modulus 16 (one signed nibble per coefficient) and a packing key of a
+single polynomial at the ciphertext prime times a 31-bit special prime. The server switches each
+packing step at the two-prime modulus and divides by the special prime, so the response stays at
+the ciphertext prime with no modulus switch. A `Client` draws its secret inside and builds one key,
+and reads only under the served ring, primes, key mask and error width (other sets are for the
+seeded test constructors); a `Server` folds step 1 of the packing over each shard into a `ShardTable` that keeps the shard's
+cells, so a response is always computed from the cells its table was built from. Arithmetic runs
+on 32-bit words, with an AVX-512 build of the same loops under `simd-packing-offline`.
+
+Sizes for `Params::ring2048_cell256` (256-byte cells returning a 246-byte record):
+
+| Message or state | Bytes |
+|---|---:|
+| Packing key, once per client | 15,360 |
+| Query | 7,456 |
+| Response | 9,208 |
+| Seated key on the server | 16,384 |
+| Shard table on the server | 4,194,304 + 1,048,576 |
+
+`tests/special_modulus_kat.rs` checks every byte against a generic 64-bit reference of the same
+algorithm, and `tests/special_modulus_noise_gate.rs` measures the decode margin on 1,000
+responses over 40 fresh secrets.
+
 ## Cargo features
 
 | Feature | Effect |
 |---|---|
 | `parallel` | Runs the respond and packing loops on rayon. Output is byte-identical to the default sequential build. |
 | `mod-switch-response` | Response modulus switching (`pir::mod_switch`) and the matching client extractor. |
-| `simd-packing-offline` | AVX-512 IFMA52 kernel for offline packing, selected at runtime by CPUID with a scalar fallback. |
-| `caller-secret-keys` | Tests and known-answer fixtures only: `ClientSession::new`, `query`, `query_seeded` and `ClientPackingKeys::generate`, which build a packing key under a secret the caller supplies. |
+| `simd-packing-offline` | AVX-512 kernels: IFMA52 for offline packing, and the AVX-512 build of the special-modulus loops. Selected at runtime by CPUID with a scalar fallback. |
+| `caller-secret-keys` | Tests and known-answer fixtures only: `ClientSession::new`, `query`, `query_seeded` and `ClientPackingKeys::generate`, which build a packing key under a secret the caller supplies; `ClientSession::query`, `query_seeded` and `query_batch`, which draw query noise from a caller's sampler (clients use `query_seeded_fresh` and `query_batch_fresh`); and the special-modulus client's seeded constructors. |
 
 ## Security model
 

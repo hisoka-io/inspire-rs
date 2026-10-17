@@ -167,3 +167,155 @@ fn the_fresh_secret_constructor_draws_its_own_secret() {
     assert!(item.contains("GaussianSampler::from_os_entropy("), "{item}");
     assert!(item.contains("RlweSecretKey::generate("), "{item}");
 }
+
+/// Calls that encrypt a query under the session secret with the sampler they are handed.
+const QUERY_ENCRYPTORS: &[&str] = &[
+    "seeded_row(",
+    "query_seeded_with(",
+    "query_batch_with(",
+    "RgswCiphertext::encrypt(",
+    "seeded_query_with_gadget(",
+];
+
+/// Public functions in `src` that take a caller sampler, encrypt a query with it, and are
+/// not gated. A seeded sampler replays the query error, and one query's error is enough to
+/// tell the server which row it selects.
+fn ungated_query_noise(src: &str) -> Vec<String> {
+    let src = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(at) = src[from..].find("pub fn ") {
+        let start = from + at;
+        from = start + "pub fn ".len();
+        let item = body_from(&src[start..]);
+        let header = item.split('{').next().unwrap_or(item);
+        if !header.contains("GaussianSampler") {
+            continue;
+        }
+        if !QUERY_ENCRYPTORS.iter().any(|call| item.contains(call)) {
+            continue;
+        }
+        let line_start = src[..start].rfind('\n').map_or(0, |n| n + 1);
+        if !gated(&src[..line_start]) {
+            let name = header["pub fn ".len()..]
+                .split(['(', '<'])
+                .next()
+                .unwrap_or(header);
+            found.push(name.to_owned());
+        }
+    }
+    found
+}
+
+/// The modules that build client queries and that `pir` re-exports; `eval_poly` is private
+/// to the crate and on no query path.
+#[test]
+fn no_default_public_query_takes_a_caller_sampler() {
+    let offenders: Vec<String> = [
+        ("session.rs", include_str!("../src/pir/session.rs")),
+        ("query.rs", include_str!("../src/pir/query.rs")),
+    ]
+    .iter()
+    .flat_map(|(path, text)| {
+        ungated_query_noise(text)
+            .into_iter()
+            .map(move |name| format!("{path}: {name}"))
+    })
+    .collect();
+    assert!(
+        offenders.is_empty(),
+        "public queries that draw their error from a caller sampler outside `{GATE}`:\n{}",
+        offenders.join("\n")
+    );
+}
+
+#[test]
+fn the_query_gate_sees_each_caller_sampler_entry_point() {
+    let session = include_str!("../src/pir/session.rs");
+    let query = include_str!("../src/pir/query.rs");
+    for (src, header) in [
+        (session, "    pub fn query(\n"),
+        (session, "    pub fn query_seeded(\n"),
+        (session, "    pub fn query_batch(\n"),
+        (query, "pub fn query_seeded(\n"),
+    ] {
+        assert!(src.contains(header), "`{header}` moved; re-point this pin");
+        let ungated = src.replace(&format!("{GATE}\n{header}"), header);
+        assert_ne!(ungated, src, "`{header}` is not directly under the gate");
+        assert!(
+            !ungated_query_noise(&ungated).is_empty(),
+            "dropping the gate from `{header}` went unseen"
+        );
+    }
+}
+
+#[test]
+fn the_fresh_queries_draw_their_own_noise() {
+    let session = include_str!("../src/pir/session.rs");
+    for name in ["pub fn query_seeded_fresh(", "pub fn query_batch_fresh("] {
+        let start = session.find(name).expect("fresh query present");
+        let item = body_from(&session[start..]);
+        let header = item.split('{').next().unwrap_or(item);
+        assert!(!header.contains("GaussianSampler"), "{header}");
+        assert!(item.contains("self.fresh_noise()"), "{item}");
+    }
+    assert!(session.contains("GaussianSampler::from_os_entropy(self.crs.params.sigma)"));
+}
+
+#[test]
+fn the_special_modulus_client_takes_no_caller_secret_or_noise_by_default() {
+    let client = include_str!("../src/special_modulus/client.rs");
+    for header in [
+        "    pub fn from_seed(",
+        "    pub fn from_parts(",
+        "    pub fn query_from_parts(",
+        "    pub fn body_errors(",
+    ] {
+        let at = client
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` moved; re-point this pin"));
+        let line_start = client[..at].rfind('\n').map_or(0, |n| n + 1);
+        assert!(
+            gated(&client[..line_start]),
+            "`{header}` is not under the gate"
+        );
+    }
+    let item = |header: &str| {
+        let start = client
+            .find(header)
+            .unwrap_or_else(|| panic!("`{header}` moved; re-point this pin"));
+        body_from(&client[start..])
+    };
+    let new = item("    pub fn new(");
+    for want in [
+        "GaussianSampler::from_os_entropy(",
+        "os_seeded_chacha(",
+        "served_floor(params)?",
+        "Self::drawn(params, noise, seeds)",
+    ] {
+        assert!(new.contains(want), "`{want}` missing from:\n{new}");
+    }
+    // The production secret and key error come only from the draw the seeded wire pins
+    // cover; `new` composes nothing of its own.
+    for deny in ["sample", "Self::build(", "key_error", "vec!["] {
+        assert!(!new.contains(deny), "`{deny}` in:\n{new}");
+    }
+    assert!(item("    pub fn from_seed(").contains("Self::drawn(params, noise, seeds)"));
+    let drawn = item("    fn drawn(");
+    let body = drawn.split_once('{').map_or(drawn, |(_, b)| b);
+    let lines: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "let secret = noise.sample_vec(params.ring_dim);",
+            "let key_error = noise.sample_vec(params.ring_dim);",
+            "Self::build(params, &secret, &key_error, noise, seeds)",
+            "}",
+        ],
+        "the shared draw changed; the seeded wire pins only cover it while it is this"
+    );
+}

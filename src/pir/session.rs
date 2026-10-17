@@ -12,14 +12,18 @@ use crate::inspiring::{ClientPackingKeys, PackParams};
 use crate::lwe::LweSecretKey;
 use crate::math::{GaussianSampler, NttContext, Poly};
 use crate::params::ShardConfig;
-use crate::rgsw::{GadgetVector, RgswCiphertext, SeededRgswCiphertext};
+#[cfg(feature = "caller-secret-keys")]
+use crate::rgsw::RgswCiphertext;
+use crate::rgsw::{GadgetVector, SeededRgswCiphertext};
 use crate::rlwe::RlweSecretKey;
 
 use super::encode_db::inverse_monomial;
 use super::error::{pir_err, Result};
+#[cfg(feature = "caller-secret-keys")]
+use super::query::ClientQuery;
 use super::query::{
-    ensure_query_shard_geometry, ClientQuery, ClientState, PackingKeySource, PackingMode,
-    SeededBatchQuery, SeededClientQuery, SeededQueryBatch, ServerSessionHandle,
+    ensure_query_shard_geometry, ClientState, PackingKeySource, PackingMode, SeededBatchQuery,
+    SeededClientQuery, SeededQueryBatch, ServerSessionHandle,
 };
 use super::setup::ServerCrs;
 
@@ -224,6 +228,10 @@ impl ClientSession {
     }
 
     /// Emit a `ClientQuery`: scale and encrypt the inverse monomial, then attach cached keys.
+    ///
+    /// Test and KAT builds only: the query error comes from the caller's sampler, and a
+    /// seeded one replays it, which hands the server the row.
+    #[cfg(feature = "caller-secret-keys")]
     pub fn query(
         &self,
         global_index: u64,
@@ -268,8 +276,83 @@ impl ClientSession {
         ))
     }
 
-    /// [`query`](Self::query) in the compact seeded form.
+    /// [`query_seeded_fresh`](Self::query_seeded_fresh) with the query error drawn from
+    /// `sampler`.
+    ///
+    /// Test and KAT builds only, for the reason [`query`](Self::query) gives.
+    #[cfg(feature = "caller-secret-keys")]
     pub fn query_seeded(
+        &self,
+        global_index: u64,
+        shard_config: &ShardConfig,
+        sampler: &mut GaussianSampler,
+    ) -> Result<(ClientState, SeededClientQuery)> {
+        self.query_seeded_with(global_index, shard_config, sampler)
+    }
+
+    /// [`query_batch_fresh`](Self::query_batch_fresh) with the query errors drawn from
+    /// `sampler`.
+    ///
+    /// Test and KAT builds only, for the reason [`query`](Self::query) gives.
+    #[cfg(feature = "caller-secret-keys")]
+    pub fn query_batch(
+        &self,
+        global_indices: &[u64],
+        shard_config: &ShardConfig,
+        sampler: &mut GaussianSampler,
+    ) -> Result<(Vec<ClientState>, SeededQueryBatch)> {
+        self.query_batch_with(global_indices, shard_config, sampler)
+    }
+
+    /// One query for `global_index` in the compact seeded form, its error drawn here from
+    /// the platform entropy source.
+    ///
+    /// # Errors
+    ///
+    /// Refuses when the entropy source fails, or the index or shard geometry does not fit.
+    pub fn query_seeded_fresh(
+        &self,
+        global_index: u64,
+        shard_config: &ShardConfig,
+    ) -> Result<(ClientState, SeededClientQuery)> {
+        let mut sampler = self.fresh_noise()?;
+        self.query_seeded_with(global_index, shard_config, &mut sampler)
+    }
+
+    /// One request for every index in `global_indices`, all under this session's one
+    /// set of packing keys: by handle once registered, inline before that. Building
+    /// the batch again resends the same key bytes; every query's error is drawn fresh
+    /// here from the platform entropy source.
+    ///
+    /// ```
+    /// use raven_inspire::math::GaussianSampler;
+    /// use raven_inspire::params::InspireParams;
+    /// use raven_inspire::{setup, ClientSession};
+    ///
+    /// let params = InspireParams::secure_128_d2048();
+    /// let database = vec![0u8; params.ring_dim * 32];
+    /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
+    /// let (crs, encoded, _) = setup(&params, &database, 32, &mut sampler)?;
+    /// let session = ClientSession::with_fresh_secret(crs)?;
+    /// let (states, batch) = session.query_batch_fresh(&[3, 5], &encoded.config)?;
+    /// assert_eq!((states.len(), batch.queries().len()), (2, 2));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn query_batch_fresh(
+        &self,
+        global_indices: &[u64],
+        shard_config: &ShardConfig,
+    ) -> Result<(Vec<ClientState>, SeededQueryBatch)> {
+        let mut sampler = self.fresh_noise()?;
+        self.query_batch_with(global_indices, shard_config, &mut sampler)
+    }
+
+    fn fresh_noise(&self) -> Result<GaussianSampler> {
+        GaussianSampler::from_os_entropy(self.crs.params.sigma)
+            .map_err(|e| pir_err!("no query without fresh noise: {e}"))
+    }
+
+    fn query_seeded_with(
         &self,
         global_index: u64,
         shard_config: &ShardConfig,
@@ -292,25 +375,7 @@ impl ClientSession {
         ))
     }
 
-    /// One request for every index in `global_indices`, all under this session's one
-    /// set of packing keys: by handle once registered, inline before that. Building
-    /// the batch again resends the same key bytes.
-    ///
-    /// ```
-    /// use raven_inspire::math::GaussianSampler;
-    /// use raven_inspire::params::InspireParams;
-    /// use raven_inspire::{setup, ClientSession};
-    ///
-    /// let params = InspireParams::secure_128_d2048();
-    /// let database = vec![0u8; params.ring_dim * 32];
-    /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
-    /// let (crs, encoded, _) = setup(&params, &database, 32, &mut sampler)?;
-    /// let session = ClientSession::with_fresh_secret(crs)?;
-    /// let (states, batch) = session.query_batch(&[3, 5], &encoded.config, &mut sampler)?;
-    /// assert_eq!((states.len(), batch.queries().len()), (2, 2));
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn query_batch(
+    fn query_batch_with(
         &self,
         global_indices: &[u64],
         shard_config: &ShardConfig,

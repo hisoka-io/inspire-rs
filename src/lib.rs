@@ -28,6 +28,7 @@ pub mod params;
 pub mod pir;
 pub mod rgsw;
 pub mod rlwe;
+pub mod special_modulus;
 
 pub use pir::{
     encode_column, encode_database, encode_direct, extract, extract_inspiring, extract_two_packing,

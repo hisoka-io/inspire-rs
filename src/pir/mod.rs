@@ -1,7 +1,7 @@
 //! InsPIRe PIR: setup -> query -> respond -> extract, over encrypted monomial rotation.
 
 mod encode_db;
-mod error;
+pub(crate) mod error;
 mod eval_poly;
 mod extract;
 #[cfg(feature = "mod-switch-response")]

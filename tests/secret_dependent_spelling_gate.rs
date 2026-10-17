@@ -40,6 +40,8 @@ const NTT_SRC: &str = include_str!("../src/math/ntt.rs");
 const SOLINAS_SRC: &str = include_str!("../src/math/solinas_redc.rs");
 const RGSW_TYPES_SRC: &str = include_str!("../src/rgsw/types.rs");
 const EXTRACT_SRC: &str = include_str!("../src/pir/extract.rs");
+const SM_ARITH_SRC: &str = include_str!("../src/special_modulus/arith.rs");
+const SM_CLIENT_SRC: &str = include_str!("../src/special_modulus/client.rs");
 
 /// Body of the item introduced by `header`, brace-matched so an item nested in
 /// an `impl` block ends at its own closing brace and not the block's.
@@ -470,13 +472,54 @@ fn the_query_path_neither_branches_on_nor_indexes_by_the_local_index() {
         "the seeded query must stay a forward to the pinned body",
     );
 
+    // The public session queries (caller sampler, test builds; fresh noise, default builds)
+    // forward to two private bodies, and those forward to the pinned one.
+    for (src, header, forward) in [
+        (
+            SESSION_SRC,
+            "pub fn query_seeded(",
+            "self.query_seeded_with(global_index, shard_config, sampler)",
+        ),
+        (
+            SESSION_SRC,
+            "pub fn query_seeded_fresh(",
+            "self.query_seeded_with(global_index, shard_config, &mut sampler)",
+        ),
+        (
+            SESSION_SRC,
+            "pub fn query_batch(",
+            "self.query_batch_with(global_indices, shard_config, sampler)",
+        ),
+        (
+            SESSION_SRC,
+            "pub fn query_batch_fresh(",
+            "self.query_batch_with(global_indices, shard_config, &mut sampler)",
+        ),
+    ] {
+        let wrapper = item_source(src, header);
+        if !header.contains("batch") {
+            deny_query_body(wrapper, header);
+        }
+        require(
+            wrapper,
+            header,
+            &[forward],
+            "a public session query must stay a forward to the private body",
+        );
+        deny(
+            wrapper,
+            header,
+            &["local_index", "index_to_shard", "inverse_monomial"],
+            "only the pinned body may turn the index into a monomial",
+        );
+    }
     let session_forward = "self.seeded_row(global_index, shard_config, sampler)";
-    let seeded = item_source(SESSION_SRC, "pub fn query_seeded(");
-    deny_query_body(seeded, "session query_seeded");
-    let batch = item_source(SESSION_SRC, "pub fn query_batch(");
+    let seeded = item_source(SESSION_SRC, "fn query_seeded_with(");
+    deny_query_body(seeded, "session query_seeded_with");
+    let batch = item_source(SESSION_SRC, "fn query_batch_with(");
     for (wrapper, site) in [
-        (seeded, "session query_seeded"),
-        (batch, "session query_batch"),
+        (seeded, "session query_seeded_with"),
+        (batch, "session query_batch_with"),
     ] {
         require(
             wrapper,
@@ -499,7 +542,7 @@ fn the_query_path_neither_branches_on_nor_indexes_by_the_local_index() {
             .matches("global_index")
             .count(),
         2,
-        "query_batch uses an index beyond forwarding it:\n{batch}"
+        "query_batch_with uses an index beyond forwarding it:\n{batch}"
     );
 }
 
@@ -1331,6 +1374,19 @@ fn dispatch_free_bodies() -> Vec<(&'static str, &'static str)> {
         (SESSION_SRC, "pub fn query_seeded("),
         (SESSION_SRC, "pub fn query_batch("),
         (SESSION_SRC, "fn seeded_row("),
+        (SESSION_SRC, "pub fn query_seeded_fresh("),
+        (SESSION_SRC, "pub fn query_batch_fresh("),
+        (SESSION_SRC, "fn query_seeded_with("),
+        (SESSION_SRC, "fn query_batch_with("),
+        (SM_ARITH_SRC, "pub(crate) fn csub("),
+        (SM_ARITH_SRC, "pub(crate) fn add("),
+        (SM_ARITH_SRC, "pub(crate) fn sub("),
+        (SM_ARITH_SRC, "pub(crate) fn mont("),
+        (SM_ARITH_SRC, "pub(crate) fn small("),
+        (SM_ARITH_SRC, "pub(crate) fn centred("),
+        (SM_CLIENT_SRC, "fn nibble("),
+        (SM_CLIENT_SRC, "fn query_with("),
+        (SM_CLIENT_SRC, "fn build("),
         // One row per mask polynomial: no arm builds a row without its mask.
         (INSPIRING_SRC, "fn generate_ksk_body"),
     ]
@@ -1394,6 +1450,8 @@ fn named_sources() -> Vec<(&'static str, &'static str)> {
         ("NTT_SRC", NTT_SRC),
         ("SOLINAS_SRC", SOLINAS_SRC),
         ("EXTRACT_SRC", EXTRACT_SRC),
+        ("SM_ARITH_SRC", SM_ARITH_SRC),
+        ("SM_CLIENT_SRC", SM_CLIENT_SRC),
         ("plain_rgsw", plain_rgsw),
         ("seeded_rgsw", seeded_rgsw),
         ("rgsw_impls().0", plain_rgsw),
@@ -1649,4 +1707,90 @@ fn the_extractor_returns_whole_item_bodies() {
             body.len()
         );
     }
+}
+
+/// The special-modulus client: the secret, its key error and query errors pass through
+/// the 32-bit helpers, the row through the message placement, the phase through the
+/// rounding.
+#[test]
+fn special_modulus_client_neither_branches_on_nor_divides_secret_values() {
+    for (src, header) in [
+        (SM_ARITH_SRC, "pub(crate) fn csub("),
+        (SM_ARITH_SRC, "pub(crate) fn add("),
+        (SM_ARITH_SRC, "pub(crate) fn sub("),
+        (SM_ARITH_SRC, "pub(crate) fn mont("),
+        (SM_ARITH_SRC, "pub(crate) fn small("),
+        (SM_ARITH_SRC, "pub(crate) fn centred("),
+    ] {
+        let body = item_source(src, header);
+        deny(
+            body,
+            header,
+            &[
+                "if ",
+                "match ",
+                ".min(",
+                ".max(",
+                " / ",
+                " % ",
+                "rem_euclid",
+            ],
+            "these helpers see secret words; corrections come from a borrow or a sign bit",
+        );
+        deny_comparisons(body, header);
+    }
+    require(
+        item_source(SM_ARITH_SRC, "pub(crate) fn csub("),
+        "csub",
+        &["r >> 31"],
+        "the subtraction is undone by the borrow of x - q",
+    );
+
+    let rounding = item_source(SM_CLIENT_SRC, "fn nibble(");
+    deny(
+        rounding,
+        "Rounding::nibble",
+        &["if ", " / ", " % ", ".min(", ".max("],
+        "the phase is secret; only the constructor divides, by the public delta",
+    );
+    deny_comparisons(rounding, "Rounding::nibble");
+    require(
+        rounding,
+        "Rounding::nibble",
+        &["self.reciprocal", ">> 63"],
+        "the quotient comes from the public reciprocal and one borrow correction",
+    );
+
+    let query = item_source(SM_CLIENT_SRC, "fn query_with(");
+    deny(
+        query,
+        "Client::query_with",
+        &["body[", "[d - row", "if row == 0", "row == 0", " % "],
+        "the row is the secret a query hides; it must not address memory or steer a branch",
+    );
+    require(
+        query,
+        "Client::query_with",
+        &[
+            "u32::conditional_select",
+            "(row as u32).ct_eq(&0)",
+            "k.ct_eq(&target)",
+            "small(e)",
+        ],
+        "every position is visited and the message selected through subtle",
+    );
+
+    let keygen = item_source(SM_CLIENT_SRC, "fn build(");
+    deny(
+        keygen,
+        "Client::build",
+        &[" % ", "residue_public", "rem_euclid"],
+        "the secret and key error are lifted without a divide",
+    );
+    require(
+        keygen,
+        "Client::build",
+        &["small(x)", "small(ts[k])", "small(key_error[k])"],
+        "the secret and key error are lifted by their sign bit",
+    );
 }
