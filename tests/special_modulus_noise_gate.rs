@@ -189,7 +189,7 @@ fn served_set_noise_stays_in_its_band_on_fresh_secrets() {
     let slack = half_step.log2() - LOG2_TAIL - sd.log2();
     let margin = half_step.log2() - (t.worst as f64).log2();
     eprintln!(
-        "NOISE worst-value: {} responses, {} secrets, {} coefficients, sd {sd:.1}, slack {slack:.3} bits,          worst |e| {} ({margin:.2} bits under the half step), wrong records {}",
+        "NOISE worst-value: {} responses, {} secrets, {} coefficients, sd {sd:.1}, slack {slack:.3} bits, worst |e| {} ({margin:.2} bits under the half step), wrong records {}",
         t.responses, t.secrets, t.coefficients, t.worst, t.wrong_records
     );
     assert!(t.responses >= 1000 && t.secrets >= 40, "too few samples");

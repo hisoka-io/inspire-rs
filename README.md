@@ -113,7 +113,7 @@ responses over 40 fresh secrets.
 | `parallel` | Runs the respond and packing loops on rayon. Output is byte-identical to the default sequential build. |
 | `mod-switch-response` | Response modulus switching (`pir::mod_switch`) and the matching client extractor. |
 | `simd-packing-offline` | AVX-512 kernels: IFMA52 for offline packing, and the AVX-512 build of the special-modulus loops. Selected at runtime by CPUID with a scalar fallback. |
-| `caller-secret-keys` | Tests and known-answer fixtures only: `ClientSession::new`, `query`, `query_seeded` and `ClientPackingKeys::generate`, which build a packing key under a secret the caller supplies; `ClientSession::query`, `query_seeded` and `query_batch`, which draw query noise from a caller's sampler (clients use `query_seeded_fresh` and `query_batch_fresh`); and the special-modulus client's seeded constructors. |
+| `caller-secret-keys` | Tests and known-answer fixtures only: `ClientSession::new`, `pir::query`, `pir::query_seeded` and `ClientPackingKeys::generate`, which build a packing key under a secret the caller supplies; the `ClientSession` methods `query`, `query_seeded` and `query_batch`, which draw query noise from a caller's sampler (clients use `query_seeded_fresh` and `query_batch_fresh`); and the special-modulus client's seeded constructors. |
 
 ## Security model
 

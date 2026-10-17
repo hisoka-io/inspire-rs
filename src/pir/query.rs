@@ -182,7 +182,7 @@ impl TryFrom<SeededBatchQueryWire> for SeededBatchQuery {
 
 /// Any number of InspiRING queries under one packing key.
 ///
-/// Clients build one through [`crate::pir::ClientSession::query_batch`], which always
+/// Clients build one through [`crate::pir::ClientSession::query_batch_fresh`], which always
 /// attaches the session's one set of keys; servers receive it off the wire.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SeededQueryBatch {
