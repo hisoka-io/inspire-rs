@@ -1,4 +1,5 @@
-//! The client: one secret, one packing key, fresh noise and a fresh mask seed per query.
+//! The client: one secret, one packing key under its own fresh mask seed, fresh noise and a
+//! fresh mask seed per query.
 
 use rand::RngCore;
 use rand_chacha::ChaCha20Rng;
@@ -10,9 +11,7 @@ use crate::pir::error::{pir_err, Result};
 use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use super::wire::{PackingKey, Query, Response};
-use super::{
-    expand_uniform, tau_signed, Params, Ring, KEY_MASK_VERSION, PLAINTEXT_MODULUS, SEED_BYTES,
-};
+use super::{expand_uniform, tau_signed, Params, Ring, PLAINTEXT_MODULUS, SEED_BYTES};
 
 /// `floor((x + floor(delta/2)) / delta) mod 16` over a secret phase `x < 2^31`, dividing
 /// only the public `delta` (once, here).
@@ -43,10 +42,9 @@ impl Rounding {
     }
 }
 
-/// A client under an entropy-drawn secret reads only under the served ring and primes, a
-/// key mask of the newest version this build knows or the one before it, and at least the
-/// served error width. A wider choice of masks would let a server that names the version
-/// sort clients into more groups; a narrower error weakens the secret.
+/// A client under an entropy-drawn secret reads only under the served ring and primes and at
+/// least the served error width; a narrower error weakens the secret. The key-mask version
+/// is checked by [`Params::validate`].
 fn served_floor(params: &Params) -> Result<()> {
     let served = Params::ring2048_cell256();
     if params.ring_dim < served.ring_dim
@@ -55,13 +53,6 @@ fn served_floor(params: &Params) -> Result<()> {
     {
         return Err(pir_err!(
             "a client reads under the served ring and primes; other sets are for seeded tests"
-        ));
-    }
-    let v = params.key_mask_version;
-    if !known_mask_version(v, KEY_MASK_VERSION) {
-        return Err(pir_err!(
-            "key-mask version {v} is not one this client builds under (it knows {} and the one before)",
-            KEY_MASK_VERSION
         ));
     }
     if params.sigma.is_nan() || params.sigma < served.sigma {
@@ -74,12 +65,20 @@ fn served_floor(params: &Params) -> Result<()> {
     Ok(())
 }
 
-/// `newest` or the version before it; version 0 names no mask.
-///
-/// The server names the version, so a move away from an exposed mask must drop the
-/// older version here too, or a server can keep every client on it.
-fn known_mask_version(v: u16, newest: u16) -> bool {
-    v != 0 && (v == newest || v.checked_add(1) == Some(newest))
+/// ChaCha20 stream of a client's seed source that its key-mask seed is drawn from, apart
+/// from the query seeds.
+const KEY_MASK_SEED_STREAM: u64 = u64::from_be_bytes(*b"key seed");
+
+/// The key-mask seed of a client whose query seeds come from `seeds`: a stream of the same
+/// key that no query seed is drawn from. Read before any query seed, so it is fixed by the
+/// source alone.
+fn key_mask_seed(seeds: &ChaCha20Rng) -> [u8; SEED_BYTES] {
+    let mut stream = seeds.clone();
+    stream.set_stream(KEY_MASK_SEED_STREAM);
+    stream.set_word_pos(0);
+    let mut seed = [0u8; SEED_BYTES];
+    stream.fill_bytes(&mut seed);
+    seed
 }
 
 /// Caller-supplied noise must be small enough for the branch-free lift to a residue.
@@ -90,10 +89,11 @@ fn all_small(v: &[i64]) -> bool {
 
 /// Reads rows under one secret.
 ///
-/// The secret is drawn when the client is built and never leaves it. The key mask is a
-/// public constant of the set, so a second key under the same secret would share that mask
-/// and expose the secret: a client therefore builds exactly one [`PackingKey`] and resends
-/// the same bytes on every upload. A new key means a new client.
+/// The secret is drawn when the client is built and never leaves it. The key's mask seed is
+/// drawn here too, never taken from a caller or a server, so no two keys share a mask. A
+/// client builds exactly one [`PackingKey`] and resends the same bytes on every upload; a
+/// second key under the same secret is outside what the key's hardness covers. A new key
+/// means a new client.
 pub struct Client {
     ring: Ring,
     /// Transform of the secret at `q`, Montgomery operands.
@@ -116,8 +116,8 @@ impl Client {
     ///
     /// # Errors
     ///
-    /// Refuses an invalid set; a set off the served ring and primes, with another key mask,
-    /// or with a narrower error; or when the entropy source fails.
+    /// Refuses an invalid set, including another key-mask version; a set off the served ring
+    /// and primes or with a narrower error; or when the entropy source fails.
     pub fn new(params: &Params) -> Result<Self> {
         params.validate()?;
         served_floor(params)?;
@@ -128,8 +128,8 @@ impl Client {
         Self::drawn(params, noise, seeds)
     }
 
-    /// Everything drawn from one caller seed: the secret, the key error, every query's
-    /// error and every query's mask seed.
+    /// Everything drawn from one caller seed: the secret, the key error, the key-mask seed,
+    /// every query's error and every query's mask seed.
     ///
     /// Test and KAT builds only: a replayed seed is a replayed secret, and its second key
     /// or second query stream exposes it.
@@ -142,15 +142,19 @@ impl Client {
         Self::drawn(params, noise, seeds)
     }
 
-    /// The secret, then the key error, from `noise`. The one draw for every sampler, so the
-    /// pinned wire bytes of a seeded client cover the draw of an entropy-seeded one.
+    /// The secret, then the key error, from `noise`, and the key-mask seed from `seeds`. The
+    /// one draw for every sampler, so the pinned wire bytes of a seeded client cover the draw
+    /// of an entropy-seeded one.
     fn drawn(params: &Params, mut noise: GaussianSampler, seeds: ChaCha20Rng) -> Result<Self> {
         let secret = noise.sample_vec(params.ring_dim);
         let key_error = noise.sample_vec(params.ring_dim);
-        Self::build(params, &secret, &key_error, noise, seeds)
+        let mask_seed = key_mask_seed(&seeds);
+        Self::build(params, &secret, &key_error, mask_seed, noise, seeds)
     }
 
-    /// A client over a given secret and key error, its queries drawn from `seed`.
+    /// A client over a given secret and key error, its queries drawn from `seed` and its
+    /// key-mask seed from the platform entropy source, so two keys never share a mask
+    /// whatever the caller passes.
     ///
     /// Test and KAT builds only, for the same reason as [`Self::from_seed`].
     #[cfg(feature = "caller-secret-keys")]
@@ -167,17 +171,23 @@ impl Client {
         let noise = GaussianSampler::from_seed(params.sigma, seed);
         let mut seeds = ChaCha20Rng::from_seed(seed);
         seeds.set_stream(1);
-        Self::build(params, secret, key_error, noise, seeds)
+        let mask_seed = key_mask_seed(
+            &os_seeded_chacha("special-modulus key-mask seed")
+                .map_err(|e| pir_err!("no key without a fresh mask seed: {e}"))?,
+        );
+        Self::build(params, secret, key_error, mask_seed, noise, seeds)
     }
 
     fn build(
         params: &Params,
         secret: &[i64],
         key_error: &[i64],
+        mask_seed: [u8; SEED_BYTES],
         noise: GaussianSampler,
         seeds: ChaCha20Rng,
     ) -> Result<Self> {
         let ring = Ring::new(params, false)?;
+        let (w_q, w_p) = ring.key_mask(mask_seed);
         let d = params.ring_dim;
         if secret.len() != d || key_error.len() != d {
             return Err(pir_err!("secret and key error need {d} coefficients"));
@@ -190,12 +200,12 @@ impl Client {
 
         let mut sw_q: Vec<u32> = s_q
             .iter()
-            .zip(&ring.w_q)
+            .zip(&w_q)
             .map(|(&s, &w)| lq.p.mont(s, w))
             .collect();
         let mut sw_p: Vec<u32> = s_p
             .iter()
-            .zip(&ring.w_p)
+            .zip(&w_p)
             .map(|(&s, &w)| lp.p.mont(s, w))
             .collect();
         lq.inverse(&mut sw_q);
@@ -220,6 +230,7 @@ impl Client {
         Ok(Self {
             key: PackingKey {
                 version: params.key_mask_version,
+                mask_seed,
                 q: key_q,
                 p: key_p,
             },
@@ -362,7 +373,8 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, Params, Rounding, KEY_MASK_VERSION};
+    use super::{Client, Params, Rounding};
+    use crate::special_modulus::KEY_MASK_VERSION;
     use rand::{Rng, SeedableRng};
 
     /// The secret and the key error of a client, read back from its secret transform and
@@ -384,8 +396,9 @@ mod tests {
             l.inverse(&mut v);
             v
         };
-        let sw_p = times_mask(lp, &ring.w_p);
-        let sw_q = times_mask(lq, &ring.w_q);
+        let (w_q, w_p) = ring.key_mask(client.key.mask_seed);
+        let sw_p = times_mask(lp, &w_p);
+        let sw_q = times_mask(lq, &w_q);
         let e_p: Vec<i64> = client
             .key
             .p
@@ -454,12 +467,12 @@ mod tests {
         let cases: [(&str, Edit); 6] = [
             ("narrower error", Box::new(|p| p.sigma = 3.2)),
             (
-                "newer mask than this build knows",
-                Box::new(|p| p.key_mask_version = KEY_MASK_VERSION + 1),
+                "the shared-mask version",
+                Box::new(|p| p.key_mask_version = KEY_MASK_VERSION - 1),
             ),
             (
-                "far newer mask",
-                Box::new(|p| p.key_mask_version = KEY_MASK_VERSION + 7),
+                "newer mask than this build knows",
+                Box::new(|p| p.key_mask_version = KEY_MASK_VERSION + 1),
             ),
             ("smaller ring", Box::new(|p| p.ring_dim = 1024)),
             (
@@ -472,7 +485,7 @@ mod tests {
             let mut p = served.clone();
             edit(&mut p);
             // The set itself runs; only the floor refuses it.
-            if name != "below the sampler range" {
+            if !name.contains("mask") && name != "below the sampler range" {
                 p.validate().unwrap();
             }
             assert!(Client::new(&p).is_err(), "{name}");
@@ -483,13 +496,53 @@ mod tests {
         Client::new(&wider).unwrap();
     }
 
+    /// Two keys under one mask seed share a mask: the seed bytes in the key say so. Planted
+    /// through the private builder, the only path that takes a seed; every constructor
+    /// draws its own, so none of them repeats one.
     #[test]
-    fn a_client_knows_the_newest_mask_version_and_the_one_before() {
-        use super::known_mask_version as known;
-        assert!(known(5, 5) && known(4, 5));
-        assert!(!known(3, 5) && !known(6, 5) && !known(0, 5));
-        assert!(known(1, 1) && !known(0, 1) && !known(2, 1));
-        assert!(known(u16::MAX, u16::MAX) && known(u16::MAX - 1, u16::MAX));
+    fn a_shared_mask_is_visible_in_the_keys_and_no_constructor_makes_one() {
+        use crate::math::GaussianSampler;
+        use rand::SeedableRng;
+        let params = Params::ring2048_cell256();
+        let seed_of = |c: &Client| c.packing_key().to_bytes(&params).unwrap()[2..34].to_vec();
+        let shares = |a: &Client, b: &Client| seed_of(a) == seed_of(b);
+
+        let planted = |n: u8| {
+            let mut noise = GaussianSampler::from_seed(params.sigma, [n; 32]);
+            let secret = noise.sample_vec(params.ring_dim);
+            let key_error = noise.sample_vec(params.ring_dim);
+            let seeds = rand_chacha::ChaCha20Rng::from_seed([n; 32]);
+            Client::build(&params, &secret, &key_error, [5; 32], noise, seeds).unwrap()
+        };
+        let (a, b) = (planted(1), planted(2));
+        assert_ne!(a.packing_key(), b.packing_key(), "two secrets");
+        assert!(
+            shares(&a, &b),
+            "the planted pair is not seen sharing a mask"
+        );
+        assert_eq!(a.packing_key().key_mask_version(), KEY_MASK_VERSION);
+
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        let mut fresh = |c: Client| {
+            let s = seed_of(&c);
+            assert!(!seen.contains(&s), "a constructor repeated a key-mask seed");
+            seen.push(s);
+        };
+        for _ in 0..16 {
+            fresh(Client::new(&params).unwrap());
+        }
+        #[cfg(feature = "caller-secret-keys")]
+        {
+            for n in 0..16u8 {
+                fresh(Client::from_seed(&params, [n; 32]).unwrap());
+            }
+            // Two keys over one caller secret and one caller seed still get two masks.
+            let secret = vec![1i64; params.ring_dim];
+            let key_error = vec![0i64; params.ring_dim];
+            for _ in 0..2 {
+                fresh(Client::from_parts(&params, &secret, &key_error, [0; 32]).unwrap());
+            }
+        }
     }
 
     #[test]

@@ -86,22 +86,23 @@ measures the served decode margin under both gadgets on the production ring.
 ciphertext prime, plaintext modulus 16 (one signed nibble per coefficient) and a packing key of a
 single polynomial at the ciphertext prime times a 31-bit special prime. The server switches each
 packing step at the two-prime modulus and divides by the special prime, so the response stays at
-the ciphertext prime with no modulus switch. A `Client` draws its secret inside and builds one key,
-and reads only under the served ring, primes and error width, and under a public key mask of the
-newest version it knows or the one before (other sets are for the seeded test constructors). Each
-key names its mask version in its first two bytes, so a server refuses a key built under another
-one; a `Server` folds step 1 of the packing over each shard into a `ShardTable` that keeps the shard's
-cells, so a response is always computed from the cells its table was built from. Arithmetic runs
-on 32-bit words, with an AVX-512 build of the same loops under `simd-packing-offline`.
+the ciphertext prime with no modulus switch. A `Client` draws its secret and a fresh 32-byte mask
+seed inside and builds one key, and reads only under the served ring, primes and error width (other
+sets are for the seeded test constructors). Each key carries its own public mask seed, so no two
+keys share a mask, and names its key-mask version in its first two bytes, so a server refuses a key
+of another form by name. A `Server` expands a key's mask once, when it seats the key, and folds
+step 1 of the packing over each shard into a `ShardTable` that keeps the shard's cells, so a
+response is always computed from the cells its table was built from. Arithmetic runs on 32-bit
+words, with an AVX-512 build of the same loops under `simd-packing-offline`.
 
 Sizes for `Params::ring2048_cell256` (256-byte cells returning a 246-byte record):
 
 | Message or state | Bytes |
 |---|---:|
-| Packing key, once per client | 15,362 |
+| Packing key, once per client | 15,394 |
 | Query | 7,456 |
 | Response | 9,208 |
-| Seated key on the server | 16,384 |
+| Seated key and its mask on the server | 32,768 |
 | Shard table on the server | 4,194,304 + 1,048,576 |
 
 `tests/special_modulus_kat.rs` checks every byte against a generic 64-bit reference of the same

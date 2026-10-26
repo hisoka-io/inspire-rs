@@ -123,22 +123,29 @@ fn bits(m: u64) -> usize {
     (64 - (m - 1).leading_zeros()) as usize
 }
 
-/// The same three messages from the generic reference, packed independently.
-fn generic(case: &Case) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+/// The key-mask seed a key carries, after its 2-byte version.
+fn mask_seed(key: &[u8]) -> [u8; 32] {
+    key[2..34].try_into().unwrap()
+}
+
+/// The same three messages from the generic reference, packed independently, for a key
+/// under the mask `w_seed` expands to.
+fn generic(case: &Case, w_seed: [u8; 32]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let p = &case.params;
     let (q, sp) = (p.q, p.special_prime);
     let ctx = reference::PackCtx::new(p.ring_dim, p.gamma, q, sp);
     let sk = reference::Secret::from_coeffs(&ctx, case.secret.clone());
-    let key = reference::keygen(&ctx, &sk, p.key_mask_version, &case.key_error);
+    let key = reference::keygen(&ctx, &sk, w_seed, &case.key_error);
     let body = reference::query(&ctx, &sk, case.row, case.seed, &case.query_error);
     let shard = reference::Shard {
         rows: case.rows,
         cols: p.gamma,
         vals: signed_nibbles(&case.cells, p),
     };
-    let (mask, b) = reference::respond(&ctx, &shard, p.key_mask_version, &key, case.seed, &body);
+    let (mask, b) = reference::respond(&ctx, &shard, w_seed, &key, case.seed, &body);
     let key_bytes = [
         p.key_mask_version.to_be_bytes().to_vec(),
+        w_seed.to_vec(),
         pack(&key.q, bits(q)),
         pack(&key.p, bits(sp)),
     ]
@@ -159,12 +166,13 @@ fn kernels() -> Vec<Kernel> {
         .collect()
 }
 
+/// The client draws each key's mask seed, so the reference reads it from the key it checks.
 fn check(case: &Case, tag: &str) {
-    let want = generic(case);
     for kernel in kernels() {
         let server = Server::with_kernel(&case.params, kernel).unwrap();
         let table = server.table(&case.cells).unwrap();
         let got = fast(case, &server, &table);
+        let want = generic(case, mask_seed(&got.0));
         assert_eq!(got.0, want.0, "key bytes: {tag} {kernel:?}");
         assert_eq!(got.1, want.1, "query bytes: {tag} {kernel:?}");
         assert_eq!(got.2, want.2, "response bytes: {tag} {kernel:?}");
@@ -208,17 +216,33 @@ fn served_set_matches_the_generic_reference_byte_for_byte() {
 fn the_reference_comparison_can_fail() {
     // One unit more key error in one coefficient changes the key bytes; one more unit of
     // query error changes the response.
+    // So does another mask seed in the reference, beyond the seed bytes themselves.
     let case = case(small(256, 32), Data::Random, Some(5), 9);
-    let base = generic(&case);
     let server = Server::with_kernel(&case.params, Kernel::Portable).unwrap();
     let table = server.table(&case.cells).unwrap();
-    assert_eq!(fast(&case, &server, &table), base);
+    let got = fast(&case, &server, &table);
+    let seed = mask_seed(&got.0);
+    assert_eq!(got, generic(&case, seed));
+    let mut other_seed = seed;
+    other_seed[0] ^= 1;
+    let other = generic(&case, other_seed);
+    assert_ne!(
+        got.0[34..],
+        other.0[34..],
+        "the key does not depend on its mask"
+    );
+    assert_ne!(
+        got.2, other.2,
+        "the response does not depend on the key's mask"
+    );
     let mut off_key = clone_case(&case);
     off_key.key_error[3] += 1;
-    assert_ne!(fast(&off_key, &server, &table).0, base.0);
+    let off = fast(&off_key, &server, &table);
+    assert_ne!(off.0, generic(&case, mask_seed(&off.0)).0);
     let mut off_query = clone_case(&case);
     off_query.query_error[0] += 1;
-    assert_ne!(fast(&off_query, &server, &table).2, base.2);
+    let off = fast(&off_query, &server, &table);
+    assert_ne!(off.2, generic(&case, mask_seed(&off.0)).2);
 }
 
 fn clone_case(c: &Case) -> Case {
@@ -338,9 +362,9 @@ fn served_wire_bytes_are_pinned() {
     let response = response.to_bytes(&params).unwrap();
     assert_eq!(
         (key.len(), query.len(), response.len()),
-        (15_362, 7_456, 9_208)
+        (15_394, 7_456, 9_208)
     );
-    assert_eq!(seat.bytes(), 16_384);
+    assert_eq!(seat.bytes(), 32_768);
     assert_eq!(table.bytes(), (4 << 20) + (1 << 20));
     let got = [digest(&key), digest(&query), digest(&response)];
     if let Ok(path) = std::env::var("SPECIAL_MODULUS_PIN_OUT") {
@@ -350,9 +374,9 @@ fn served_wire_bytes_are_pinned() {
 }
 
 const PINNED: [u64; 3] = [
-    0x30e5_18a9_83cd_acf9,
+    0x84fe_1075_9fe9_6d5f,
     0xd889_f6a1_34b7_e313,
-    0x2112_8ac3_9bc6_f45a,
+    0xef10_b409_c547_4e4b,
 ];
 
 #[test]
@@ -366,57 +390,81 @@ fn one_client_keeps_one_key_and_fresh_queries() {
     assert_ne!(q1[..32], q2[..32], "mask seed reused");
     assert_ne!(q1[32..], q2[32..], "query body reused");
     let other = Client::new(&params).unwrap();
-    assert_ne!(
-        other.packing_key().to_bytes(&params).unwrap(),
-        first,
-        "secret reused"
-    );
+    let second = other.packing_key().to_bytes(&params).unwrap();
+    assert_ne!(second, first, "secret reused");
+    assert_ne!(mask_seed(&second), mask_seed(&first), "key mask shared");
 }
 
 #[test]
 fn a_key_under_another_mask_version_is_refused_by_name() {
     let served = Params::ring2048_cell256();
-    let next = Params {
-        key_mask_version: served.key_mask_version + 1,
-        ..served.clone()
-    };
     let server = Server::with_kernel(&served, Kernel::Portable).unwrap();
     let mut rng = ChaCha20Rng::seed_from_u64(11);
     let cells = cells(&served, 2048, Data::Random, &mut rng);
     let table = server.table(&cells).unwrap();
-    let mut other = Client::from_seed(&next, [3; 32]).unwrap();
-    let key = other.packing_key().to_bytes(&next).unwrap();
-    assert_eq!(key[..2], next.key_mask_version.to_be_bytes());
+    let mut client = Client::from_seed(&served, [3; 32]).unwrap();
+    let key = client.packing_key().to_bytes(&served).unwrap();
+    assert_eq!(key[..2], [0, 2]);
 
-    let err = PackingKey::from_bytes(&served, &key)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("key-mask version"), "{err}");
-    let err = server.seat(other.packing_key()).unwrap_err().to_string();
-    assert!(err.contains("key-mask version"), "{err}");
+    // The shared-mask version and an unknown one, by name; a key of the shared-mask form
+    // (no seed, 32 bytes shorter) by its length.
+    for version in [1u16, 3] {
+        let mut other = key.clone();
+        other[..2].copy_from_slice(&version.to_be_bytes());
+        let err = PackingKey::from_bytes(&served, &other)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("key-mask version {version}")),
+            "{err}"
+        );
+    }
+    let short = [vec![0, 1], key[34..].to_vec()].concat();
+    assert_eq!(short.len(), 15_362);
+    assert!(PackingKey::from_bytes(&served, &short).is_err());
+    for version in [1, 3] {
+        let set = Params {
+            key_mask_version: version,
+            ..served.clone()
+        };
+        assert!(Server::new(&set).is_err() && Client::new(&set).is_err());
+    }
 
-    // The control: the same key relabelled as the served version seats, and reads noise.
-    let mut forged = key.clone();
-    forged[..2].copy_from_slice(&served.key_mask_version.to_be_bytes());
+    // The control: the key as built seats and reads its row.
     let seat = server
-        .seat(&PackingKey::from_bytes(&served, &forged).unwrap())
+        .seat(&PackingKey::from_bytes(&served, &key).unwrap())
         .unwrap();
-    let query =
-        Query::from_bytes(&served, &other.query(9).unwrap().to_bytes(&next).unwrap()).unwrap();
-    let read = other
+    let query = client.query(9).unwrap();
+    let read = client
         .decode(&server.respond(&table, &seat, &query).unwrap())
         .unwrap();
-    assert_ne!(read, cells[9 * 256..9 * 256 + 246]);
-
-    // Under its own version the same client reads its row.
-    let own = Server::with_kernel(&next, Kernel::Portable).unwrap();
-    let table = own.table(&cells).unwrap();
-    let seat = own.seat(other.packing_key()).unwrap();
-    let query = other.query(9).unwrap();
-    let read = other
-        .decode(&own.respond(&table, &seat, &query).unwrap())
-        .unwrap();
     assert_eq!(read, cells[9 * 256..9 * 256 + 246]);
+}
+
+/// A key whose seed bytes are changed seats, and reads noise: the server multiplies by the
+/// mask the key names, so the seed is part of the key.
+#[test]
+fn a_key_with_another_mask_seed_reads_nothing() {
+    let params = Params::ring2048_cell256();
+    let server = Server::with_kernel(&params, Kernel::Portable).unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(12);
+    let cells = cells(&params, 2048, Data::Random, &mut rng);
+    let table = server.table(&cells).unwrap();
+    let mut client = Client::from_seed(&params, [4; 32]).unwrap();
+    let mut key = client.packing_key().to_bytes(&params).unwrap();
+    let mut read_under = |key: &[u8]| {
+        let seat = server
+            .seat(&PackingKey::from_bytes(&params, key).unwrap())
+            .unwrap();
+        let query = client.query(9).unwrap();
+        client
+            .decode(&server.respond(&table, &seat, &query).unwrap())
+            .unwrap()
+    };
+    // Control: the same bytes, decoded and seated the same way, read the row.
+    assert_eq!(read_under(&key), cells[9 * 256..9 * 256 + 246]);
+    key[2] ^= 1;
+    assert_ne!(read_under(&key), cells[9 * 256..9 * 256 + 246]);
 }
 
 #[test]
@@ -518,10 +566,10 @@ fn dump_cases_for_the_integer_reference() {
         let server = Server::with_kernel(p, Kernel::Portable).unwrap();
         let table = server.table(&case.cells).unwrap();
         let (key, query, response) = fast(&case, &server, &table);
-        let kq = unpack(&key[2..], bits(q), d);
-        let kp = unpack(&key[2 + (d * bits(q)).div_ceil(8)..], bits(sp), d);
+        let kq = unpack(&key[34..], bits(q), d);
+        let kp = unpack(&key[34 + (d * bits(q)).div_ceil(8)..], bits(sp), d);
         let ctx = reference::PackCtx::new(d, p.gamma, q, sp);
-        let w = reference::expand_key_mask(&ctx, p.key_mask_version);
+        let w = reference::expand_key_mask(&ctx, mask_seed(&key));
         let mut out = String::new();
         line(
             &mut out,
@@ -558,9 +606,26 @@ fn dump_cases_for_the_integer_reference() {
         line(
             &mut out,
             "seeds",
-            &[case.seed.to_vec(), reference::KEY_MASK_LABEL.to_vec()].concat(),
+            &[case.seed.to_vec(), mask_seed(&key).to_vec()].concat(),
         );
-        line(&mut out, "wver", &[p.key_mask_version]);
         std::fs::write(format!("{dir}/{name}.txt"), out).unwrap();
     }
+    // The client-side draw: each seeded client's key carries the mask seed its seed source
+    // gives on the key-seed stream.
+    let served = Params::ring2048_cell256();
+    let mut out = String::new();
+    let mut rng = ChaCha20Rng::seed_from_u64(21);
+    for seed in [[3u8; 32], [42; 32], rng.gen()] {
+        let key = Client::from_seed(&served, seed)
+            .unwrap()
+            .packing_key()
+            .to_bytes(&served)
+            .unwrap();
+        line(
+            &mut out,
+            "draw",
+            &[seed.to_vec(), mask_seed(&key).to_vec()].concat(),
+        );
+    }
+    std::fs::write(format!("{dir}/key_seed_draws.draw"), out).unwrap();
 }

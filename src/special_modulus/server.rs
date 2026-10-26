@@ -3,8 +3,8 @@
 //! Step 1 of the packing is linear in the query mask `a`, so a shard's columns are folded
 //! once into `S_i = tau_{g^i}(gamma^-1 * sum_j X^(j * g^(d-i)) * h_j)` and a response
 //! needs only `R_i = tau_{g^i}(a) * S_i`. The backward recursion then switches each
-//! `R_(i+1)` with the public key mask at `q * p` and divides by `p`; the client's key enters
-//! only the body, accumulated over both limbs and divided by `p` once at the end.
+//! `R_(i+1)` with the key's own public mask at `q * p` and divides by `p`; the client's key
+//! enters only the body, accumulated over both limbs and divided by `p` once at the end.
 
 use std::sync::Arc;
 
@@ -63,12 +63,15 @@ fn avx512_available() -> bool {
     false
 }
 
-/// A client's key as the server multiplies by it: both limbs in transform form.
+/// A client's key and the mask its seed expands to, as the server multiplies by them: both
+/// limbs of each in transform form. The mask is expanded once here rather than per query.
 #[derive(Clone)]
 pub struct KeySeat {
     params: Params,
     q: Vec<u32>,
     p: Vec<u32>,
+    w_q: Vec<u32>,
+    w_p: Vec<u32>,
 }
 
 impl std::fmt::Debug for KeySeat {
@@ -82,7 +85,7 @@ impl std::fmt::Debug for KeySeat {
 impl KeySeat {
     /// Words held, in bytes.
     pub fn bytes(&self) -> usize {
-        (self.q.len() + self.p.len()) * 4
+        (self.q.len() + self.p.len() + self.w_q.len() + self.w_p.len()) * 4
     }
 }
 
@@ -170,17 +173,10 @@ impl Server {
         self.kernel
     }
 
-    /// Seat an uploaded key.
+    /// Seat an uploaded key, with the mask its seed expands to.
     pub fn seat(&self, key: &PackingKey) -> Result<KeySeat> {
         let ring = &self.ring;
         let d = ring.params.ring_dim;
-        if key.version != ring.params.key_mask_version {
-            return Err(pir_err!(
-                "packing key is under key-mask version {}; this set serves version {}",
-                key.version,
-                ring.params.key_mask_version
-            ));
-        }
         if key.q.len() != d || key.p.len() != d {
             return Err(pir_err!("packing key needs {d} coefficients per limb"));
         }
@@ -196,10 +192,13 @@ impl Server {
         for x in &mut p {
             *x = ring.lp.p.to_mont(*x);
         }
+        let (w_q, w_p) = ring.key_mask(key.mask_seed);
         Ok(KeySeat {
             params: ring.params.clone(),
             q,
             p,
+            w_q,
+            w_p,
         })
     }
 
@@ -420,7 +419,7 @@ fn respond_impl(
     // Masked indices into slices of length d need no bounds check, so the gathers vectorise.
     let m = d - 1;
     let a = &a[..d];
-    let (w_q, w_p) = (&ring.w_q[..d], &ring.w_p[..d]);
+    let (w_q, w_p) = (&seat.w_q[..d], &seat.w_p[..d]);
     let (key_q, key_p) = (&seat.q[..d], &seat.p[..d]);
     let start = |i: usize, out: &mut [u32]| {
         let s = &table.step1[i * d..(i + 1) * d];

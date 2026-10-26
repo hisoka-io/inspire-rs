@@ -8,12 +8,13 @@
 //! signed nibbles in `[-8, 8)`, so a zero byte adds nothing to the folded query error.
 //!
 //! Roles:
-//! - [`Client`] draws its secret inside, builds one [`PackingKey`], emits one [`Query`] per
-//!   row read and decodes each [`Response`] to the record.
+//! - [`Client`] draws its secret and its key-mask seed inside, builds one [`PackingKey`],
+//!   emits one [`Query`] per row read and decodes each [`Response`] to the record.
 //! - [`Server`] holds the public tables. [`Server::table`] folds step 1 of the packing over
 //!   one shard's cells into a [`ShardTable`] that keeps those cells, so a response is always
 //!   computed from the cells its table was built from. [`Server::seat`] turns an uploaded
-//!   key into a [`KeySeat`]. [`Server::respond`] answers one query.
+//!   key and the mask its seed expands to into a [`KeySeat`]. [`Server::respond`] answers
+//!   one query.
 //!
 //! All arithmetic runs on 32-bit words; [`Kernel`] picks the portable loops or the same
 //! loops compiled for AVX-512, and both give the same bytes.
@@ -47,13 +48,14 @@ pub const Q: u64 = 536_813_569;
 /// The served set's special prime: the largest prime `1 mod 4096` below 2^31.
 pub const SPECIAL_PRIME: u64 = 2_147_389_441;
 
-/// The public label every key mask expands from: ChaCha20 under this key, with the mask's
-/// version as the stream. Fixed in code, so a server names at most a version, never the mask.
-pub const KEY_MASK_LABEL: [u8; SEED_BYTES] = *b"special-modulus packing key mask";
+/// The key-mask version this build builds and seats: each key carries a fresh seed its mask
+/// expands from. Version 1, one public mask shared by every key, let lattice reduction on that
+/// mask be paid once for all keys; no build accepts it.
+pub const KEY_MASK_VERSION: u16 = 2;
 
-/// The newest key-mask version this build knows. A client accepts it and the one before it,
-/// so a node can move to a new mask without a new parameter set.
-pub const KEY_MASK_VERSION: u16 = 1;
+/// ChaCha20 stream a key mask expands on. Query masks expand on stream 0, so a seed never
+/// gives a key mask and a query mask that agree.
+const KEY_MASK_STREAM: u64 = u64::from_be_bytes(*b"key mask");
 
 /// One parameter set.
 #[derive(Clone, Debug, PartialEq)]
@@ -72,7 +74,7 @@ pub struct Params {
     pub record_bytes: usize,
     /// Standard deviation of the secret, the key error and the query error.
     pub sigma: f64,
-    /// Version of the public key mask; every key under this set carries it.
+    /// Key-mask version; every key under this set carries it.
     pub key_mask_version: u16,
 }
 
@@ -141,8 +143,11 @@ impl Params {
         if q / PLAINTEXT_MODULUS < 1 << 16 {
             return Err(pir_err!("ciphertext prime {q} leaves no room for noise"));
         }
-        if self.key_mask_version == 0 {
-            return Err(pir_err!("key-mask version 0 names no mask"));
+        if self.key_mask_version != KEY_MASK_VERSION {
+            return Err(pir_err!(
+                "key-mask version {} is not the per-key-seed version {KEY_MASK_VERSION}",
+                self.key_mask_version
+            ));
         }
         if !(self.sigma.is_finite() && (1.0..=64.0).contains(&self.sigma)) {
             return Err(pir_err!(
@@ -167,11 +172,12 @@ impl Params {
         2 * self.record_bytes
     }
 
-    /// Bytes of an uploaded packing key: its key-mask version, then each limb at its own
-    /// prime's width.
+    /// Bytes of an uploaded packing key: its key-mask version, its mask seed, then each limb
+    /// at its own prime's width.
     #[must_use]
     pub fn key_bytes(&self) -> usize {
         KEY_MASK_VERSION_BYTES
+            + SEED_BYTES
             + Self::packed_bytes(self.ring_dim, self.q)
             + Self::packed_bytes(self.ring_dim, self.special_prime)
     }
@@ -189,10 +195,11 @@ impl Params {
             + Self::packed_bytes(self.body_coefficients(), self.q)
     }
 
-    /// Bytes a server keeps per seated key: both limbs in transform form, one word each.
+    /// Bytes a server keeps per seated key: the key and its mask, both limbs each, in
+    /// transform form, one word per coefficient.
     #[must_use]
     pub const fn seat_bytes(&self) -> usize {
-        2 * self.ring_dim * 4
+        4 * self.ring_dim * 4
     }
 
     /// Bytes of a shard's step-1 table: `gamma` transform-form words per row slot.
@@ -205,11 +212,11 @@ impl Params {
 /// Bytes of the key-mask version at the head of a packing key.
 const KEY_MASK_VERSION_BYTES: usize = 2;
 
-/// The stream the key mask of `version` expands from.
-fn key_mask_stream(version: u16) -> rand_chacha::ChaCha20Rng {
+/// The stream a key's mask expands from.
+fn key_mask_stream(seed: [u8; SEED_BYTES]) -> rand_chacha::ChaCha20Rng {
     use rand::SeedableRng;
-    let mut rng = rand_chacha::ChaCha20Rng::from_seed(KEY_MASK_LABEL);
-    rng.set_stream(u64::from(version));
+    let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
+    rng.set_stream(KEY_MASK_STREAM);
     rng
 }
 
@@ -260,9 +267,6 @@ struct Ring {
     p_over_q: u32,
     /// `p^-1 mod q` as a Montgomery operand.
     p_inv: u32,
-    /// The key mask in transform form, Montgomery operands.
-    w_q: Vec<u32>,
-    w_p: Vec<u32>,
     /// `tables[i][k]`: slot of `f` that slot `k` of `tau_{g^i}(f)` reads. Server only.
     tables: Vec<Vec<u16>>,
 }
@@ -289,19 +293,6 @@ impl Ring {
         } else {
             Vec::new()
         };
-        let mut rng = key_mask_stream(params.key_mask_version);
-        let mut w_q = vec![0u32; d];
-        let mut w_p = vec![0u32; d];
-        expand_uniform(&mut rng, params.q, &mut w_q);
-        expand_uniform(&mut rng, params.special_prime, &mut w_p);
-        lq.forward(&mut w_q);
-        lp.forward(&mut w_p);
-        for x in &mut w_q {
-            *x = lq.p.to_mont(*x);
-        }
-        for x in &mut w_p {
-            *x = lp.p.to_mont(*x);
-        }
         let (q, p) = (params.q, params.special_prime);
         let p_mod_q = (p % q) as u32;
         Ok(Self {
@@ -312,12 +303,30 @@ impl Ring {
             neg_off: ((q - p % q) % q) as u32,
             p_over_q: (p / q) as u32,
             p_inv: lq.p.to_mont(lq.p.pow(p % q, q - 2)),
-            w_q,
-            w_p,
             tables,
             lq,
             lp,
         })
+    }
+
+    /// The mask a key's seed expands to, both limbs, transform form, Montgomery operands.
+    fn key_mask(&self, seed: [u8; SEED_BYTES]) -> (Vec<u32>, Vec<u32>) {
+        let (lq, lp) = (&self.lq, &self.lp);
+        let d = self.params.ring_dim;
+        let mut rng = key_mask_stream(seed);
+        let mut w_q = vec![0u32; d];
+        let mut w_p = vec![0u32; d];
+        expand_uniform(&mut rng, self.params.q, &mut w_q);
+        expand_uniform(&mut rng, self.params.special_prime, &mut w_p);
+        lq.forward(&mut w_q);
+        lp.forward(&mut w_p);
+        for x in &mut w_q {
+            *x = lq.p.to_mont(*x);
+        }
+        for x in &mut w_p {
+            *x = lp.p.to_mont(*x);
+        }
+        (w_q, w_p)
     }
 
     /// Residue mod `q` of the centred value of a residue mod `p`.
@@ -391,10 +400,10 @@ mod tests {
             (p.sigma - 6.4).abs() < f64::EPSILON,
             "query error standard deviation"
         );
-        assert_eq!(p.key_bytes(), 2 + 7424 + 7936);
+        assert_eq!(p.key_bytes(), 2 + 32 + 7424 + 7936);
         assert_eq!(p.query_bytes(), 32 + 7424);
         assert_eq!(p.response_bytes(), 7424 + 1784);
-        assert_eq!(p.seat_bytes(), 16_384);
+        assert_eq!(p.seat_bytes(), 32_768);
         assert_eq!(p.table_bytes(), 4 << 20);
     }
 
@@ -402,9 +411,11 @@ mod tests {
     fn invalid_sets_are_refused() {
         let base = Params::ring2048_cell256();
         type Edit = Box<dyn Fn(&mut Params)>;
-        let cases: [(&str, Edit); 8] = [
+        let cases: [(&str, Edit); 10] = [
             ("ring", Box::new(|p| p.ring_dim = 3000)),
-            ("mask version", Box::new(|p| p.key_mask_version = 0)),
+            ("mask version 0", Box::new(|p| p.key_mask_version = 0)),
+            ("shared-mask version", Box::new(|p| p.key_mask_version = 1)),
+            ("unknown mask version", Box::new(|p| p.key_mask_version = 3)),
             ("width", Box::new(|p| p.gamma = 2048)),
             ("cell", Box::new(|p| p.cell_bytes = 255)),
             ("record", Box::new(|p| p.record_bytes = 257)),
@@ -479,36 +490,44 @@ mod tests {
         a + q * t
     }
 
-    /// Each version expands its own mask, and none is the unversioned stream 0 of the label.
+    /// A key mask is a fixed function of its seed, differs between seeds, and is not the
+    /// query mask the same seed expands to.
     #[test]
-    fn each_key_mask_version_expands_its_own_mask() {
+    fn each_seed_expands_its_own_key_mask_apart_from_query_masks() {
         use rand::SeedableRng;
-        let base = Params::ring2048_cell256();
-        let mask = |v: u16| {
-            let ring = Ring::new(
-                &Params {
-                    key_mask_version: v,
-                    ..base.clone()
-                },
-                false,
-            )
-            .unwrap();
-            (ring.w_q, ring.w_p)
-        };
-        let unversioned = {
-            let mut rng = rand_chacha::ChaCha20Rng::from_seed(KEY_MASK_LABEL);
-            let mut w = vec![0u32; base.ring_dim];
-            expand_uniform(&mut rng, base.q, &mut w);
-            let lq = Ntt32::new(base.ring_dim, base.q).unwrap();
-            lq.forward(&mut w);
-            w.iter().map(|&x| lq.p.to_mont(x)).collect::<Vec<_>>()
-        };
-        let (v1, v2) = (mask(1), mask(2));
-        assert_eq!(v1, mask(1), "a version's mask is a fixed function of it");
-        assert_ne!(v1.0, v2.0);
-        assert_ne!(v1.1, v2.1);
-        assert_ne!(v1.0, unversioned);
-        assert_eq!(base.key_mask_version, KEY_MASK_VERSION);
+        let ring = Ring::new(&Params::ring2048_cell256(), false).unwrap();
+        let (a, b) = ([7u8; SEED_BYTES], [8u8; SEED_BYTES]);
+        let w = ring.key_mask(a);
+        assert_eq!(
+            w,
+            ring.key_mask(a),
+            "a seed's mask is a fixed function of it"
+        );
+        let other = ring.key_mask(b);
+        assert_ne!(w.0, other.0);
+        assert_ne!(w.1, other.1);
+        let mut query_mask = vec![0u32; ring.params.ring_dim];
+        expand_uniform(
+            &mut rand_chacha::ChaCha20Rng::from_seed(a),
+            ring.params.q,
+            &mut query_mask,
+        );
+        ring.lq.forward(&mut query_mask);
+        for x in &mut query_mask {
+            *x = ring.lq.p.to_mont(*x);
+        }
+        assert_ne!(w.0, query_mask, "key and query masks share a stream");
+        // Control: the key-mask expansion moved to stream 0 is the query mask, so the
+        // stream is the whole separation and the comparison above can fail.
+        let mut on_query_stream = key_mask_stream(a);
+        on_query_stream.set_stream(0);
+        let mut same = vec![0u32; ring.params.ring_dim];
+        expand_uniform(&mut on_query_stream, ring.params.q, &mut same);
+        ring.lq.forward(&mut same);
+        for x in &mut same {
+            *x = ring.lq.p.to_mont(*x);
+        }
+        assert_eq!(same, query_mask);
     }
 
     #[test]

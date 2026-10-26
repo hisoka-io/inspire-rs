@@ -313,9 +313,146 @@ fn the_special_modulus_client_takes_no_caller_secret_or_noise_by_default() {
         [
             "let secret = noise.sample_vec(params.ring_dim);",
             "let key_error = noise.sample_vec(params.ring_dim);",
-            "Self::build(params, &secret, &key_error, noise, seeds)",
+            "let mask_seed = key_mask_seed(&seeds);",
+            "Self::build(params, &secret, &key_error, mask_seed, noise, seeds)",
             "}",
         ],
         "the shared draw changed; the seeded wire pins only cover it while it is this"
     );
+    // The caller that passes a secret still gets an entropy-drawn mask seed.
+    assert!(item("    pub fn from_parts(")
+        .contains("os_seeded_chacha(\"special-modulus key-mask seed\")"));
+}
+
+/// The test-only constructors that take a seed: a client seed, or a query seed. Each draws
+/// the key's mask seed itself.
+const SEEDED_TEST_ENTRY_POINTS: &[&str] = &["from_seed", "from_parts", "query_from_parts"];
+
+/// The parameter list of a function header, from its first `(` to the matching `)`.
+fn parameters(header: &str) -> &str {
+    let Some(open) = header.find('(') else {
+        return "";
+    };
+    let mut depth = 0usize;
+    for (offset, ch) in header.char_indices().skip(open) {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &header[open + 1..offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    &header[open + 1..]
+}
+
+/// A parameter a seed could arrive through: any 32-byte array, however its length is
+/// spelled, or any name or type that says seed.
+fn takes_a_seed(header: &str) -> bool {
+    let flat: String = parameters(header)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    flat.contains("[u8;seed_bytes]") || flat.contains("[u8;32]") || flat.contains("seed")
+}
+
+/// Public functions in `src` (`pub fn`, `pub const fn` and the like; not `pub(crate)`) that
+/// take a seed and are not one of the gated test entry points, and the count of public
+/// functions seen. A key's mask seed must come from the client's own draw, so no
+/// default-build function may take one, under any name.
+fn public_seed_takers(src: &str) -> (Vec<String>, usize) {
+    let src = src.split("\n#[cfg(test)]").next().unwrap_or(src);
+    let (mut found, mut publics) = (Vec::new(), 0);
+    for (at, _) in src.match_indices("fn ") {
+        let line_start = src[..at].rfind('\n').map_or(0, |n| n + 1);
+        let qualifiers = src[line_start..at].trim();
+        if !(qualifiers == "pub" || qualifiers.starts_with("pub ")) {
+            continue;
+        }
+        publics += 1;
+        let item = body_from(&src[at..]);
+        let header = item.split('{').next().unwrap_or(item);
+        if !takes_a_seed(header) {
+            continue;
+        }
+        let name = header["fn ".len()..]
+            .split(['(', '<'])
+            .next()
+            .unwrap_or(header)
+            .trim();
+        if !(gated(&src[..line_start]) && SEEDED_TEST_ENTRY_POINTS.contains(&name)) {
+            found.push(name.to_owned());
+        }
+    }
+    (found, publics)
+}
+
+#[test]
+fn no_default_public_function_takes_a_key_mask_seed() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/special_modulus");
+    let mut sources = Vec::new();
+    rust_sources(&dir, &mut sources);
+    assert!(sources.len() >= 5, "the walk found {} files", sources.len());
+    let (mut offenders, mut publics) = (Vec::new(), 0);
+    for (path, text) in &sources {
+        let (found, count) = public_seed_takers(text);
+        publics += count;
+        offenders.extend(found.into_iter().map(|name| format!("{path}: {name}")));
+    }
+    assert!(
+        publics >= 25,
+        "{publics} public functions found; re-point this floor"
+    );
+    assert!(
+        offenders.is_empty(),
+        "public functions that take a seed outside the gated test entry points:\n{}",
+        offenders.join("\n")
+    );
+
+    // The key and its builder stay closed: no public field, and the builder that takes the
+    // mask seed is private.
+    let wire = include_str!("../src/special_modulus/wire.rs");
+    let key = body_from(&wire[wire.find("pub struct PackingKey").expect("PackingKey")..]);
+    assert!(
+        key.lines()
+            .skip(1)
+            .all(|l| !l.trim_start().starts_with("pub ")),
+        "{key}"
+    );
+    let client = include_str!("../src/special_modulus/client.rs");
+    assert!(
+        client.contains("\n    fn build(\n"),
+        "`build` moved or opened"
+    );
+}
+
+#[test]
+fn the_seed_gate_rejects_a_seed_under_any_name() {
+    let refused = [
+        "impl PackingKey {\n    pub fn with_mask(params: &Params, w: [u8; SEED_BYTES]) -> Result<Self> {\n        todo!()\n    }\n}\n",
+        "pub fn keyed(params: &Params, w: &[u8; 32]) -> Self {\n    todo!()\n}\n",
+        "    pub fn new_with(params: &Params, mask: MaskSeed) -> Self {\n        todo!()\n    }\n",
+        "    pub const fn raw(w: [u8; 32]) -> Self {\n        todo!()\n    }\n",
+        "#[cfg(feature = \"caller-secret-keys\")]\n    pub fn keyed(w: [u8; SEED_BYTES]) -> Self {\n        todo!()\n    }\n",
+    ];
+    for src in refused {
+        assert_eq!(public_seed_takers(src).0.len(), 1, "unseen:\n{src}");
+    }
+    let accepted = [
+        "#[cfg(feature = \"caller-secret-keys\")]\n    pub fn from_seed(params: &Params, seed: [u8; SEED_BYTES]) -> Result<Self> {\n        todo!()\n    }\n",
+        "    pub fn to_bytes(&self, params: &Params) -> Result<[u8; 32]> {\n        todo!()\n    }\n",
+    ];
+    for src in accepted {
+        assert!(public_seed_takers(src).0.is_empty(), "refused:\n{src}");
+    }
+    // Dropping the gate from a real entry point is seen.
+    let client = include_str!("../src/special_modulus/client.rs");
+    let header = "    pub fn from_seed(";
+    let ungated = client.replace(&format!("{GATE}\n{header}"), header);
+    assert_ne!(ungated, client, "`{header}` is not directly under the gate");
+    assert_eq!(public_seed_takers(&ungated).0, ["from_seed"]);
 }

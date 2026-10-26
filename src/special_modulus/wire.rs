@@ -31,10 +31,12 @@ fn split<'a>(bytes: &'a [u8], at: usize, want: usize, what: &str) -> Result<(&'a
 }
 
 /// A client's packing key: `y = p * tau_g(s) - s * w + e` at `q * p`, one residue
-/// vector per prime, coefficient form, and the version of the mask `w` it was built under.
+/// vector per prime, coefficient form, with its key-mask version and the seed its own mask
+/// `w` expands from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackingKey {
     pub(crate) version: u16,
+    pub(crate) mask_seed: [u8; SEED_BYTES],
     pub(crate) q: Vec<u32>,
     pub(crate) p: Vec<u32>,
 }
@@ -45,17 +47,20 @@ impl PackingKey {
         self.version
     }
 
-    /// The key-mask version (big-endian), limb `q`, then limb `p`.
+    /// The key-mask version (big-endian), the mask seed, limb `q`, then limb `p`.
     pub fn to_bytes(&self, params: &Params) -> Result<Vec<u8>> {
         let mut out = self.version.to_be_bytes().to_vec();
+        out.extend(self.mask_seed);
         out.extend(pack(&self.q, params.q)?);
         out.extend(pack(&self.p, params.special_prime)?);
         Ok(out)
     }
 
-    /// Refuses anything [`Self::to_bytes`] would not emit for `params`, and a key built under
-    /// another key-mask version, which would only decode to noise.
+    /// Refuses an invalid `params`, anything [`Self::to_bytes`] would not emit for it, and a
+    /// key built under another key-mask version, which would only decode to noise.
     pub fn from_bytes(params: &Params, bytes: &[u8]) -> Result<Self> {
+        // A set naming a retired version must not admit keys under it.
+        params.validate()?;
         let d = params.ring_dim;
         let (version, limbs) = split(
             bytes,
@@ -70,9 +75,13 @@ impl PackingKey {
                 params.key_mask_version
             ));
         }
+        let (seed, limbs) = limbs.split_at(SEED_BYTES);
+        let mut mask_seed = [0u8; SEED_BYTES];
+        mask_seed.copy_from_slice(seed);
         let (q, p) = limbs.split_at(Params::packed_bytes(d, params.q));
         Ok(Self {
             version,
+            mask_seed,
             q: unpack(q, params.q, d)?,
             p: unpack(p, params.special_prime, d)?,
         })
@@ -143,6 +152,7 @@ mod tests {
         let top_q = params.q as u32 - 1;
         let key = PackingKey {
             version: params.key_mask_version,
+            mask_seed: [9; SEED_BYTES],
             q: vec![top_q; d],
             p: vec![params.special_prime as u32 - 1; d],
         };
@@ -167,7 +177,8 @@ mod tests {
         assert!(PackingKey::from_bytes(&params, &kb[1..]).is_err());
         // Another key-mask version is refused by name, whichever side of the served one.
         assert_eq!(kb[..2], params.key_mask_version.to_be_bytes());
-        for version in [0, params.key_mask_version + 1] {
+        assert_eq!(kb[2..2 + SEED_BYTES], [9; SEED_BYTES]);
+        for version in [0, 1, params.key_mask_version + 1] {
             let mut other = kb.clone();
             other[..2].copy_from_slice(&u16::to_be_bytes(version));
             let err = PackingKey::from_bytes(&params, &other)
@@ -175,6 +186,17 @@ mod tests {
                 .to_string();
             assert!(err.contains("key-mask version"), "{err}");
         }
+        // A set relabelled to version 1 does not decode a key labelled to match it.
+        let retired = Params {
+            key_mask_version: 1,
+            ..params.clone()
+        };
+        let mut v1 = kb.clone();
+        v1[..2].copy_from_slice(&1u16.to_be_bytes());
+        let err = PackingKey::from_bytes(&retired, &v1)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("per-key-seed version"), "{err}");
         assert!(Query::from_bytes(&params, &[qb.clone(), vec![0]].concat()).is_err());
         assert!(Response::from_bytes(&params, &rb[..rb.len() - 1]).is_err());
 
