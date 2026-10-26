@@ -33,7 +33,7 @@ const SEEDS: [u64; 3] = [
 
 fn run_one_seed(seed: u64) -> SeedResult {
     let mut rng = StdRng::seed_from_u64(seed);
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 
     let num_entries = params.ring_dim;
@@ -103,7 +103,7 @@ fn median3(mut values: [usize; 3]) -> usize {
 fn main() {
     eprintln!(
         "Spiral mod-switching bench: production cell d=2048, entries={}, entry_size={}",
-        InspireParams::secure_128_d2048().ring_dim,
+        InspireParams::d2048().ring_dim,
         ENTRY_SIZE
     );
     eprintln!("Mod-switch target: 0x{MOD_SWITCH_TARGET_45BIT:x} (45-bit NTT-friendly prime)");

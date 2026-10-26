@@ -27,7 +27,7 @@ fn percentile(sorted: &[Duration], p: f64) -> Duration {
             cell; run under --release. Trigger: changing the respond hot path, or comparing the \
             parallel feature against the sequential build."]
 fn respond_latency_baseline() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let d = params.ring_dim;
     let entry_size = 512usize;
 

@@ -147,7 +147,7 @@ fn assert_same_bytes_with_and_without_stores(cell: &mut Cell, indices: &[u64], l
 
 #[test]
 fn production_cells_serve_the_same_bytes_from_a_store_at_gamma_128_256_512() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let d = params.ring_dim as u64;
     let mut rng = ChaCha20Rng::seed_from_u64(0x5354_4f00);
     for (entry_size, random_rows) in [(256usize, 6), (512, 4), (1024, 0)] {
@@ -161,7 +161,7 @@ fn production_cells_serve_the_same_bytes_from_a_store_at_gamma_128_256_512() {
 
 #[test]
 fn constant_and_striped_tables_serve_the_same_bytes_from_a_store() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let d = params.ring_dim;
     let entry_size = 256;
     type Fill = fn(usize) -> u8;
@@ -448,7 +448,7 @@ fn a_store_built_through_a_shared_shard_reaches_every_clone_until_one_changes() 
 
 #[test]
 fn a_production_store_is_gamma_times_sixteen_kibibytes() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let ctx = params.ntt_context();
     for (entry_size, payload) in [
         (256usize, 2_097_152usize),

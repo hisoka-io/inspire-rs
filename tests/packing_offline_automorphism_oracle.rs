@@ -12,7 +12,7 @@
 
 use raven_inspire::inspiring::{packing_offline, OfflinePackingKeys, PackParams};
 use raven_inspire::math::Poly;
-use raven_inspire::params::{InspireParams, SecurityLevel, DEFAULT_Q_2CRT_30BIT};
+use raven_inspire::params::{InspireParams, ParamsLabel, DEFAULT_Q_2CRT_30BIT};
 
 const RING_DIM: usize = 16;
 const PACKING_WIDTH: usize = 4;
@@ -174,7 +174,7 @@ fn params_with_moduli(moduli: Vec<u64>) -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

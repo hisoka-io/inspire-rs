@@ -3,7 +3,7 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel};
+use raven_inspire::params::{InspireParams, InspireVariant, ParamsLabel};
 use raven_inspire::pir::{
     extract_with_variant, query, query_seeded, respond, respond_inspiring,
     respond_inspiring_cached, respond_inspiring_cached_with_session, respond_one_packing,
@@ -39,7 +39,7 @@ fn fixture() -> Fixture {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     let entry_size = 64;
     let database: Vec<u8> = (0..params.ring_dim * entry_size)
@@ -217,7 +217,7 @@ fn every_extractor_rounds_an_odd_entry_width_up_to_two_columns() {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     let entry_size = 3usize;
     let database: Vec<u8> = (0..params.ring_dim)

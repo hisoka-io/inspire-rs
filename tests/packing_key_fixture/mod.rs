@@ -17,9 +17,7 @@ use rand_chacha::ChaCha20Rng;
 use raven_inspire::inspiring::ClientPackingKeys;
 use raven_inspire::lwe::LweSecretKey;
 use raven_inspire::math::{GaussianSampler, DEFAULT_Q};
-use raven_inspire::params::{
-    InspireParams, SecurityLevel, DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT,
-};
+use raven_inspire::params::{InspireParams, ParamsLabel, DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT};
 use raven_inspire::pir::{
     extract_inspiring, inverse_monomial, setup_with_rng, ClientSession, ClientState,
     EncodedDatabase, PackingMode, SeededBatchQuery, SeededClientQuery, ServerCrs,
@@ -50,7 +48,7 @@ pub fn params_for(ring_dim: usize, moduli: &[u64], gadget_len: usize) -> Inspire
         query_gadget_len: gadget_len,
         packing_gadget_len: gadget_len,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

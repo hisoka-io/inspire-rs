@@ -160,7 +160,7 @@ mod served {
     }
 
     fn measure(entry_size: usize, secrets: usize, per_secret: usize, seed: u64) -> [Cell; 2] {
-        let exact = InspireParams::secure_128_d2048();
+        let exact = InspireParams::d2048();
         let approximate = InspireParams {
             approximate_packing_gadget: true,
             ..exact.clone()
@@ -342,7 +342,7 @@ mod served {
         ) as usize;
         let seed = env_or("RAVEN_APPROXIMATE_NOISE_SEED", 0x0a99_0000);
         assert!(secrets > 0 && per_secret > 0);
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
         let boundary = MOD_SWITCH_TARGET_36BIT / params.p / 2;
 
         for entry_size in [256usize, 512] {

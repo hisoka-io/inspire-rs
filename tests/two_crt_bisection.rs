@@ -4,7 +4,7 @@
 
 use proptest::prelude::*;
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel, DEFAULT_Q_2CRT_30BIT};
+use raven_inspire::params::{InspireParams, ParamsLabel, DEFAULT_Q_2CRT_30BIT};
 use raven_inspire::{
     extract_inspiring, query_seeded, respond_seeded_inspiring, setup, PackingMode,
 };
@@ -21,7 +21,7 @@ fn params_for(ring_dim: usize, crt_moduli: Vec<u64>) -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

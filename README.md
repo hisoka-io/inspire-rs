@@ -32,7 +32,7 @@ use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::InspireParams;
 use raven_inspire::{extract_inspiring, respond_seeded_inspiring, setup, ClientSession};
 
-let params = InspireParams::secure_128_d2048();
+let params = InspireParams::d2048();
 let entry_size = 32;
 let database = vec![0u8; params.ring_dim * entry_size];
 let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
@@ -61,7 +61,7 @@ and refuses a shard edited after the fold until it is folded again.
 
 ## Parameters and sizes
 
-`InspireParams::secure_128_d2048` uses ring dimension 2048, a single 60-bit prime
+`InspireParams::d2048` uses ring dimension 2048, a single 60-bit prime
 `q = 2^60 - 2^14 + 1`, `p = 65537` and `sigma = 6.4`. Sizes at d=2048 for a 512-byte
 record are independent of database size:
 
@@ -87,8 +87,10 @@ ciphertext prime, plaintext modulus 16 (one signed nibble per coefficient) and a
 single polynomial at the ciphertext prime times a 31-bit special prime. The server switches each
 packing step at the two-prime modulus and divides by the special prime, so the response stays at
 the ciphertext prime with no modulus switch. A `Client` draws its secret inside and builds one key,
-and reads only under the served ring, primes, key mask and error width (other sets are for the
-seeded test constructors); a `Server` folds step 1 of the packing over each shard into a `ShardTable` that keeps the shard's
+and reads only under the served ring, primes and error width, and under a public key mask of the
+newest version it knows or the one before (other sets are for the seeded test constructors). Each
+key names its mask version in its first two bytes, so a server refuses a key built under another
+one; a `Server` folds step 1 of the packing over each shard into a `ShardTable` that keeps the shard's
 cells, so a response is always computed from the cells its table was built from. Arithmetic runs
 on 32-bit words, with an AVX-512 build of the same loops under `simd-packing-offline`.
 
@@ -96,7 +98,7 @@ Sizes for `Params::ring2048_cell256` (256-byte cells returning a 246-byte record
 
 | Message or state | Bytes |
 |---|---:|
-| Packing key, once per client | 15,360 |
+| Packing key, once per client | 15,362 |
 | Query | 7,456 |
 | Response | 9,208 |
 | Seated key on the server | 16,384 |
@@ -117,11 +119,11 @@ responses over 40 fresh secrets.
 
 ## Security model
 
-- **Parameters.** `secure_128_d2048` is ring dimension 2048 with a 60-bit modulus; the preset name is historical.
+- **Parameters.** `d2048` is ring dimension 2048 with a 60-bit modulus.
 - **Honest-server answers.** A response is not bound to the queried index; an application checks the record it receives against a
   commitment it trusts.
-- **Correctness margin.** The served 36-bit response keeps 8.88 bits of noise margin at 512-byte records and 10.30 bits at 32-byte
-  records, measured by `benches/packing_noise_measurement.rs`.
+- **Correctness margin.** The noise margin of the served 36-bit response is measured at 512-byte and 32-byte records by
+  `benches/packing_noise_measurement.rs`.
 - **Constant time.** Client-side NTT, ring arithmetic, query generation, key generation and decryption avoid secret-dependent branches,
   divisions and indexing; `tests/secret_dependent_spelling_gate.rs` enforces the spelling, and release builds for x86-64 and wasm32 were
   inspected at rustc 1.98. `SessionResidue` holds the client secret key: store it as a secret.

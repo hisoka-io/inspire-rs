@@ -129,15 +129,20 @@ fn generic(case: &Case) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
     let (q, sp) = (p.q, p.special_prime);
     let ctx = reference::PackCtx::new(p.ring_dim, p.gamma, q, sp);
     let sk = reference::Secret::from_coeffs(&ctx, case.secret.clone());
-    let key = reference::keygen(&ctx, &sk, p.key_mask_seed, &case.key_error);
+    let key = reference::keygen(&ctx, &sk, p.key_mask_version, &case.key_error);
     let body = reference::query(&ctx, &sk, case.row, case.seed, &case.query_error);
     let shard = reference::Shard {
         rows: case.rows,
         cols: p.gamma,
         vals: signed_nibbles(&case.cells, p),
     };
-    let (mask, b) = reference::respond(&ctx, &shard, p.key_mask_seed, &key, case.seed, &body);
-    let key_bytes = [pack(&key.q, bits(q)), pack(&key.p, bits(sp))].concat();
+    let (mask, b) = reference::respond(&ctx, &shard, p.key_mask_version, &key, case.seed, &body);
+    let key_bytes = [
+        p.key_mask_version.to_be_bytes().to_vec(),
+        pack(&key.q, bits(q)),
+        pack(&key.p, bits(sp)),
+    ]
+    .concat();
     let query_bytes = [case.seed.to_vec(), pack(&body, bits(q))].concat();
     let response_bytes = [
         pack(&mask, bits(q)),
@@ -333,7 +338,7 @@ fn served_wire_bytes_are_pinned() {
     let response = response.to_bytes(&params).unwrap();
     assert_eq!(
         (key.len(), query.len(), response.len()),
-        (15_360, 7_456, 9_208)
+        (15_362, 7_456, 9_208)
     );
     assert_eq!(seat.bytes(), 16_384);
     assert_eq!(table.bytes(), (4 << 20) + (1 << 20));
@@ -345,9 +350,9 @@ fn served_wire_bytes_are_pinned() {
 }
 
 const PINNED: [u64; 3] = [
-    0xd4b9_8b71_661b_c0aa,
+    0x30e5_18a9_83cd_acf9,
     0xd889_f6a1_34b7_e313,
-    0x7a56_7bd7_71a5_1590,
+    0x2112_8ac3_9bc6_f45a,
 ];
 
 #[test]
@@ -366,6 +371,52 @@ fn one_client_keeps_one_key_and_fresh_queries() {
         first,
         "secret reused"
     );
+}
+
+#[test]
+fn a_key_under_another_mask_version_is_refused_by_name() {
+    let served = Params::ring2048_cell256();
+    let next = Params {
+        key_mask_version: served.key_mask_version + 1,
+        ..served.clone()
+    };
+    let server = Server::with_kernel(&served, Kernel::Portable).unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(11);
+    let cells = cells(&served, 2048, Data::Random, &mut rng);
+    let table = server.table(&cells).unwrap();
+    let mut other = Client::from_seed(&next, [3; 32]).unwrap();
+    let key = other.packing_key().to_bytes(&next).unwrap();
+    assert_eq!(key[..2], next.key_mask_version.to_be_bytes());
+
+    let err = PackingKey::from_bytes(&served, &key)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("key-mask version"), "{err}");
+    let err = server.seat(other.packing_key()).unwrap_err().to_string();
+    assert!(err.contains("key-mask version"), "{err}");
+
+    // The control: the same key relabelled as the served version seats, and reads noise.
+    let mut forged = key.clone();
+    forged[..2].copy_from_slice(&served.key_mask_version.to_be_bytes());
+    let seat = server
+        .seat(&PackingKey::from_bytes(&served, &forged).unwrap())
+        .unwrap();
+    let query =
+        Query::from_bytes(&served, &other.query(9).unwrap().to_bytes(&next).unwrap()).unwrap();
+    let read = other
+        .decode(&server.respond(&table, &seat, &query).unwrap())
+        .unwrap();
+    assert_ne!(read, cells[9 * 256..9 * 256 + 246]);
+
+    // Under its own version the same client reads its row.
+    let own = Server::with_kernel(&next, Kernel::Portable).unwrap();
+    let table = own.table(&cells).unwrap();
+    let seat = own.seat(other.packing_key()).unwrap();
+    let query = other.query(9).unwrap();
+    let read = other
+        .decode(&own.respond(&table, &seat, &query).unwrap())
+        .unwrap();
+    assert_eq!(read, cells[9 * 256..9 * 256 + 246]);
 }
 
 #[test]
@@ -467,10 +518,10 @@ fn dump_cases_for_the_integer_reference() {
         let server = Server::with_kernel(p, Kernel::Portable).unwrap();
         let table = server.table(&case.cells).unwrap();
         let (key, query, response) = fast(&case, &server, &table);
-        let kq = unpack(&key, bits(q), d);
-        let kp = unpack(&key[(d * bits(q)).div_ceil(8)..], bits(sp), d);
+        let kq = unpack(&key[2..], bits(q), d);
+        let kp = unpack(&key[2 + (d * bits(q)).div_ceil(8)..], bits(sp), d);
         let ctx = reference::PackCtx::new(d, p.gamma, q, sp);
-        let w = reference::expand_key_mask(&ctx, p.key_mask_seed);
+        let w = reference::expand_key_mask(&ctx, p.key_mask_version);
         let mut out = String::new();
         line(
             &mut out,
@@ -507,8 +558,9 @@ fn dump_cases_for_the_integer_reference() {
         line(
             &mut out,
             "seeds",
-            &[case.seed.to_vec(), p.key_mask_seed.to_vec()].concat(),
+            &[case.seed.to_vec(), reference::KEY_MASK_LABEL.to_vec()].concat(),
         );
+        line(&mut out, "wver", &[p.key_mask_version]);
         std::fs::write(format!("{dir}/{name}.txt"), out).unwrap();
     }
 }

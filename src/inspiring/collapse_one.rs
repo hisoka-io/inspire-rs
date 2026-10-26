@@ -105,7 +105,7 @@ mod tests {
     use rand::SeedableRng;
 
     fn test_params() -> InspireParams {
-        InspireParams::secure_128_d2048()
+        InspireParams::d2048()
     }
 
     fn random_poly<R: Rng>(rng: &mut R, d: usize, q: u64, moduli: &[u64]) -> Poly {

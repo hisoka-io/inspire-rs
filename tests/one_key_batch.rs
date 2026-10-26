@@ -66,7 +66,7 @@ fn batch_bytes(
 /// and registered seat give the per-query inline bytes, which are the recorded ones.
 #[test]
 fn a_production_batch_serves_the_recorded_per_query_bytes() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let d = params.ring_dim as u64;
     let (entry_size, seed) = (256usize, 0x5245_5300u64);
     let indices = [0, 1, d - 1, d, 2 * d + 17, 3 * d - 1];
@@ -150,7 +150,7 @@ fn session_batches_match_per_query_inline_answers() {
 
 #[test]
 fn a_production_session_batch_decodes_every_row() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let mut cell = Cell::build(&params, 256, 0x4445_4300);
     let indices = [5u64, 2048, 4097, 6143];
     let (states, batch) = cell
@@ -222,7 +222,7 @@ fn a_batch_under_another_key_serves_different_bytes() {
 /// by handle.
 #[test]
 fn production_request_sizes_are_pinned() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     for entry_size in [256usize, 512] {
         let mut cell = Cell::build(&params, entry_size, 0x5349_5a00);
         let key_bytes = bincode::serialize(cell.session.packing_keys().unwrap()).unwrap();

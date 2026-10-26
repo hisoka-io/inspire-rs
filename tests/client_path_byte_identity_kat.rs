@@ -19,9 +19,7 @@ use rand_chacha::ChaCha20Rng;
 use raven_inspire::inspiring::{generate_rotations, ClientPackingKeys, PackParams};
 use raven_inspire::lwe::LweSecretKey;
 use raven_inspire::math::{GaussianSampler, NttContext, Poly};
-use raven_inspire::params::{
-    InspireParams, SecurityLevel, DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT,
-};
+use raven_inspire::params::{InspireParams, ParamsLabel, DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT};
 use raven_inspire::pir::inverse_monomial;
 use raven_inspire::rgsw::{GadgetVector, RgswCiphertext, SeededRgswCiphertext};
 use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
@@ -59,7 +57,7 @@ fn params_for(moduli: &[u64]) -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

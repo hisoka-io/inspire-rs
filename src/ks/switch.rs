@@ -115,7 +115,7 @@ mod tests {
     use crate::rlwe::RlweSecretKey;
 
     fn test_params() -> InspireParams {
-        InspireParams::secure_128_d2048()
+        InspireParams::d2048()
     }
 
     fn make_ctx(params: &InspireParams) -> NttContext {

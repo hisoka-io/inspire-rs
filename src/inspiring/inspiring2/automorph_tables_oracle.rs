@@ -74,7 +74,7 @@ fn assert_derivation_matches_search(ring_dim: usize, label: &str, moduli: &[u64]
         ring_dim,
         q: moduli.iter().product(),
         crt_moduli: moduli.to_vec(),
-        ..InspireParams::secure_128_d2048()
+        ..InspireParams::d2048()
     };
     let derived = PackParams::try_new_full(&params)
         .expect("a valid ring must build")

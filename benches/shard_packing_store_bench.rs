@@ -106,7 +106,7 @@ mod pools {
 #[ignore = "cost: about two minutes of responds at d=2048; trigger: a change to the respond \
             path, the offline packing phase or the shard packing store"]
 fn respond_with_and_without_a_shard_store() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let ctx = params.ntt_context();
     let d = params.ring_dim as u64;
     let pools = pools::all();
@@ -205,7 +205,7 @@ fn respond_with_and_without_a_shard_store() {
 #[ignore = "cost: about twenty seconds of store builds at d=2048; trigger: a change to \
             ShardPackingStore::build or to step 1 of the offline packing phase"]
 fn shard_store_build() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let ctx = params.ntt_context();
     let pools = pools::all();
     for entry_size in [256usize, 512, 1024] {

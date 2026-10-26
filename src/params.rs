@@ -2,7 +2,7 @@
 //!
 //! This module defines the cryptographic parameters for the InsPIRe protocol,
 //! including ring dimensions and moduli. `validate` checks structural and
-//! noise invariants only; `security_level` is a label nothing verifies.
+//! noise invariants only; `params_label` is a label nothing verifies.
 //!
 //! # Overview
 //!
@@ -14,10 +14,10 @@
 //! # Example
 //!
 //! ```
-//! use raven_inspire::params::{InspireParams, SecurityLevel};
+//! use raven_inspire::params::{InspireParams, ParamsLabel};
 //!
 //! // The shipped preset.
-//! let params = InspireParams::secure_128_d2048();
+//! let params = InspireParams::d2048();
 //! assert!(params.validate().is_ok());
 //!
 //! // Access scaling factor for encoding
@@ -38,21 +38,22 @@ pub const DEFAULT_CRT_MODULI: [u64; 2] = [268_369_921, 249_561_089];
 /// A label carried in the parameter set and its serialized form.
 ///
 /// This label neither selects nor validates parameters. No code reads it and
-/// `validate` does not check it; the variant names are kept for the wire.
+/// `validate` does not check it. Its bincode form is the variant index, so the
+/// variant order is fixed.
 ///
 /// # Example
 ///
 /// ```
-/// use raven_inspire::params::SecurityLevel;
+/// use raven_inspire::params::ParamsLabel;
 ///
-/// let level = SecurityLevel::Bits128;
+/// let label = ParamsLabel::Primary;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SecurityLevel {
+pub enum ParamsLabel {
     /// A label; not validated. See the type-level note.
-    Bits128,
+    Primary,
     /// A label; not validated. See the type-level note.
-    Bits256,
+    Secondary,
 }
 
 /// InsPIRe protocol variant controlling the packing strategy.
@@ -116,7 +117,7 @@ pub enum InspireVariant {
 /// * `gadget_base` - Base for gadget decomposition (typically 2^20)
 /// * `query_gadget_len` / `packing_gadget_len` - Gadget digits per role
 /// * `approximate_packing_gadget` - the InspiRING packing key skips the lowest digit
-/// * `security_level` - a label; never read, never validated
+/// * `params_label` - a label; never read, never validated
 ///
 /// # Example
 ///
@@ -124,7 +125,7 @@ pub enum InspireVariant {
 /// use raven_inspire::params::InspireParams;
 ///
 /// // Use recommended parameters
-/// let params = InspireParams::secure_128_d2048();
+/// let params = InspireParams::d2048();
 ///
 /// // Validate parameters
 /// assert!(params.validate().is_ok());
@@ -191,7 +192,7 @@ pub struct InspireParams {
     pub approximate_packing_gadget: bool,
 
     /// A label; serialized but not validated or dispatched on.
-    pub security_level: SecurityLevel,
+    pub params_label: ParamsLabel,
 }
 
 /// [`InspireParams`] as named fields, for self-describing formats. An exact set writes
@@ -207,7 +208,7 @@ struct NamedInspireParams {
     gadget_base: u64,
     query_gadget_len: usize,
     packing_gadget_len: usize,
-    security_level: SecurityLevel,
+    params_label: ParamsLabel,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     approximate_packing_gadget: bool,
 }
@@ -234,7 +235,7 @@ impl Serialize for InspireParams {
             query_gadget_len,
             packing_gadget_len,
             approximate_packing_gadget: marked,
-            security_level,
+            params_label,
         } = self;
         let marked = *marked;
         if !marked && u64::try_from(*ring_dim) == Ok(APPROXIMATE_GADGET_MARKER) {
@@ -255,7 +256,7 @@ impl Serialize for InspireParams {
         fields.serialize_element(gadget_base)?;
         fields.serialize_element(query_gadget_len)?;
         fields.serialize_element(packing_gadget_len)?;
-        fields.serialize_element(security_level)?;
+        fields.serialize_element(params_label)?;
         fields.end()
     }
 }
@@ -306,7 +307,7 @@ impl<'de> Visitor<'de> for PositionalInspireParams {
             query_gadget_len: next(&mut seq, "query_gadget_len")?,
             packing_gadget_len: next(&mut seq, "packing_gadget_len")?,
             approximate_packing_gadget,
-            security_level: next(&mut seq, "security_level")?,
+            params_label: next(&mut seq, "params_label")?,
         })
     }
 }
@@ -323,8 +324,6 @@ pub const MIN_SIGMA: f64 = 3.19;
 
 impl InspireParams {
     /// Creates the shipped d=2048 preset.
-    ///
-    /// The name is historical and is not a security claim.
     ///
     /// A shard holds `ring_dim` = 2048 records of at most 2048 bytes (the
     /// InspiRING width limit), so at most 4 MiB of records per shard.
@@ -344,11 +343,11 @@ impl InspireParams {
     /// ```
     /// use raven_inspire::params::InspireParams;
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// assert_eq!(params.ring_dim, 2048);
     /// assert!(params.validate().is_ok());
     /// ```
-    pub fn secure_128_d2048() -> Self {
+    pub fn d2048() -> Self {
         // One prime rather than the reference 2-CRT pair `DEFAULT_CRT_MODULI`: that pair
         // gives q ≈ 2^55.89, and at 256 B records (128 InspiRING columns) the missing
         // ~4 bits exhaust the noise budget and decryption returns wrong bytes silently.
@@ -367,7 +366,7 @@ impl InspireParams {
             query_gadget_len: gadget_len,
             packing_gadget_len: gadget_len,
             approximate_packing_gadget: false,
-            security_level: SecurityLevel::Bits128,
+            params_label: ParamsLabel::Primary,
         }
     }
 
@@ -392,12 +391,12 @@ impl InspireParams {
     /// ```
     /// use raven_inspire::params::InspireParams;
     ///
-    /// let params = InspireParams::secure_128_d4096();
+    /// let params = InspireParams::d4096();
     /// assert_eq!(params.ring_dim, 4096);
     /// assert!(params.validate().is_ok());
     /// ```
-    pub fn secure_128_d4096() -> Self {
-        // Single prime for the reason given in `secure_128_d2048`.
+    pub fn d4096() -> Self {
+        // Single prime for the reason given in `d2048`.
         let crt_moduli = vec![crate::math::mod_q::DEFAULT_Q];
         let q = crate::math::mod_q::DEFAULT_Q;
         let gadget_base: u64 = 1 << 20;
@@ -413,7 +412,7 @@ impl InspireParams {
             query_gadget_len: gadget_len,
             packing_gadget_len: gadget_len,
             approximate_packing_gadget: false,
-            security_level: SecurityLevel::Bits128,
+            params_label: ParamsLabel::Primary,
         }
     }
 
@@ -432,7 +431,7 @@ impl InspireParams {
     /// ```
     /// use raven_inspire::params::InspireParams;
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let delta = params.delta();
     /// // delta ≈ 2^44 for q ≈ 2^60 and p ≈ 2^16
     /// assert!(delta > (1 << 39));
@@ -458,7 +457,7 @@ impl InspireParams {
     /// ```
     /// use raven_inspire::params::InspireParams;
     ///
-    /// let exact = InspireParams::secure_128_d2048();
+    /// let exact = InspireParams::d2048();
     /// assert_eq!(exact.packing_key_rows(), 3);
     /// let approximate = InspireParams { approximate_packing_gadget: true, ..exact };
     /// assert_eq!(approximate.packing_key_rows(), 2);
@@ -504,7 +503,7 @@ impl InspireParams {
     /// ```
     /// use raven_inspire::params::InspireParams;
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// assert!(params.validate().is_ok());
     ///
     /// // Invalid parameters would fail validation
@@ -664,7 +663,7 @@ fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
 
 impl Default for InspireParams {
     fn default() -> Self {
-        Self::secure_128_d2048()
+        Self::d2048()
     }
 }
 
@@ -1039,7 +1038,7 @@ impl InspireParams {
             query_gadget_len: gadget_len,
             packing_gadget_len: gadget_len,
             approximate_packing_gadget: false,
-            security_level: SecurityLevel::Bits128,
+            params_label: ParamsLabel::Primary,
         };
         params.validate()?;
         Ok(params)
@@ -1061,7 +1060,7 @@ impl InspireParams {
             query_gadget_len: d.t_exp_left,
             packing_gadget_len: d.t_exp_left,
             approximate_packing_gadget: false,
-            security_level: SecurityLevel::Bits128,
+            params_label: ParamsLabel::Primary,
         }
     }
 }
@@ -1394,7 +1393,7 @@ impl ShardConfig {
     /// ```
     /// use raven_inspire::params::{InspireParams, ShardConfig};
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let config = ShardConfig::for_ring_dim(params.ring_dim, 32, 100_000).unwrap();
     /// assert!(config.validate_for_params(&params).is_ok());
     /// ```
@@ -1481,7 +1480,7 @@ mod tests {
                 crt_moduli: vec![limb],
                 query_gadget_len: 4,
                 packing_gadget_len: 4,
-                ..InspireParams::secure_128_d2048()
+                ..InspireParams::d2048()
             };
             assert_eq!(alone.validate(), Ok(()));
         }
@@ -1494,7 +1493,7 @@ mod tests {
             crt_moduli: vec![a, b],
             query_gadget_len: 4,
             packing_gadget_len: 4,
-            ..InspireParams::secure_128_d2048()
+            ..InspireParams::d2048()
         };
         // Everything `validate` checks after the product holds for the wrapped q.
         assert!(wrapped >= forged.p && forged.delta() / 2 > tailcut_for(forged.sigma) as u64);
@@ -1528,7 +1527,7 @@ mod tests {
             crt_moduli: vec![a, b],
             query_gadget_len: 4,
             packing_gadget_len: 4,
-            ..InspireParams::secure_128_d2048()
+            ..InspireParams::d2048()
         };
         assert_eq!(params.validate(), Ok(()));
         let off_by_one = InspireParams { q: q - 1, ..params };
@@ -1559,19 +1558,19 @@ mod tests {
     fn the_approximate_gadget_needs_a_second_packing_digit() {
         let approximate = InspireParams {
             approximate_packing_gadget: true,
-            ..InspireParams::secure_128_d2048()
+            ..InspireParams::d2048()
         };
         assert_eq!(approximate.validate(), Ok(()));
         assert_eq!(approximate.packing_key_rows(), 2);
-        assert_eq!(InspireParams::secure_128_d2048().packing_key_rows(), 3);
-        assert_eq!(InspireParams::secure_128_d4096().packing_key_rows(), 3);
+        assert_eq!(InspireParams::d2048().packing_key_rows(), 3);
+        assert_eq!(InspireParams::d4096().packing_key_rows(), 3);
 
         // One digit of base 2^61 covers a 60-bit q; dropping it leaves no key.
         let one_digit = InspireParams {
             gadget_base: 1 << 61,
             query_gadget_len: 1,
             packing_gadget_len: 1,
-            ..InspireParams::secure_128_d2048()
+            ..InspireParams::d2048()
         };
         assert_eq!(one_digit.validate(), Ok(()));
         let dropped = InspireParams {
@@ -1588,9 +1587,9 @@ mod tests {
 
     #[test]
     fn test_delta_calculation() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
         let delta = params.delta();
-        // delta = q / p (CRT q for secure_128_d2048)
+        // delta = q / p (CRT q for d2048)
         assert!(delta > 0);
         assert!(delta > (1 << 39)); // Should be large
     }

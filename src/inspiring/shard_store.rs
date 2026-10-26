@@ -70,7 +70,7 @@ impl ShardPackingStore {
     /// use raven_inspire::math::Poly;
     /// use raven_inspire::params::InspireParams;
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let pack_params = PackParams::try_new(&params, 16)?;
     /// let columns = vec![Poly::zero_moduli(params.ring_dim, params.moduli()); 16];
     /// let store = ShardPackingStore::build(&pack_params, &columns, &params.ntt_context())?;

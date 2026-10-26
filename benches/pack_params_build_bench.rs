@@ -14,7 +14,7 @@ const PRODUCTION_WIDTH: usize = 256;
             derivation and about 16 s before; trigger: a change to PackParams::build or to the \
             automorphism table derivation"]
 fn pack_params_build_median_at_production_cell() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let mut samples_ms = Vec::with_capacity(RUNS);
     for _ in 0..RUNS {
         let start = Instant::now();
@@ -25,7 +25,7 @@ fn pack_params_build_median_at_production_cell() {
     }
     samples_ms.sort_by(f64::total_cmp);
     eprintln!(
-        "PackParams::try_new(secure_128_d2048, {PRODUCTION_WIDTH}): median {:.1} ms over \
+        "PackParams::try_new(d2048, {PRODUCTION_WIDTH}): median {:.1} ms over \
          {RUNS} runs, samples {samples_ms:.1?}",
         samples_ms[RUNS / 2]
     );

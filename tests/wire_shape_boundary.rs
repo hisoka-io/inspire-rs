@@ -13,7 +13,7 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use raven_inspire::math::{GaussianSampler, Poly};
-use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel};
+use raven_inspire::params::{InspireParams, InspireVariant, ParamsLabel};
 use raven_inspire::pir::{
     extract, extract_inspiring, extract_two_packing, extract_with_variant, query, query_seeded,
     respond, respond_inspiring, respond_inspiring_cached, respond_inspiring_cached_with_session,
@@ -44,7 +44,7 @@ fn params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 
@@ -761,7 +761,7 @@ fn every_extractor_refuses_a_state_whose_key_was_not_rehydrated() {
         use raven_inspire::pir::mod_switch::{
             extract_inspiring_mod_switched, mod_switch_response_checked, MOD_SWITCH_TARGET_36BIT,
         };
-        let production = InspireParams::secure_128_d2048();
+        let production = InspireParams::d2048();
         let db = vec![7u8; production.ring_dim * ENTRY_SIZE];
         let mut sampler = GaussianSampler::with_seed(production.sigma, 43);
         let (crs, encoded, key) =

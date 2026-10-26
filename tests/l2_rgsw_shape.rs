@@ -12,7 +12,7 @@ use raven_inspire::rlwe::RlweSecretKey;
 
 #[test]
 fn seeded_rgsw_uses_one_row_per_gadget_digit_and_exact_wire_bytes() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let ctx = params.ntt_context();
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0x1204);
     let secret_key = RlweSecretKey::generate(&params, &mut sampler);

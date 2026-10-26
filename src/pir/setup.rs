@@ -15,7 +15,7 @@
 //! use raven_inspire::params::InspireParams;
 //! use raven_inspire::math::GaussianSampler;
 //!
-//! let params = InspireParams::secure_128_d2048();
+//! let params = InspireParams::d2048();
 //! let database = vec![0u8; 1024 * 32]; // 1024 entries of 32 bytes
 //! let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
 //!
@@ -277,7 +277,7 @@ impl ShardData {
     /// use raven_inspire::params::InspireParams;
     /// use raven_inspire::{setup, ServerInspiringCache};
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let database = vec![7u8; params.ring_dim * 32];
     /// let mut sampler = GaussianSampler::with_seed(params.sigma, 9);
     /// let (crs, mut encoded, _secret_key) = setup(&params, &database, 32, &mut sampler)?;
@@ -491,7 +491,7 @@ mod tests {
             query_gadget_len: 3,
             packing_gadget_len: 3,
             approximate_packing_gadget: false,
-            security_level: crate::params::SecurityLevel::Bits128,
+            params_label: crate::params::ParamsLabel::Primary,
         }
     }
 

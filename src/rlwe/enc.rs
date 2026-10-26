@@ -179,7 +179,7 @@ mod tests {
     use super::*;
 
     fn test_params() -> InspireParams {
-        InspireParams::secure_128_d2048()
+        InspireParams::d2048()
     }
 
     fn make_ctx(params: &InspireParams) -> NttContext {

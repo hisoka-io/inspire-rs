@@ -117,7 +117,7 @@ impl ClientSession {
     /// use raven_inspire::params::InspireParams;
     /// use raven_inspire::{setup, ClientSession};
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let database = vec![0u8; params.ring_dim * 32];
     /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
     /// let (crs, _, _) = setup(&params, &database, 32, &mut sampler)?;
@@ -195,7 +195,7 @@ impl ClientSession {
     /// use raven_inspire::params::InspireParams;
     /// use raven_inspire::{setup, ClientSession, ServerSessionHandle};
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let database = vec![0u8; params.ring_dim * 32];
     /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
     /// let (crs, _, _) = setup(&params, &database, 32, &mut sampler)?;
@@ -329,7 +329,7 @@ impl ClientSession {
     /// use raven_inspire::params::InspireParams;
     /// use raven_inspire::{setup, ClientSession};
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let database = vec![0u8; params.ring_dim * 32];
     /// let mut sampler = GaussianSampler::from_os_entropy(params.sigma)?;
     /// let (crs, encoded, _) = setup(&params, &database, 32, &mut sampler)?;
@@ -580,7 +580,7 @@ impl PackingKeySeat {
     /// use raven_inspire::pir::PackingKeySeat;
     /// use raven_inspire::rlwe::RlweSecretKey;
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let mut sampler = GaussianSampler::with_seed(params.sigma, 1);
     /// let secret_key = RlweSecretKey::generate(&params, &mut sampler);
     /// let keys = ClientPackingKeys::generate(&secret_key, &params, 16, [7; 32], &mut sampler)?;
@@ -899,7 +899,7 @@ impl ServerSessionStore {
 mod from_residue_failfast_tests {
     use super::*;
     use crate::math::GaussianSampler;
-    use crate::params::{InspireParams, SecurityLevel};
+    use crate::params::{InspireParams, ParamsLabel};
     use crate::setup;
 
     fn fresh_residue() -> SessionResidue {
@@ -913,7 +913,7 @@ mod from_residue_failfast_tests {
             query_gadget_len: 3,
             packing_gadget_len: 3,
             approximate_packing_gadget: false,
-            security_level: SecurityLevel::Bits128,
+            params_label: ParamsLabel::Primary,
         };
         let db = vec![0u8; params.ring_dim * 32];
         let mut sampler = GaussianSampler::with_seed(params.sigma, 23);

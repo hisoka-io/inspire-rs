@@ -15,7 +15,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use raven_inspire::inspiring::inspiring2::{PackParams, PackParamsError};
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel, ShardConfig, DEFAULT_Q_2CRT_30BIT};
+use raven_inspire::params::{InspireParams, ParamsLabel, ShardConfig, DEFAULT_Q_2CRT_30BIT};
 use raven_inspire::pir::{extract_inspiring, query, respond_inspiring, setup, setup_with_rng};
 
 fn params_at(ring_dim: usize) -> InspireParams {
@@ -29,7 +29,7 @@ fn params_at(ring_dim: usize) -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 
@@ -174,7 +174,7 @@ fn validate_rejects_a_gadget_narrower_than_q() {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     assert!(
         (1u128 << 19).pow(3) < q as u128,
@@ -334,16 +334,16 @@ fn shard_mapping_matches_native_at_divisor_boundaries() {
 }
 
 #[test]
-fn security_level_is_an_advisory_serialized_label() {
-    let bits128 = InspireParams::secure_128_d2048();
-    let mut bits256 = bits128.clone();
-    bits256.security_level = SecurityLevel::Bits256;
+fn params_label_is_an_advisory_serialized_label() {
+    let primary = InspireParams::d2048();
+    let mut secondary = primary.clone();
+    secondary.params_label = ParamsLabel::Secondary;
 
-    assert!(bits128.validate().is_ok());
-    assert!(bits256.validate().is_ok());
+    assert!(primary.validate().is_ok());
+    assert!(secondary.validate().is_ok());
     assert_ne!(
-        bincode::serialize(&bits128).expect("serialize the Bits128 label"),
-        bincode::serialize(&bits256).expect("serialize the Bits256 label")
+        bincode::serialize(&primary).expect("serialize the Primary label"),
+        bincode::serialize(&secondary).expect("serialize the Secondary label")
     );
 }
 
@@ -363,7 +363,7 @@ fn rust_sources_under(directory: &std::path::Path, sources: &mut Vec<std::path::
 }
 
 #[test]
-fn security_level_has_no_production_read() {
+fn params_label_has_no_production_read() {
     let mut sources = Vec::new();
     rust_sources_under(
         &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
@@ -373,18 +373,18 @@ fn security_level_has_no_production_read() {
     for source_path in sources {
         let source = std::fs::read_to_string(&source_path).expect("read Rust source");
         assert!(
-            !source.contains(".security_level"),
-            "SecurityLevel became behavior at {}",
+            !source.contains(".params_label"),
+            "ParamsLabel became behavior at {}",
             source_path.display()
         );
     }
 }
 
 #[test]
-fn security_level_does_not_control_pir_correctness() {
-    let run = |security_level| {
+fn params_label_does_not_control_pir_correctness() {
+    let run = |params_label| {
         let mut params = params_at(256);
-        params.security_level = security_level;
+        params.params_label = params_label;
         let database: Vec<u8> = (0..params.ring_dim * 32)
             .map(|index| u8::try_from(index % 251).expect("bounded byte"))
             .collect();
@@ -401,9 +401,9 @@ fn security_level_does_not_control_pir_correctness() {
         extract_inspiring(&crs, &state, &response, 32).expect("advisory extract")
     };
 
-    let bits128 = run(SecurityLevel::Bits128);
-    let bits256 = run(SecurityLevel::Bits256);
-    assert_eq!(bits128, bits256);
+    let primary = run(ParamsLabel::Primary);
+    let secondary = run(ParamsLabel::Secondary);
+    assert_eq!(primary, secondary);
 }
 
 proptest! {

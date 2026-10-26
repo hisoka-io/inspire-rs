@@ -12,7 +12,7 @@
 use raven_inspire::math::GaussianSampler;
 use raven_inspire::params::DEFAULT_Q_2CRT_30BIT;
 use raven_inspire::pir::{extract_inspiring, query, respond_inspiring, setup};
-use raven_inspire::{InspireParams, SecurityLevel};
+use raven_inspire::{InspireParams, ParamsLabel};
 
 const RING_DIM: usize = 256;
 const ENTRY_SIZE: usize = 32;
@@ -33,7 +33,7 @@ fn params_with_q(q: u64, gadget_len: usize) -> InspireParams {
         query_gadget_len: gadget_len,
         packing_gadget_len: gadget_len,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 
@@ -96,8 +96,8 @@ fn the_rounding_half_interval_must_exceed_the_sampler_tailcut() {
 #[test]
 fn every_shipped_parameter_set_keeps_its_headroom() {
     for params in [
-        InspireParams::secure_128_d2048(),
-        InspireParams::secure_128_d4096(),
+        InspireParams::d2048(),
+        InspireParams::d4096(),
         InspireParams::for_scenario(1 << 20, 256, [64, 1024, 64], 1).expect("derived"),
         InspireParams::for_scenario_with_crt(
             1 << 20,

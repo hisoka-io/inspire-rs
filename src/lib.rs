@@ -45,4 +45,4 @@ pub use pir::{
 #[cfg(feature = "caller-secret-keys")]
 pub use pir::{query, query_seeded};
 
-pub use params::{InspireParams, InspireVariant, SecurityLevel};
+pub use params::{InspireParams, InspireVariant, ParamsLabel};

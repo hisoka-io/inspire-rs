@@ -5,7 +5,7 @@
 use crate::math::poly::{pack_coefficients_tight, unpack_coefficients_tight};
 use crate::pir::error::{pir_err, Result};
 
-use super::{Params, SEED_BYTES};
+use super::{Params, KEY_MASK_VERSION_BYTES, SEED_BYTES};
 
 fn pack(values: &[u32], m: u64) -> Result<Vec<u8>> {
     let wide: Vec<u64> = values.iter().map(|&v| u64::from(v)).collect();
@@ -31,27 +31,48 @@ fn split<'a>(bytes: &'a [u8], at: usize, want: usize, what: &str) -> Result<(&'a
 }
 
 /// A client's packing key: `y = p * tau_g(s) - s * w + e` at `q * p`, one residue
-/// vector per prime, coefficient form.
+/// vector per prime, coefficient form, and the version of the mask `w` it was built under.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackingKey {
+    pub(crate) version: u16,
     pub(crate) q: Vec<u32>,
     pub(crate) p: Vec<u32>,
 }
 
 impl PackingKey {
-    /// Limb `q`, then limb `p`.
+    /// The key-mask version the key was built under.
+    pub fn key_mask_version(&self) -> u16 {
+        self.version
+    }
+
+    /// The key-mask version (big-endian), limb `q`, then limb `p`.
     pub fn to_bytes(&self, params: &Params) -> Result<Vec<u8>> {
-        let mut out = pack(&self.q, params.q)?;
+        let mut out = self.version.to_be_bytes().to_vec();
+        out.extend(pack(&self.q, params.q)?);
         out.extend(pack(&self.p, params.special_prime)?);
         Ok(out)
     }
 
-    /// Refuses anything [`Self::to_bytes`] would not emit for `params`.
+    /// Refuses anything [`Self::to_bytes`] would not emit for `params`, and a key built under
+    /// another key-mask version, which would only decode to noise.
     pub fn from_bytes(params: &Params, bytes: &[u8]) -> Result<Self> {
         let d = params.ring_dim;
-        let at = Params::packed_bytes(d, params.q);
-        let (q, p) = split(bytes, at, params.key_bytes(), "packing key")?;
+        let (version, limbs) = split(
+            bytes,
+            KEY_MASK_VERSION_BYTES,
+            params.key_bytes(),
+            "packing key",
+        )?;
+        let version = u16::from_be_bytes([version[0], version[1]]);
+        if version != params.key_mask_version {
+            return Err(pir_err!(
+                "packing key is under key-mask version {version}; this set serves version {}",
+                params.key_mask_version
+            ));
+        }
+        let (q, p) = limbs.split_at(Params::packed_bytes(d, params.q));
         Ok(Self {
+            version,
             q: unpack(q, params.q, d)?,
             p: unpack(p, params.special_prime, d)?,
         })
@@ -121,6 +142,7 @@ mod tests {
         let d = params.ring_dim;
         let top_q = params.q as u32 - 1;
         let key = PackingKey {
+            version: params.key_mask_version,
             q: vec![top_q; d],
             p: vec![params.special_prime as u32 - 1; d],
         };
@@ -143,6 +165,16 @@ mod tests {
         assert_eq!(Response::from_bytes(&params, &rb).unwrap(), response);
 
         assert!(PackingKey::from_bytes(&params, &kb[1..]).is_err());
+        // Another key-mask version is refused by name, whichever side of the served one.
+        assert_eq!(kb[..2], params.key_mask_version.to_be_bytes());
+        for version in [0, params.key_mask_version + 1] {
+            let mut other = kb.clone();
+            other[..2].copy_from_slice(&u16::to_be_bytes(version));
+            let err = PackingKey::from_bytes(&params, &other)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("key-mask version"), "{err}");
+        }
         assert!(Query::from_bytes(&params, &[qb.clone(), vec![0]].concat()).is_err());
         assert!(Response::from_bytes(&params, &rb[..rb.len() - 1]).is_err());
 

@@ -70,7 +70,7 @@ fn time_ms<T>(work: impl FnOnce() -> T) -> f64 {
 #[ignore = "cost: about 10 s of key builds at d=2048; trigger: a change to \
             ClientPackingKeys::generate, ClientSession::new or PackingKeySeat::from_wire"]
 fn client_key_build_and_seat_registration() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let ctx = params.ntt_context();
     for entry_size in [256usize, 512, 1024] {
         let gamma = raven_inspire::num_columns(entry_size);
@@ -114,7 +114,7 @@ fn client_key_build_and_seat_registration() {
 #[ignore = "cost: about a minute of responds at d=2048; trigger: a change to the respond \
             path, the seat or the online packing kernel"]
 fn respond_under_a_seat_and_the_online_kernel() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let ctx = params.ntt_context();
     let index = params.ring_dim as u64 + 17;
     for entry_size in [256usize, 512] {

@@ -162,7 +162,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn test_params() -> InspireParams {
-        InspireParams::secure_128_d2048()
+        InspireParams::d2048()
     }
 
     #[test]

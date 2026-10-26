@@ -8,7 +8,7 @@
 )]
 
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel, ShardConfig};
+use raven_inspire::params::{InspireParams, ParamsLabel, ShardConfig};
 use raven_inspire::pir::{query, query_seeded, setup, ClientSession, ServerCrs};
 use raven_inspire::rlwe::RlweSecretKey;
 
@@ -25,7 +25,7 @@ fn params_at(ring_dim: usize) -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

@@ -10,7 +10,7 @@ use raven_inspire::rgsw::{
 use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 
 fn params() -> InspireParams {
-    InspireParams::secure_128_d2048()
+    InspireParams::d2048()
 }
 
 fn sample_db_poly(dim: usize, moduli: &[u64], seed: u64) -> Poly {

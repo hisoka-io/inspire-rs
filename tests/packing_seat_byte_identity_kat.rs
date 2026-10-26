@@ -164,7 +164,7 @@ fn recorded_count(tag: &str) -> usize {
 
 #[test]
 fn production_cells_serve_the_recorded_bytes() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let d = params.ring_dim as u64;
     for packing in [Packing::PerQuery, Packing::FromShardStores] {
         let mut served = 0;
@@ -588,7 +588,7 @@ fn gather_kernel_refuses_shapes_that_would_drop_terms() {
 }
 
 fn production_seat(entry_size: usize) -> (PackingKeySeat, PackParams, InspireParams) {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let gamma = raven_inspire::num_columns(entry_size);
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0x5345_4154);
     let secret_key = RlweSecretKey::generate(&params, &mut sampler);

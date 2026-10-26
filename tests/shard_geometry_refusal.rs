@@ -19,7 +19,7 @@ use raven_inspire::pir::{
 };
 use raven_inspire::rlwe::RlweSecretKey;
 use raven_inspire::{
-    ClientState, EncodedDatabase, InspireParams, PackingMode, SecurityLevel, ServerCrs,
+    ClientState, EncodedDatabase, InspireParams, PackingMode, ParamsLabel, ServerCrs,
     ServerInspiringCache, ServerResponse, ShardData,
 };
 
@@ -40,7 +40,7 @@ fn params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

@@ -1362,7 +1362,7 @@ mod tests {
             query_gadget_len: 3,
             packing_gadget_len: 3,
             approximate_packing_gadget: false,
-            security_level: crate::params::SecurityLevel::Bits128,
+            params_label: crate::params::ParamsLabel::Primary,
         }
     }
 
@@ -1594,7 +1594,7 @@ mod tests {
             query_gadget_len: 3,
             packing_gadget_len: 3,
             approximate_packing_gadget: false,
-            security_level: crate::params::SecurityLevel::Bits128,
+            params_label: crate::params::ParamsLabel::Primary,
         };
         let d = params.ring_dim;
         let entry_size = 32;

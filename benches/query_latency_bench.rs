@@ -35,7 +35,7 @@ fn timed(iters: usize, mut f: impl FnMut(usize)) -> Vec<Duration> {
 }
 
 fn main() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let d = params.ring_dim;
     let entry_size = 512usize;
 

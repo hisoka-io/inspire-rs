@@ -40,10 +40,10 @@ pub const MOD_SWITCH_TARGET_45BIT: u64 = 35_184_372_060_161;
 /// [`check_mod_switch_noise_budget`] charges in full.
 ///
 /// Its margin under the half step `q'/(2p)` has two measures. The gate's worst-case model
-/// clears it by 1.70x (0.77 bits). The measured decode error clears it by 8.88 bits across
-/// 40 sessions (`served_post_switch_noise_distribution` in
-/// `benches/packing_noise_measurement.rs`). The largest 36-bit NTT prime has residue 53,266:
-/// 1.45x at the gate, and at the KAT seed 3.3 measured bits against this prime's 9.7.
+/// clears it by 1.70x (0.77 bits). The measured decode error, over 40 sessions, is in
+/// `served_post_switch_noise_distribution` in `benches/packing_noise_measurement.rs`. The
+/// largest 36-bit NTT prime has residue 53,266: 1.45x at the gate, and at the KAT seed 3.3
+/// measured bits against this prime's 9.7.
 pub const MOD_SWITCH_TARGET_36BIT: u64 = 68_718_428_161;
 
 /// Post-switch moduli this build can decrypt under. A modulus read off the wire is looked
@@ -669,12 +669,12 @@ mod tests {
             query_gadget_len: 3,
             packing_gadget_len: 3,
             approximate_packing_gadget: false,
-            security_level: crate::params::SecurityLevel::Bits128,
+            params_label: crate::params::ParamsLabel::Primary,
         }
     }
 
     fn production_params() -> InspireParams {
-        InspireParams::secure_128_d2048()
+        InspireParams::d2048()
     }
 
     #[test]

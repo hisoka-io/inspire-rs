@@ -116,7 +116,7 @@ fn two_crt_to_ntt_from_ntt_identity() {
 
 #[test]
 fn two_crt_rlwe_encrypt_decrypt_roundtrip() {
-    use raven_inspire::params::{InspireParams, SecurityLevel};
+    use raven_inspire::params::{InspireParams, ParamsLabel};
     use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 
     let params = InspireParams {
@@ -129,7 +129,7 @@ fn two_crt_rlwe_encrypt_decrypt_roundtrip() {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     params.validate().expect("2-CRT params must validate");
     let ctx = params.ntt_context();
@@ -161,7 +161,7 @@ fn two_crt_rlwe_encrypt_decrypt_roundtrip() {
 #[test]
 fn two_crt_trivial_encrypt_decrypt_roundtrip() {
     // noiseless (0, delta*m), so only scalar_mul + decrypt rounding is in play
-    use raven_inspire::params::{InspireParams, SecurityLevel};
+    use raven_inspire::params::{InspireParams, ParamsLabel};
     use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 
     let params = InspireParams {
@@ -174,7 +174,7 @@ fn two_crt_trivial_encrypt_decrypt_roundtrip() {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     let ctx = params.ntt_context();
     let delta = params.delta();
@@ -199,7 +199,7 @@ fn two_crt_trivial_encrypt_decrypt_roundtrip() {
 
 #[test]
 fn two_crt_external_product_identity() {
-    use raven_inspire::params::{InspireParams, SecurityLevel};
+    use raven_inspire::params::{InspireParams, ParamsLabel};
     use raven_inspire::rgsw::{external_product, GadgetVector, RgswCiphertext};
     use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 
@@ -213,7 +213,7 @@ fn two_crt_external_product_identity() {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     let ctx = params.ntt_context();
     let delta = params.delta();
@@ -249,7 +249,7 @@ fn two_crt_external_product_identity() {
 
 #[test]
 fn two_crt_seeded_rgsw_expand_external_product_identity() {
-    use raven_inspire::params::{InspireParams, SecurityLevel};
+    use raven_inspire::params::{InspireParams, ParamsLabel};
     use raven_inspire::rgsw::{external_product, GadgetVector, SeededRgswCiphertext};
     use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 
@@ -263,7 +263,7 @@ fn two_crt_seeded_rgsw_expand_external_product_identity() {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     let ctx = params.ntt_context();
     let delta = params.delta();
@@ -306,7 +306,7 @@ fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
         generate_rotations, packing_offline, packing_online, ClientPackingKeys, OfflinePackingKeys,
         PackParams,
     };
-    use raven_inspire::params::{InspireParams, SecurityLevel};
+    use raven_inspire::params::{InspireParams, ParamsLabel};
     use raven_inspire::rlwe::RlweSecretKey;
 
     let params = InspireParams {
@@ -319,7 +319,7 @@ fn two_crt_inspiring_packing_shape_and_nonconstant_smoke() {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     params.validate().expect("2-CRT params must validate");
 

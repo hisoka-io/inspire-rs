@@ -171,8 +171,13 @@ impl Rns {
     }
 }
 
-pub fn expand_key_mask(ctx: &PackCtx, seed: [u8; 32]) -> Rns {
-    let mut rng = ChaCha20Rng::from_seed(seed);
+/// The label the key masks expand from, spelled here apart from the library's constant.
+pub const KEY_MASK_LABEL: [u8; 32] = *b"special-modulus packing key mask";
+
+/// The key mask of `version`: ChaCha20 keyed by the label, stream `version`.
+pub fn expand_key_mask(ctx: &PackCtx, version: u16) -> Rns {
+    let mut rng = ChaCha20Rng::from_seed(KEY_MASK_LABEL);
+    rng.set_stream(u64::from(version));
     let mut q = vec![0u64; ctx.d];
     let mut p = vec![0u64; ctx.d];
     expand_uniform(&mut rng, ctx.lq.q, &mut q);
@@ -215,8 +220,8 @@ impl Secret {
 }
 
 /// `y = p * tau_g(s) - s * w + e` at `q * p`, coefficient form.
-pub fn keygen(ctx: &PackCtx, sk: &Secret, w_seed: [u8; 32], e: &[i64]) -> Rns {
-    let w = expand_key_mask(ctx, w_seed).to_ntt(ctx);
+pub fn keygen(ctx: &PackCtx, sk: &Secret, w_version: u16, e: &[i64]) -> Rns {
+    let w = expand_key_mask(ctx, w_version).to_ntt(ctx);
     let ts = tau_signed(&sk.s, ctx.g);
     let mut sw_q: Vec<u64> = (0..ctx.d)
         .map(|k| ctx.lq.mm(sk.sq_ntt[k], w.q[k]))
@@ -322,7 +327,7 @@ fn step1_row(ctx: &PackCtx, i: usize, cols: &[Vec<u64>]) -> Vec<u64> {
 pub fn respond(
     ctx: &PackCtx,
     shard: &Shard,
-    w_seed: [u8; 32],
+    w_version: u16,
     key: &Rns,
     a_seed: [u8; 32],
     body: &[u64],
@@ -354,7 +359,7 @@ pub fn respond(
         }
     }
 
-    let w = expand_key_mask(ctx, w_seed).to_ntt(ctx);
+    let w = expand_key_mask(ctx, w_version).to_ntt(ctx);
     let key = key.to_ntt(ctx);
     let mut coeff = vec![0u64; d];
     let mut tp = vec![0u64; d];

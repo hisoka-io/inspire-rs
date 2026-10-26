@@ -772,7 +772,7 @@ impl ClientPackingKeys {
     /// use raven_inspire::params::InspireParams;
     /// use raven_inspire::rlwe::RlweSecretKey;
     ///
-    /// let params = InspireParams::secure_128_d2048();
+    /// let params = InspireParams::d2048();
     /// let mut sampler = GaussianSampler::with_seed(params.sigma, 1);
     /// let secret_key = RlweSecretKey::generate(&params, &mut sampler);
     /// let keys = ClientPackingKeys::generate(&secret_key, &params, 16, [7; 32], &mut sampler)?;
@@ -1890,7 +1890,7 @@ mod tests {
             query_gadget_len: 3,
             packing_gadget_len: 3,
             approximate_packing_gadget: false,
-            security_level: crate::params::SecurityLevel::Bits128,
+            params_label: crate::params::ParamsLabel::Primary,
         }
     }
 

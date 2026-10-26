@@ -174,6 +174,13 @@ impl Server {
     pub fn seat(&self, key: &PackingKey) -> Result<KeySeat> {
         let ring = &self.ring;
         let d = ring.params.ring_dim;
+        if key.version != ring.params.key_mask_version {
+            return Err(pir_err!(
+                "packing key is under key-mask version {}; this set serves version {}",
+                key.version,
+                ring.params.key_mask_version
+            ));
+        }
         if key.q.len() != d || key.p.len() != d {
             return Err(pir_err!("packing key needs {d} coefficients per limb"));
         }

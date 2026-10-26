@@ -17,7 +17,7 @@ use raven_inspire::pir::mod_switch::{
 use raven_inspire::rlwe::RlweCiphertext;
 use raven_inspire::{
     query_seeded, respond_seeded_inspiring, setup, ClientState, InspireParams, PackingMode,
-    SecurityLevel, ServerCrs, ServerResponse,
+    ParamsLabel, ServerCrs, ServerResponse,
 };
 
 const ENTRY_SIZE: usize = 32;
@@ -39,7 +39,7 @@ fn params_with(crt_moduli: Vec<u64>) -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

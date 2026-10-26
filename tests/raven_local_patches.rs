@@ -2,7 +2,7 @@
 //! merge from it cannot silently revert one.
 
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel, ShardConfig};
+use raven_inspire::params::{InspireParams, InspireVariant, ParamsLabel, ShardConfig};
 
 use raven_inspire::{
     encode_database, extract_inspiring, extract_with_variant, query_seeded,
@@ -21,7 +21,7 @@ fn small_params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 
@@ -123,23 +123,23 @@ fn extract_with_variant_handles_inspiring_response() {
     assert_eq!(&via_wrapper[..], &db[target_byte..target_byte + entry_size]);
 }
 
-/// The `secure_128_d*` presets carry single-prime DEFAULT_Q, not the
+/// The `d2048` and `d4096` presets carry single-prime DEFAULT_Q, not the
 /// under-provisioned 2-CRT pair whose product lands near 2^56.
 ///
 /// `#[ignore]`d: 2^20 x 256 B allocates a 256 MiB database and runs ~10 s.
 #[test]
 #[ignore = "2^20 x 256 B cell: allocates a 256 MiB database and runs ~10 s under --release. \
-            Trigger: changing the secure_128_d* presets, DEFAULT_Q, or the CRT form."]
+            Trigger: changing the d2048 or d4096 preset, DEFAULT_Q, or the CRT form."]
 fn commit_d_preset_default_q_passes_smoke_at_2_20_x_256b() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     assert_eq!(
         params.q, 1_152_921_504_606_830_593,
-        "secure_128_d2048 must ship DEFAULT_Q"
+        "d2048 must ship DEFAULT_Q"
     );
     assert_eq!(
         params.crt_moduli,
         vec![1_152_921_504_606_830_593],
-        "secure_128_d2048 must use the single-prime CRT form"
+        "d2048 must use the single-prime CRT form"
     );
 
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);

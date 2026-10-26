@@ -45,7 +45,7 @@ fn validate_sigma_boundary_is_exact_on_both_sides() {
     ];
     let swept = (0..=200).map(|i| i as f64 * 0.05);
     for sigma in pinned.into_iter().chain(swept) {
-        let mut params = InspireParams::secure_128_d2048();
+        let mut params = InspireParams::d2048();
         params.sigma = sigma;
         let should_reject = !sigma.is_finite() || sigma < MIN_SIGMA;
         let outcome = params.validate();
@@ -65,7 +65,7 @@ fn validate_sigma_boundary_is_exact_on_both_sides() {
 
 #[test]
 fn validate_accepts_the_shipping_sigma() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     assert_eq!(
         params.sigma.to_bits(),
         6.4f64.to_bits(),
@@ -74,7 +74,7 @@ fn validate_accepts_the_shipping_sigma() {
     assert!(params.sigma >= MIN_SIGMA);
     params.validate().expect("shipping preset must validate");
 
-    InspireParams::secure_128_d4096()
+    InspireParams::d4096()
         .validate()
         .expect("d4096 preset must validate");
 }

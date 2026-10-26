@@ -187,7 +187,7 @@ mod tests {
     use rand::SeedableRng;
 
     fn test_params() -> InspireParams {
-        InspireParams::secure_128_d2048()
+        InspireParams::d2048()
     }
 
     fn random_lwe<R: Rng>(rng: &mut R, params: &InspireParams) -> LweCiphertext {

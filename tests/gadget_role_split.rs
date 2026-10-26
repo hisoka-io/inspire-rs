@@ -1,7 +1,7 @@
 #![allow(clippy::expect_used)]
 
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::{query_seeded, setup, InspireParams, SecurityLevel};
+use raven_inspire::{query_seeded, setup, InspireParams, ParamsLabel};
 
 fn params(query_gadget_len: usize, packing_gadget_len: usize) -> InspireParams {
     InspireParams {
@@ -14,7 +14,7 @@ fn params(query_gadget_len: usize, packing_gadget_len: usize) -> InspireParams {
         query_gadget_len,
         packing_gadget_len,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

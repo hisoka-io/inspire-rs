@@ -103,7 +103,7 @@ fn the_key_generator_is_the_pack_params_generator() {
 
 #[test]
 fn illegal_widths_are_refused_with_the_pack_params_error() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let mut sampler = GaussianSampler::with_seed(params.sigma, 1);
     let secret_key = RlweSecretKey::generate(&params, &mut sampler);
     for width in [0usize, 3, 100, 2048, 4096] {

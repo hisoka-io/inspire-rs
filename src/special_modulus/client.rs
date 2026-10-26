@@ -11,7 +11,7 @@ use subtle::{ConditionallySelectable, ConstantTimeEq};
 
 use super::wire::{PackingKey, Query, Response};
 use super::{
-    expand_uniform, tau_signed, Params, Ring, KEY_MASK_SEED, PLAINTEXT_MODULUS, SEED_BYTES,
+    expand_uniform, tau_signed, Params, Ring, KEY_MASK_VERSION, PLAINTEXT_MODULUS, SEED_BYTES,
 };
 
 /// `floor((x + floor(delta/2)) / delta) mod 16` over a secret phase `x < 2^31`, dividing
@@ -43,9 +43,10 @@ impl Rounding {
     }
 }
 
-/// A client under an entropy-drawn secret reads only under the served ring and primes,
-/// its fixed key mask, and at least its error width. A mask the caller picks lets a server
-/// that supplied it tell clients apart; a narrower error weakens the secret.
+/// A client under an entropy-drawn secret reads only under the served ring and primes, a
+/// key mask of the newest version this build knows or the one before it, and at least the
+/// served error width. A wider choice of masks would let a server that names the version
+/// sort clients into more groups; a narrower error weakens the secret.
 fn served_floor(params: &Params) -> Result<()> {
     let served = Params::ring2048_cell256();
     if params.ring_dim < served.ring_dim
@@ -56,9 +57,11 @@ fn served_floor(params: &Params) -> Result<()> {
             "a client reads under the served ring and primes; other sets are for seeded tests"
         ));
     }
-    if params.key_mask_seed != KEY_MASK_SEED {
+    let v = params.key_mask_version;
+    if !known_mask_version(v, KEY_MASK_VERSION) {
         return Err(pir_err!(
-            "the key mask is the set's own, not a supplied one"
+            "key-mask version {v} is not one this client builds under (it knows {} and the one before)",
+            KEY_MASK_VERSION
         ));
     }
     if params.sigma.is_nan() || params.sigma < served.sigma {
@@ -69,6 +72,14 @@ fn served_floor(params: &Params) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// `newest` or the version before it; version 0 names no mask.
+///
+/// The server names the version, so a move away from an exposed mask must drop the
+/// older version here too, or a server can keep every client on it.
+fn known_mask_version(v: u16, newest: u16) -> bool {
+    v != 0 && (v == newest || v.checked_add(1) == Some(newest))
 }
 
 /// Caller-supplied noise must be small enough for the branch-free lift to a residue.
@@ -207,7 +218,11 @@ impl Client {
             *x = lq.p.to_mont(*x);
         }
         Ok(Self {
-            key: PackingKey { q: key_q, p: key_p },
+            key: PackingKey {
+                version: params.key_mask_version,
+                q: key_q,
+                p: key_p,
+            },
             s_q,
             ring,
             noise,
@@ -347,7 +362,7 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::{Client, Params, Rounding, KEY_MASK_SEED};
+    use super::{Client, Params, Rounding, KEY_MASK_VERSION};
     use rand::{Rng, SeedableRng};
 
     /// The secret and the key error of a client, read back from its secret transform and
@@ -436,9 +451,16 @@ mod tests {
     fn an_entropy_seeded_client_refuses_a_set_below_the_served_one() {
         let served = Params::ring2048_cell256();
         type Edit = Box<dyn Fn(&mut Params)>;
-        let cases: [(&str, Edit); 5] = [
+        let cases: [(&str, Edit); 6] = [
             ("narrower error", Box::new(|p| p.sigma = 3.2)),
-            ("supplied mask", Box::new(|p| p.key_mask_seed[0] ^= 1)),
+            (
+                "newer mask than this build knows",
+                Box::new(|p| p.key_mask_version = KEY_MASK_VERSION + 1),
+            ),
+            (
+                "far newer mask",
+                Box::new(|p| p.key_mask_version = KEY_MASK_VERSION + 7),
+            ),
             ("smaller ring", Box::new(|p| p.ring_dim = 1024)),
             (
                 "other prime",
@@ -457,8 +479,17 @@ mod tests {
         }
         let mut wider = served;
         wider.sigma = 8.0;
-        assert_eq!(wider.key_mask_seed, KEY_MASK_SEED);
+        assert_eq!(wider.key_mask_version, KEY_MASK_VERSION);
         Client::new(&wider).unwrap();
+    }
+
+    #[test]
+    fn a_client_knows_the_newest_mask_version_and_the_one_before() {
+        use super::known_mask_version as known;
+        assert!(known(5, 5) && known(4, 5));
+        assert!(!known(3, 5) && !known(6, 5) && !known(0, 5));
+        assert!(known(1, 1) && !known(0, 1) && !known(2, 1));
+        assert!(known(u16::MAX, u16::MAX) && known(u16::MAX - 1, u16::MAX));
     }
 
     #[test]

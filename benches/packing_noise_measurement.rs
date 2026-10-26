@@ -28,7 +28,7 @@ fn percentile(sorted: &[u64], numerator: usize, denominator: usize) -> u64 {
 }
 
 fn measure(entry_size: usize, samples: usize, seed: u64) -> Vec<u64> {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let database: Vec<u8> = (0..params.ring_dim * entry_size)
         .map(|offset| u8::try_from((offset * 31 + 17) % 251).expect("reduced byte"))
         .collect();
@@ -99,7 +99,7 @@ fn packing_noise_distribution() {
         // `Delta/2 = q/(2p)`; at or past it the value rounds to a neighbouring plaintext and
         // is returned with no error. Assert the worst sample, not the mean — the mean says
         // nothing about the sample that scrambles a row.
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
         let boundary = params.delta() / 2;
         let margin_bits = (boundary as f64 / maximum.max(1) as f64).log2();
         assert!(
@@ -147,7 +147,7 @@ fn measure_served(entry_size: usize, samples: usize, seed: u64, target_modulus: 
     use raven_inspire::math::{NttContext, Poly};
     use raven_inspire::pir::mod_switch::mod_switch_response_checked;
 
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let database: Vec<u8> = (0..params.ring_dim * entry_size)
         .map(|offset| u8::try_from((offset * 31 + 17) % 251).expect("reduced byte"))
         .collect();
@@ -236,7 +236,7 @@ fn served_post_switch_noise_distribution() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_SAMPLES);
     assert!(samples > 0, "RAVEN_PACKING_NOISE_SAMPLES must be positive");
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let boundary = MOD_SWITCH_TARGET_36BIT / params.p / 2;
     for (entry_size, seed) in [(32usize, 0x5010u64), (512usize, 0x5256u64)] {
         let started = Instant::now();

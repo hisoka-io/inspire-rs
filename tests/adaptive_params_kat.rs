@@ -1,7 +1,7 @@
 //! Locks the derived parameter fields so derivation drift is caught before it
 //! silently shifts a bench measurement.
 
-use raven_inspire::params::{derive_medium_payload, AdaptiveInputs, InspireParams, SecurityLevel};
+use raven_inspire::params::{derive_medium_payload, AdaptiveInputs, InspireParams, ParamsLabel};
 
 #[test]
 fn slo_cell_derivation_matches_reference() {
@@ -59,7 +59,7 @@ fn for_scenario_bridges_to_inspire_params_byte_identical() {
     assert_eq!(params.sigma.to_bits(), 6.4f64.to_bits());
     assert_eq!(params.gadget_base, 1u64 << 19);
     assert_eq!(params.packing_gadget_len, 3);
-    assert_eq!(params.security_level, SecurityLevel::Bits128);
+    assert_eq!(params.params_label, ParamsLabel::Primary);
 
     params
         .validate()

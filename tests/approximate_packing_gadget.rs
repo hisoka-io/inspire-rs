@@ -23,7 +23,7 @@ use raven_inspire::inspiring::{
     OfflinePackingKeys, PackParams,
 };
 use raven_inspire::math::{GaussianSampler, Poly};
-use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel, DEFAULT_Q_2CRT_30BIT};
+use raven_inspire::params::{InspireParams, InspireVariant, ParamsLabel, DEFAULT_Q_2CRT_30BIT};
 use raven_inspire::pir::{
     resolve_packing_seat, respond_seeded_batch, respond_seeded_inspiring,
     respond_seeded_inspiring_cached, respond_seeded_inspiring_cached_with_session,
@@ -45,7 +45,7 @@ struct ParamsBeforeTheOption {
     gadget_base: u64,
     query_gadget_len: usize,
     packing_gadget_len: usize,
-    security_level: SecurityLevel,
+    params_label: ParamsLabel,
 }
 
 impl ParamsBeforeTheOption {
@@ -59,7 +59,7 @@ impl ParamsBeforeTheOption {
             gadget_base: params.gadget_base,
             query_gadget_len: params.query_gadget_len,
             packing_gadget_len: params.packing_gadget_len,
-            security_level: params.security_level,
+            params_label: params.params_label,
         }
     }
 
@@ -74,7 +74,7 @@ impl ParamsBeforeTheOption {
             query_gadget_len: self.query_gadget_len,
             packing_gadget_len: self.packing_gadget_len,
             approximate_packing_gadget: false,
-            security_level: self.security_level,
+            params_label: self.params_label,
         }
     }
 }
@@ -93,8 +93,8 @@ fn varint() -> impl Options + Copy {
 /// Shipped presets, every shipped modulus set, and field values no preset uses.
 fn exact_sets() -> Vec<InspireParams> {
     let mut sets = vec![
-        InspireParams::secure_128_d2048(),
-        InspireParams::secure_128_d4096(),
+        InspireParams::d2048(),
+        InspireParams::d4096(),
         InspireParams::for_scenario(1 << 20, 256, [64, 1024, 64], 1).expect("derived set"),
     ];
     for (_, moduli) in modulus_sets() {
@@ -114,10 +114,10 @@ fn exact_sets() -> Vec<InspireParams> {
             query_gadget_len: rng.gen(),
             packing_gadget_len: rng.gen(),
             approximate_packing_gadget: false,
-            security_level: if limbs % 2 == 0 {
-                SecurityLevel::Bits128
+            params_label: if limbs % 2 == 0 {
+                ParamsLabel::Primary
             } else {
-                SecurityLevel::Bits256
+                ParamsLabel::Secondary
             },
         });
     }
@@ -141,7 +141,7 @@ fn hex(bytes: &[u8]) -> String {
 #[test]
 fn exact_sets_serialize_as_they_always_did() {
     assert_eq!(
-        hex(&bincode::serialize(&InspireParams::secure_128_d2048()).unwrap()),
+        hex(&bincode::serialize(&InspireParams::d2048()).unwrap()),
         SHIPPED_PRESET_BYTES
     );
     for set in exact_sets() {
@@ -169,7 +169,7 @@ fn exact_sets_serialize_as_they_always_did() {
 /// The comparison above can fail: one flipped field is other bytes in every format.
 #[test]
 fn a_set_that_differs_serializes_differently() {
-    let set = InspireParams::secure_128_d2048();
+    let set = InspireParams::d2048();
     let before = ParamsBeforeTheOption::of(&set);
     let other = InspireParams {
         packing_gadget_len: 2,
@@ -237,8 +237,8 @@ fn an_approximate_set_round_trips_in_a_layout_of_its_own() {
 
 #[test]
 fn malformed_parameter_bytes_are_refused() {
-    let exact = bincode::serialize(&InspireParams::secure_128_d2048()).unwrap();
-    let marked = bincode::serialize(&approximate(&InspireParams::secure_128_d2048())).unwrap();
+    let exact = bincode::serialize(&InspireParams::d2048()).unwrap();
+    let marked = bincode::serialize(&approximate(&InspireParams::d2048())).unwrap();
     for bytes in [&exact, &marked] {
         for cut in 0..bytes.len() {
             assert!(
@@ -260,7 +260,7 @@ fn malformed_parameter_bytes_are_refused() {
     // exact encoding; marked, it round-trips and `validate` refuses it.
     let colliding = InspireParams {
         ring_dim: usize::MAX,
-        ..InspireParams::secure_128_d2048()
+        ..InspireParams::d2048()
     };
     if usize::BITS == 64 {
         let refusal = bincode::serialize(&colliding).unwrap_err().to_string();
@@ -280,10 +280,7 @@ fn malformed_parameter_bytes_are_refused() {
 /// usable exact one: the two sides would then build different keys.
 #[test]
 fn a_reader_from_before_the_option_refuses_an_approximate_set() {
-    let mut sets = vec![
-        InspireParams::secure_128_d2048(),
-        InspireParams::secure_128_d4096(),
-    ];
+    let mut sets = vec![InspireParams::d2048(), InspireParams::d4096()];
     for (_, moduli) in modulus_sets() {
         sets.push(params_for(2048, &moduli, 4));
     }
@@ -438,7 +435,7 @@ fn every_responder_serves_one_answer_under_the_approximate_gadget() {
 /// The production ring decodes every record width through the approximate gadget.
 #[test]
 fn production_cells_decode_under_the_approximate_gadget() {
-    let params = approximate(&InspireParams::secure_128_d2048());
+    let params = approximate(&InspireParams::d2048());
     let d = params.ring_dim as u64;
     for entry_size in [32usize, 256, 512, 1024] {
         let mut cell = Cell::build(&params, entry_size, 0x4150_5244);
@@ -474,7 +471,7 @@ fn production_cells_decode_after_the_served_switch() {
     };
     use raven_inspire::ServerResponse;
 
-    let params = approximate(&InspireParams::secure_128_d2048());
+    let params = approximate(&InspireParams::d2048());
     for entry_size in [256usize, 512] {
         let cell = Cell::build(&params, entry_size, 0x4150_5357);
         let mut sampler = GaussianSampler::with_seed(params.sigma, 0x4150_5358);
@@ -505,7 +502,7 @@ fn production_cells_decode_after_the_served_switch() {
 /// record width.
 #[test]
 fn the_approximate_key_and_seat_sizes_are_pinned() {
-    let exact = InspireParams::secure_128_d2048();
+    let exact = InspireParams::d2048();
     let params = approximate(&exact);
     for entry_size in [32usize, 256, 512] {
         let mut cell = Cell::build(&params, entry_size, 0x5349_5a41);
@@ -602,7 +599,7 @@ fn the_option_survives_the_crs_and_the_session_residue() {
 fn key_switching_matrices_keep_every_digit() {
     use raven_inspire::pir::{extract_with_variant, query, respond_with_variant};
 
-    let params = approximate(&InspireParams::secure_128_d2048());
+    let params = approximate(&InspireParams::d2048());
     let entry_size = 32;
     // Tree packing scales a column by d, so the columns stay below p / d.
     let database: Vec<u8> = (0..params.ring_dim * entry_size)

@@ -47,9 +47,13 @@ pub const Q: u64 = 536_813_569;
 /// The served set's special prime: the largest prime `1 mod 4096` below 2^31.
 pub const SPECIAL_PRIME: u64 = 2_147_389_441;
 
-/// The served set's public key-mask seed. Fixed in code, so a server cannot hand
-/// different clients different masks and tell their keys apart.
-pub const KEY_MASK_SEED: [u8; SEED_BYTES] = *b"special-modulus packing key mask";
+/// The public label every key mask expands from: ChaCha20 under this key, with the mask's
+/// version as the stream. Fixed in code, so a server names at most a version, never the mask.
+pub const KEY_MASK_LABEL: [u8; SEED_BYTES] = *b"special-modulus packing key mask";
+
+/// The newest key-mask version this build knows. A client accepts it and the one before it,
+/// so a node can move to a new mask without a new parameter set.
+pub const KEY_MASK_VERSION: u16 = 1;
 
 /// One parameter set.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,8 +72,8 @@ pub struct Params {
     pub record_bytes: usize,
     /// Standard deviation of the secret, the key error and the query error.
     pub sigma: f64,
-    /// Seed of the public key mask.
-    pub key_mask_seed: [u8; SEED_BYTES],
+    /// Version of the public key mask; every key under this set carries it.
+    pub key_mask_version: u16,
 }
 
 impl Params {
@@ -84,7 +88,7 @@ impl Params {
             cell_bytes: 256,
             record_bytes: 246,
             sigma: 6.4,
-            key_mask_seed: KEY_MASK_SEED,
+            key_mask_version: KEY_MASK_VERSION,
         }
     }
 
@@ -137,6 +141,9 @@ impl Params {
         if q / PLAINTEXT_MODULUS < 1 << 16 {
             return Err(pir_err!("ciphertext prime {q} leaves no room for noise"));
         }
+        if self.key_mask_version == 0 {
+            return Err(pir_err!("key-mask version 0 names no mask"));
+        }
         if !(self.sigma.is_finite() && (1.0..=64.0).contains(&self.sigma)) {
             return Err(pir_err!(
                 "standard deviation {} is outside [1, 64]",
@@ -160,10 +167,12 @@ impl Params {
         2 * self.record_bytes
     }
 
-    /// Bytes of an uploaded packing key: each limb at its own prime's width.
+    /// Bytes of an uploaded packing key: its key-mask version, then each limb at its own
+    /// prime's width.
     #[must_use]
     pub fn key_bytes(&self) -> usize {
-        Self::packed_bytes(self.ring_dim, self.q)
+        KEY_MASK_VERSION_BYTES
+            + Self::packed_bytes(self.ring_dim, self.q)
             + Self::packed_bytes(self.ring_dim, self.special_prime)
     }
 
@@ -191,6 +200,17 @@ impl Params {
     pub const fn table_bytes(&self) -> usize {
         self.gamma * self.ring_dim * 4
     }
+}
+
+/// Bytes of the key-mask version at the head of a packing key.
+const KEY_MASK_VERSION_BYTES: usize = 2;
+
+/// The stream the key mask of `version` expands from.
+fn key_mask_stream(version: u16) -> rand_chacha::ChaCha20Rng {
+    use rand::SeedableRng;
+    let mut rng = rand_chacha::ChaCha20Rng::from_seed(KEY_MASK_LABEL);
+    rng.set_stream(u64::from(version));
+    rng
 }
 
 /// Uniform residues from 64-bit words, a word in the short last interval rejected so no
@@ -249,7 +269,6 @@ struct Ring {
 
 impl Ring {
     fn new(params: &Params, with_tables: bool) -> Result<Self> {
-        use rand::SeedableRng;
         params.validate()?;
         let d = params.ring_dim;
         let lq = Ntt32::new(d, params.q)?;
@@ -270,7 +289,7 @@ impl Ring {
         } else {
             Vec::new()
         };
-        let mut rng = rand_chacha::ChaCha20Rng::from_seed(params.key_mask_seed);
+        let mut rng = key_mask_stream(params.key_mask_version);
         let mut w_q = vec![0u32; d];
         let mut w_p = vec![0u32; d];
         expand_uniform(&mut rng, params.q, &mut w_q);
@@ -372,7 +391,7 @@ mod tests {
             (p.sigma - 6.4).abs() < f64::EPSILON,
             "query error standard deviation"
         );
-        assert_eq!(p.key_bytes(), 7424 + 7936);
+        assert_eq!(p.key_bytes(), 2 + 7424 + 7936);
         assert_eq!(p.query_bytes(), 32 + 7424);
         assert_eq!(p.response_bytes(), 7424 + 1784);
         assert_eq!(p.seat_bytes(), 16_384);
@@ -383,8 +402,9 @@ mod tests {
     fn invalid_sets_are_refused() {
         let base = Params::ring2048_cell256();
         type Edit = Box<dyn Fn(&mut Params)>;
-        let cases: [(&str, Edit); 7] = [
+        let cases: [(&str, Edit); 8] = [
             ("ring", Box::new(|p| p.ring_dim = 3000)),
+            ("mask version", Box::new(|p| p.key_mask_version = 0)),
             ("width", Box::new(|p| p.gamma = 2048)),
             ("cell", Box::new(|p| p.cell_bytes = 255)),
             ("record", Box::new(|p| p.record_bytes = 257)),
@@ -457,6 +477,38 @@ mod tests {
         }
         let t = (b - a).rem_euclid(p) * q_inv_p % p;
         a + q * t
+    }
+
+    /// Each version expands its own mask, and none is the unversioned stream 0 of the label.
+    #[test]
+    fn each_key_mask_version_expands_its_own_mask() {
+        use rand::SeedableRng;
+        let base = Params::ring2048_cell256();
+        let mask = |v: u16| {
+            let ring = Ring::new(
+                &Params {
+                    key_mask_version: v,
+                    ..base.clone()
+                },
+                false,
+            )
+            .unwrap();
+            (ring.w_q, ring.w_p)
+        };
+        let unversioned = {
+            let mut rng = rand_chacha::ChaCha20Rng::from_seed(KEY_MASK_LABEL);
+            let mut w = vec![0u32; base.ring_dim];
+            expand_uniform(&mut rng, base.q, &mut w);
+            let lq = Ntt32::new(base.ring_dim, base.q).unwrap();
+            lq.forward(&mut w);
+            w.iter().map(|&x| lq.p.to_mont(x)).collect::<Vec<_>>()
+        };
+        let (v1, v2) = (mask(1), mask(2));
+        assert_eq!(v1, mask(1), "a version's mask is a fixed function of it");
+        assert_ne!(v1.0, v2.0);
+        assert_ne!(v1.1, v2.1);
+        assert_ne!(v1.0, unversioned);
+        assert_eq!(base.key_mask_version, KEY_MASK_VERSION);
     }
 
     #[test]

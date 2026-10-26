@@ -24,7 +24,7 @@ fn mib(bytes: u64) -> f64 {
 }
 
 fn profile(entry_size: usize) {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let d = params.ring_dim;
     let mut sampler = GaussianSampler::with_seed(params.sigma, 0);
 

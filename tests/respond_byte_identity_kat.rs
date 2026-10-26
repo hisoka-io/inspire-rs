@@ -14,7 +14,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use raven_inspire::ks::KeySwitchingMatrix;
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel};
+use raven_inspire::params::{InspireParams, ParamsLabel};
 use raven_inspire::pir::{
     query, respond_inspiring, setup_with_rng, ClientQuery, EncodedDatabase, ServerCrs,
 };
@@ -30,7 +30,7 @@ struct LegacyInspireParams {
     sigma: f64,
     gadget_base: u64,
     gadget_len: usize,
-    security_level: SecurityLevel,
+    params_label: ParamsLabel,
 }
 
 #[derive(Deserialize)]
@@ -59,7 +59,7 @@ fn decode_fixture(bytes: &[u8]) -> (ServerCrs, EncodedDatabase, ClientQuery) {
         query_gadget_len: legacy.params.gadget_len,
         packing_gadget_len: legacy.params.gadget_len,
         approximate_packing_gadget: false,
-        security_level: legacy.params.security_level,
+        params_label: legacy.params.params_label,
     };
     (
         ServerCrs {
@@ -97,7 +97,7 @@ fn d256_params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

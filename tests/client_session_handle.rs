@@ -6,7 +6,7 @@
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel};
+use raven_inspire::params::{InspireParams, ParamsLabel};
 use raven_inspire::pir::{setup_with_rng, ClientSession, ServerSessionHandle};
 
 fn params() -> InspireParams {
@@ -20,7 +20,7 @@ fn params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

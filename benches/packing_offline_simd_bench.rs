@@ -16,7 +16,7 @@
 use std::time::Instant;
 
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel};
+use raven_inspire::params::{InspireParams, ParamsLabel};
 use raven_inspire::{
     respond_seeded_inspiring_cached_with_session, setup, ClientSession, PackingMode,
     ServerInspiringCache, ServerSessionStore,
@@ -161,8 +161,8 @@ fn bench_prod_cell_65536x512() {
          here is a passing test that cannot fail."
     );
 
-    let mut params = InspireParams::secure_128_d2048();
-    params.security_level = SecurityLevel::Bits128;
+    let mut params = InspireParams::d2048();
+    params.params_label = ParamsLabel::Primary;
     drive_one_cell("prod-cell-65536x512", 65_536, 512, params);
 }
 
@@ -182,7 +182,7 @@ fn bench_prod_cell_131072x32() {
          here is a passing test that cannot fail."
     );
 
-    let mut params = InspireParams::secure_128_d2048();
-    params.security_level = SecurityLevel::Bits128;
+    let mut params = InspireParams::d2048();
+    params.params_label = ParamsLabel::Primary;
     drive_one_cell("prod-cell-131072x32", 131_072, 32, params);
 }

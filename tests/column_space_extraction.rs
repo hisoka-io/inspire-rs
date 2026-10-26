@@ -7,8 +7,7 @@ use raven_inspire::pir::mod_switch::{
     mod_switch_response_checked, MOD_SWITCH_TARGET_36BIT, MOD_SWITCH_TARGET_45BIT,
 };
 use raven_inspire::{
-    extract_two_packing, query_seeded, respond_seeded_inspiring, setup, InspireParams,
-    SecurityLevel,
+    extract_two_packing, query_seeded, respond_seeded_inspiring, setup, InspireParams, ParamsLabel,
 };
 
 fn sweep_params() -> InspireParams {
@@ -22,7 +21,7 @@ fn sweep_params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

@@ -1,7 +1,7 @@
 //! RLWE coefficient-zero sample extraction must decrypt under every ClientState LWE key.
 
 use raven_inspire::math::{GaussianSampler, Poly};
-use raven_inspire::params::{InspireParams, SecurityLevel};
+use raven_inspire::params::{InspireParams, ParamsLabel};
 use raven_inspire::rlwe::{RlweCiphertext, RlweSecretKey};
 use raven_inspire::{query, setup, ClientSession, ClientState, EncodedDatabase, ServerCrs};
 
@@ -24,7 +24,7 @@ fn fixture(seed: u64) -> Result<Fixture, Box<dyn std::error::Error>> {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     };
     let database = vec![0u8; params.ring_dim * 32];
     let mut sampler = GaussianSampler::with_seed(params.sigma, seed);

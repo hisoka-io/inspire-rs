@@ -11,7 +11,7 @@ use raven_inspire::math::mod_q::DEFAULT_Q;
 use raven_inspire::math::{NttContext, Poly};
 use raven_inspire::params::{DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT};
 use raven_inspire::rlwe::apply_automorphism;
-use raven_inspire::{InspireParams, SecurityLevel};
+use raven_inspire::{InspireParams, ParamsLabel};
 
 const RING_DIM: usize = 256;
 /// `162,739 * 422,267`, `== 1 mod 512`: no factor a trial division by small primes finds.
@@ -36,7 +36,7 @@ fn params_with(ring_dim: usize, crt_moduli: Vec<u64>) -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 
@@ -87,8 +87,8 @@ fn validate_refuses_a_composite_limb() {
 #[test]
 fn every_shipped_modulus_still_validates() {
     let shipped = [
-        InspireParams::secure_128_d2048(),
-        InspireParams::secure_128_d4096(),
+        InspireParams::d2048(),
+        InspireParams::d4096(),
         InspireParams::default(),
         params_with(2048, DEFAULT_CRT_MODULI.to_vec()),
         params_with(2048, DEFAULT_Q_2CRT_30BIT.to_vec()),

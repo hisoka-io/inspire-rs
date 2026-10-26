@@ -8,7 +8,7 @@ use super::*;
 use crate::inspiring::inspiring2::{packing_offline, OfflinePackingKeys};
 use crate::math::primality::is_prime;
 use crate::math::DEFAULT_Q;
-use crate::params::{InspireParams, SecurityLevel, DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT};
+use crate::params::{InspireParams, ParamsLabel, DEFAULT_CRT_MODULI, DEFAULT_Q_2CRT_30BIT};
 use crate::rlwe::RlweCiphertext;
 
 const ADAPTIVE_CRT_MODULI: [u64; 2] = [67_043_329, 132_120_577];
@@ -42,7 +42,7 @@ impl Case {
             query_gadget_len: 3,
             packing_gadget_len: 3,
             approximate_packing_gadget: false,
-            security_level: SecurityLevel::Bits128,
+            params_label: ParamsLabel::Primary,
         };
         let pack_params = PackParams::try_new(&params, gamma).unwrap();
         let keys = OfflinePackingKeys::generate(&pack_params, [0x5a; 32]);

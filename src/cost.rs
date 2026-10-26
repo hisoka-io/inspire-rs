@@ -15,7 +15,7 @@
 //! use raven_inspire::cost::CostEstimator;
 //! use raven_inspire::params::{InspireParams, InspireVariant};
 //!
-//! let params = InspireParams::secure_128_d2048();
+//! let params = InspireParams::d2048();
 //! let entry_size = 32;
 //! let estimator = CostEstimator::new(&params, InspireVariant::NoPacking, entry_size);
 //! let breakdown = estimator.estimate();
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_cost_estimator_no_packing() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
         let estimator = CostEstimator::new(&params, InspireVariant::NoPacking, 32);
         let breakdown = estimator.estimate();
 
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn test_cost_estimator_one_packing() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
         let estimator = CostEstimator::new(&params, InspireVariant::OnePacking, 32);
         let breakdown = estimator.estimate();
 
@@ -604,7 +604,7 @@ mod tests {
 
     #[test]
     fn test_cost_estimator_two_packing() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
         let estimator = CostEstimator::new(&params, InspireVariant::TwoPacking, 32);
         let breakdown = estimator.estimate();
 
@@ -637,7 +637,7 @@ mod tests {
 
     #[test]
     fn test_setup_is_variant_specific() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
 
         let no_pack = CostEstimator::new(&params, InspireVariant::NoPacking, 32).estimate();
         let one_pack = CostEstimator::new(&params, InspireVariant::OnePacking, 32).estimate();
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_network_bytes_only_counted_in_communication() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
 
         for variant in [
             InspireVariant::NoPacking,
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_respond_and_packing_are_disjoint_for_packed_variants() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
 
         let one_pack = CostEstimator::new(&params, InspireVariant::OnePacking, 32).estimate();
         assert_eq!(one_pack.respond.key_switches, 0);
@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_communication_ordering() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
 
         let no_pack = CostEstimator::new(&params, InspireVariant::NoPacking, 32)
             .estimate()
@@ -742,7 +742,7 @@ mod tests {
 
     #[test]
     fn test_d4096_params() {
-        let params = InspireParams::secure_128_d4096();
+        let params = InspireParams::d4096();
         let estimator = CostEstimator::new(&params, InspireVariant::NoPacking, 32);
         let breakdown = estimator.estimate();
 
@@ -753,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_display() {
-        let params = InspireParams::secure_128_d2048();
+        let params = InspireParams::d2048();
         let estimator = CostEstimator::new(&params, InspireVariant::NoPacking, 32);
         let breakdown = estimator.estimate();
         let output = format!("{breakdown}");

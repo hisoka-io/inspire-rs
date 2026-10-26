@@ -5,7 +5,7 @@
 
 use proptest::prelude::*;
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, SecurityLevel};
+use raven_inspire::params::{InspireParams, ParamsLabel};
 use raven_inspire::{
     extract, extract_inspiring, extract_with_variant, query_seeded, respond, respond_one_packing,
     respond_seeded_inspiring, setup, InspireVariant,
@@ -37,7 +37,7 @@ fn params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 
@@ -225,7 +225,7 @@ fn unpacked_response_keeps_full_column_ciphertexts() {
 
 #[test]
 fn production_gamma_128_wire_bytes_are_exact() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let database: Vec<u8> = (0..64 * ENTRY_SIZE)
         .map(|offset| u8::try_from((offset * 19 + 11) % 251).expect("mod 251"))
         .collect();
@@ -258,7 +258,7 @@ fn production_gamma_128_wire_bytes_are_exact() {
 
 #[test]
 fn production_gamma_256_tight_wire_saves_exactly_1152_bytes() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let coefficients = |offset: u64| {
         (0..params.ring_dim)
             .map(|index| (offset + index as u64 * 17) % params.q)

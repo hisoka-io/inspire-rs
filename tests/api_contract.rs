@@ -11,7 +11,7 @@
     reason = "underscore-prefixed bindings are deliberate compile-time type assertions"
 )]
 
-use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel, ShardConfig};
+use raven_inspire::params::{InspireParams, InspireVariant, ParamsLabel, ShardConfig};
 use raven_inspire::pir::{
     ClientQuery, ClientState, EncodedDatabase, InspireCrs, PackingMode, SeededClientQuery,
     ServerCrs, ServerResponse, ShardData,
@@ -28,7 +28,7 @@ fn test_params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 

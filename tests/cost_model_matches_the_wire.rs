@@ -11,7 +11,7 @@
 //! The framing constants below are derived from bincode's fixint layout, not
 //! fitted to a measurement here: a constant fitted to the thing it checks is a
 //! mirror oracle. The tight one-row query with a session handle is 15,491 B at
-//! `secure_128_d2048`.
+//! `d2048`.
 
 #![allow(
     clippy::expect_used,
@@ -21,7 +21,7 @@
 
 use raven_inspire::cost::CostEstimator;
 use raven_inspire::math::GaussianSampler;
-use raven_inspire::params::{InspireParams, InspireVariant, SecurityLevel};
+use raven_inspire::params::{InspireParams, InspireVariant, ParamsLabel};
 use raven_inspire::pir::{query_seeded, respond_seeded_inspiring, setup, PackingMode};
 
 /// Bytes bincode 1.3 legacy fixint spends on one `Poly` besides its
@@ -75,7 +75,7 @@ fn small_params() -> InspireParams {
         query_gadget_len: 3,
         packing_gadget_len: 3,
         approximate_packing_gadget: false,
-        security_level: SecurityLevel::Bits128,
+        params_label: ParamsLabel::Primary,
     }
 }
 
@@ -209,7 +209,7 @@ fn cost_model_query_bytes_match_the_wire() {
 /// sides: no d=2048 crypto runs here.
 #[test]
 fn cost_model_total_matches_the_inlined_2048_cell() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let k = params.crt_moduli.len();
     assert_eq!(
         k, 1,
@@ -241,7 +241,7 @@ fn cost_model_total_matches_the_inlined_2048_cell() {
 /// Only the retained response prefix scales with record width.
 #[test]
 fn two_packing_communication_tracks_the_retained_response_prefix() {
-    let params = InspireParams::secure_128_d2048();
+    let params = InspireParams::d2048();
     let at = |entry_size| {
         CostEstimator::new(&params, InspireVariant::TwoPacking, entry_size)
             .estimate()
