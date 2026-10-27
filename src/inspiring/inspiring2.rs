@@ -540,7 +540,6 @@ impl OfflinePackingKeys {
         let num_to_pack = pack_params.num_to_pack;
         let ctx = NttContext::with_moduli(n, &pack_params.moduli);
 
-        // Generate w_mask from seed and convert to NTT form
         let w_mask = kept_mask_rows(
             w_seed,
             n,
@@ -548,6 +547,7 @@ impl OfflinePackingKeys {
             &pack_params.moduli,
             pack_params.gadget.len,
             pack_params.dropped_digits,
+            num_to_pack,
         );
         let w_mask_ntt: Vec<Poly> = w_mask
             .iter()
@@ -816,7 +816,7 @@ impl ClientPackingKeys {
         let gadget = GadgetVector::new(params.gadget_base, params.packing_gadget_len, q);
         let ctx = NttContext::with_moduli(n, moduli);
 
-        let w_mask = kept_mask_rows(w_seed, n, q, moduli, gadget.len, first_digit);
+        let w_mask = kept_mask_rows(w_seed, n, q, moduli, gadget.len, first_digit, num_to_pack);
         let generator = PackParams::partial_generator(n, num_to_pack) % (2 * n);
         let y_body = generate_ksk_body(sk, generator, &gadget, first_digit, &w_mask, sampler, &ctx);
 
@@ -830,9 +830,12 @@ impl ClientPackingKeys {
 }
 
 /// The mask rows of a key that has no rows for its `dropped` lowest digits: row r is
-/// the mask the full expansion gives digit `dropped + r`. A mask follows its digit, so
-/// such a key is the full key less its lowest rows, and one secret under both gadgets
-/// publishes each digit under one mask.
+/// the mask the expansion gives digit `dropped + r`.
+///
+/// An approximate key expands on the stream named by its width, so keys of one secret at
+/// two widths, or under both gadgets, never share a mask: a shared mask cancels in their
+/// difference and leaves the rotated secrets or the key errors in the clear. The exact
+/// gadget keeps stream 0, the bytes it always had.
 fn kept_mask_rows(
     seed: [u8; 32],
     n: usize,
@@ -840,8 +843,10 @@ fn kept_mask_rows(
     moduli: &[u64],
     gadget_len: usize,
     dropped: usize,
+    num_to_pack: usize,
 ) -> Vec<Poly> {
-    generate_mask_from_seed(seed, n, q, moduli, gadget_len)
+    let stream = if dropped == 0 { 0 } else { num_to_pack as u64 };
+    expand_mask(seed, stream, n, q, moduli, gadget_len)
         .into_iter()
         .skip(dropped)
         .collect()
@@ -855,7 +860,19 @@ fn generate_mask_from_seed(
     moduli: &[u64],
     gadget_len: usize,
 ) -> Vec<Poly> {
+    expand_mask(seed, 0, n, q, moduli, gadget_len)
+}
+
+fn expand_mask(
+    seed: [u8; 32],
+    stream: u64,
+    n: usize,
+    q: u64,
+    moduli: &[u64],
+    gadget_len: usize,
+) -> Vec<Poly> {
     let mut rng = ChaCha20Rng::from_seed(seed);
+    rng.set_stream(stream);
     let mut result = Vec::with_capacity(gadget_len);
 
     for _ in 0..gadget_len {
@@ -2177,11 +2194,16 @@ mod tests {
                     assert!(LastDigitNtt::derive(&pack_params, &ctx).is_none());
                     let keys = OfflinePackingKeys::generate(&pack_params, [7; 32]);
                     assert_eq!(keys.w_mask.len(), gadget_len - 1);
-                    // Each kept digit keeps the mask the exact gadget gives it.
+                    // Each kept digit takes its row of the width's stream, never the exact
+                    // gadget's mask for that digit.
+                    let bound =
+                        expand_mask([7; 32], gamma as u64, 256, params.q, moduli, gadget_len);
+                    assert_eq!(keys.w_mask, bound[1..]);
                     let exact_pack = PackParams::try_new(&exact, gamma).unwrap();
                     let exact_keys = OfflinePackingKeys::generate(&exact_pack, [7; 32]);
-                    assert_eq!(keys.w_mask, exact_keys.w_mask[1..]);
-                    assert_eq!(keys.w_all_ntt[0], exact_keys.w_all_ntt[0][1..]);
+                    for (kept, exact_row) in keys.w_mask.iter().zip(&exact_keys.w_mask[1..]) {
+                        assert_ne!(kept, exact_row);
+                    }
 
                     let r_all: Vec<Poly> = (0..gamma)
                         .map(|_| {
@@ -2293,11 +2315,12 @@ mod tests {
         assert!(precompute_inspiring(&a_vectors, &k_g, &test_params()).is_ok());
     }
 
-    /// An approximate key is an exact key less its lowest row: row r hides
-    /// `tau_g(s) * z^(r + 1)` under the mask the exact key gives that digit, so the two
-    /// keys of one secret differ by key error alone, digit for digit.
+    /// An approximate key's row r hides `tau_g(s) * z^(r + 1)` under the mask its width's
+    /// stream gives that digit. The exact key of the same secret and seed hides the same
+    /// digit under the stream-0 mask, so the two differ by a full mask term, never by key
+    /// error alone.
     #[test]
-    fn an_approximate_key_is_the_exact_key_without_its_lowest_row() {
+    fn an_approximate_key_masks_each_digit_on_its_widths_stream() {
         let exact_params = test_params();
         let params = InspireParams {
             approximate_packing_gadget: true,
@@ -2319,30 +2342,64 @@ mod tests {
                 .max()
                 .unwrap()
         };
-        let w_mask = generate_mask_from_seed([5; 32], 256, q, params.moduli(), 3);
+        let bound = expand_mask([5; 32], gamma as u64, 256, q, params.moduli(), 3);
         let generator = PackParams::partial_generator(256, gamma);
         let tau_s = apply_automorphism(&sk.poly, generator);
         for (row, y) in keys.y_body.iter().enumerate() {
             let digit = row + 1;
             let power = (1u64 << 20).pow(digit as u32);
-            let unmasked = y + &sk.poly.mul_ntt(&w_mask[digit], &ctx);
+            let unmasked = y + &sk.poly.mul_ntt(&bound[digit], &ctx);
             let error = &unmasked + &tau_s.scalar_mul(power).negate();
             assert!(
                 worst(&error) <= 39,
                 "row {row}: {} is past the sampler tailcut",
                 worst(&error)
             );
-            // Same digit, same mask: two errors apart. Any other pairing leaves a
-            // mask or a multiple of the secret uncancelled.
             let same_digit = y + &exact.y_body[digit].negate();
-            assert!(
-                worst(&same_digit) <= 78,
-                "row {row}: {}",
-                worst(&same_digit)
-            );
-            let same_row = y + &exact.y_body[row].negate();
-            assert!(worst(&same_row) > q / 8, "row {row}");
+            assert!(worst(&same_digit) > q / 8, "row {row}: masks cancelled");
         }
+    }
+
+    /// Two approximate keys of one secret and one seed at two widths: subtracting them
+    /// cancels no mask. Control: under one shared mask the same difference is the rotated
+    /// secrets times the gadget power plus key error, which gives the secret away.
+    #[test]
+    fn approximate_keys_at_two_widths_share_no_mask() {
+        let params = InspireParams {
+            approximate_packing_gadget: true,
+            ..test_params()
+        };
+        let ctx = params.ntt_context();
+        let q = params.q;
+        let mut sampler = GaussianSampler::with_seed(params.sigma, 12);
+        let sk = RlweSecretKey::generate(&params, &mut sampler);
+        let (narrow, wide) = (16, 32);
+        let a = ClientPackingKeys::generate(&sk, &params, narrow, [6; 32], &mut sampler).unwrap();
+        let b = ClientPackingKeys::generate(&sk, &params, wide, [6; 32], &mut sampler).unwrap();
+        let worst = |poly: &Poly| {
+            (0..256)
+                .map(|j| poly.coeff(j).min(q - poly.coeff(j)))
+                .max()
+                .unwrap()
+        };
+        let tau_a = apply_automorphism(&sk.poly, PackParams::partial_generator(256, narrow));
+        let tau_b = apply_automorphism(&sk.poly, PackParams::partial_generator(256, wide));
+        let power = 1u64 << 20;
+        let rotations = &tau_a.scalar_mul(power) + &tau_b.scalar_mul(power).negate();
+        let residual = &(&a.y_body[0] + &b.y_body[0].negate()) + &rotations.negate();
+        assert!(worst(&residual) > q / 8, "a mask cancelled across widths");
+
+        let shared = expand_mask([6; 32], 0, 256, q, params.moduli(), 3);
+        let masked = |tau: &Poly, error: u64| {
+            let mut e = Poly::zero_moduli(256, params.moduli());
+            e.set_coeff(0, error);
+            &(&tau.scalar_mul(power) + &sk.poly.mul_ntt(&shared[1], &ctx).negate()) + &e
+        };
+        let planted = &(&masked(&tau_a, 3) + &masked(&tau_b, 5).negate()) + &rotations.negate();
+        assert!(
+            worst(&planted) <= 2,
+            "the control must expose the shared-mask leak"
+        );
     }
 
     #[test]

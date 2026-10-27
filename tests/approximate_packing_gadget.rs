@@ -593,6 +593,45 @@ fn the_option_survives_the_crs_and_the_session_residue() {
     assert_eq!(wire[24..32], 256u64.to_le_bytes());
 }
 
+/// A CRS with the option opens with a magic of its own, which a reader that knows only
+/// the exact magic refuses at the prefix; a blob whose magic and parameters disagree is
+/// refused both ways.
+#[test]
+fn an_approximate_crs_carries_its_own_magic() {
+    let params = small(&modulus_sets()[0].1);
+    let approximate_wire = Cell::build(&params, 32, 0x4d41_4731)
+        .crs
+        .to_versioned_bytes()
+        .unwrap();
+    let exact_wire = Cell::build(&params_for(256, &modulus_sets()[0].1, 3), 32, 0x4d41_4731)
+        .crs
+        .to_versioned_bytes()
+        .unwrap();
+    assert_eq!(&exact_wire[..16], ServerCrs::MAGIC.as_slice());
+    assert_eq!(
+        &approximate_wire[..16],
+        ServerCrs::APPROXIMATE_GADGET_MAGIC.as_slice()
+    );
+    assert_eq!(&approximate_wire[..16], b"RAVEN_CRS_v03ag\0");
+    assert_ne!(&approximate_wire[..16], ServerCrs::MAGIC.as_slice());
+
+    for (wire, foreign) in [
+        (&approximate_wire, ServerCrs::MAGIC),
+        (&exact_wire, ServerCrs::APPROXIMATE_GADGET_MAGIC),
+    ] {
+        assert!(ServerCrs::from_versioned_bytes(wire).is_ok());
+        let mut swapped = wire.clone();
+        swapped[..16].copy_from_slice(&foreign);
+        let error = ServerCrs::from_versioned_bytes(&swapped)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("does not match its parameter set"),
+            "{error}"
+        );
+    }
+}
+
 /// The option is about the InspiRING key alone: the galois keys of the tree packing
 /// keep every digit, and a tree-packed response still decodes.
 #[test]

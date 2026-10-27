@@ -50,8 +50,9 @@ retry and restored session resends those bytes. A second key under the same secr
 so no default-build function builds a key under a secret the caller passes in. It can register
 the ~48 KiB of packing keys with a `ServerSessionStore` once and send a handle afterwards; the
 server keeps a registered key as three polynomials (49,152 bytes at d=2048, at any record
-width). `ClientSession::query_batch` sends any number of queries under that one key, inline or
-by handle, and `respond_seeded_batch` answers them.
+width), or two (32,768 bytes) under `InspireParams::d2048_approximate_gadget`.
+`ClientSession::query_batch` sends any number of queries under that one key, inline or by handle,
+and `respond_seeded_batch` answers them.
 
 A server can fold the first step of the packing offline phase over a shard's columns ahead of
 the queries with `ShardData::precompute_packing`. Responses keep their bytes and that step's
@@ -77,8 +78,10 @@ record are independent of database size:
 A parameter set with `approximate_packing_gadget` on packs under a key of two polynomials: the
 server rounds the lowest gadget digit away and the key has no row for it. The key is then
 30,843 bytes on the wire and 32,768 bytes registered, and a batch with the key inline is
-30,855 + 15,477 n bytes. The presets leave the option off. `benches/approximate_gadget_noise.rs`
-measures the served decode margin under both gadgets on the production ring.
+30,855 + 15,477 n bytes. `InspireParams::d2048_approximate_gadget` turns it on. Its key mask
+expands on a stream named by the packing width, and its CRS opens with a magic of its own.
+`benches/approximate_gadget_noise.rs` measures the served decode margin under both gadgets on the
+production ring.
 
 ## Special-modulus parameter set
 

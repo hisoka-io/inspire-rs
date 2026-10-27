@@ -111,6 +111,20 @@ impl ServerCrs {
     /// both the artifact kind and the layout; a layout change bumps it.
     pub const MAGIC: [u8; 16] = *b"RAVEN_CRS_v03\0\0\0";
 
+    /// Magic of a CRS whose parameter set has the approximate packing gadget. Its own
+    /// magic, so a reader that predates the option refuses the blob at the prefix
+    /// rather than by an accident of the parameter layout.
+    pub const APPROXIMATE_GADGET_MAGIC: [u8; 16] = *b"RAVEN_CRS_v03ag\0";
+
+    /// The magic a CRS over `params` carries.
+    pub fn magic_for(params: &InspireParams) -> [u8; 16] {
+        if params.approximate_packing_gadget {
+            Self::APPROXIMATE_GADGET_MAGIC
+        } else {
+            Self::MAGIC
+        }
+    }
+
     /// Reject a CRS body larger than this before decoding, so a malicious or stale
     /// blob cannot drive an unbounded bincode allocation.
     /// A length pre-check is the only effective bound: bincode 1.3 forces an Infinite
@@ -120,23 +134,32 @@ impl ServerCrs {
     /// artifact boundary rather than a general transport envelope.
     pub const DECODE_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
-    /// Serialize with the [`MAGIC`](Self::MAGIC) version prefix for wire / on-disk transport.
+    /// Serialize behind its parameter set's [`magic_for`](Self::magic_for), for wire and
+    /// on-disk transport.
     pub fn to_versioned_bytes(&self) -> Result<Vec<u8>> {
-        let mut out = Self::MAGIC.to_vec();
+        let mut out = Self::magic_for(&self.params).to_vec();
         bincode::serialize_into(&mut out, self)
             .map_err(|e| pir_err!("ServerCrs serialize failed: {e}"))?;
         Ok(out)
     }
 
-    /// Validate the [`MAGIC`](Self::MAGIC) prefix without decoding the body.
+    /// Validate the version prefix without decoding the body: either magic.
     pub fn check_magic(bytes: &[u8]) -> Result<()> {
-        if bytes.get(..Self::MAGIC.len()) != Some(Self::MAGIC.as_slice()) {
-            return Err(pir_err!(
+        Self::read_magic(bytes).map(|_| ())
+    }
+
+    fn read_magic(bytes: &[u8]) -> Result<[u8; 16]> {
+        match bytes.get(..Self::MAGIC.len()) {
+            Some(prefix) if prefix == Self::MAGIC || prefix == Self::APPROXIMATE_GADGET_MAGIC => {
+                let mut magic = [0u8; 16];
+                magic.copy_from_slice(prefix);
+                Ok(magic)
+            }
+            _ => Err(pir_err!(
                 "ServerCrs version magic mismatch: expected a RAVEN_CRS_v03-prefixed blob; \
                  a CRS layout change requires the operator to re-bootstrap"
-            ));
+            )),
         }
-        Ok(())
     }
 
     /// Reject a CRS whose params or packing width cannot drive the algebra.
@@ -212,7 +235,7 @@ impl ServerCrs {
     /// each use site: every consumer downstream holds the invariant by
     /// construction.
     pub fn from_versioned_bytes(bytes: &[u8]) -> Result<Self> {
-        Self::check_magic(bytes)?;
+        let magic = Self::read_magic(bytes)?;
         let body = bytes.get(Self::MAGIC.len()..).unwrap_or_default();
         if body.len() > Self::DECODE_LIMIT_BYTES {
             return Err(pir_err!(
@@ -223,6 +246,18 @@ impl ServerCrs {
         }
         let crs: Self = bincode::deserialize(body)
             .map_err(|e| pir_err!("ServerCrs decode failed after version check: {e}"))?;
+        if magic != Self::magic_for(&crs.params) {
+            return Err(pir_err!(
+                "ServerCrs magic does not match its parameter set: the prefix says the \
+                 approximate packing gadget is {}, the parameters say {}",
+                if magic == Self::MAGIC { "off" } else { "on" },
+                if crs.params.approximate_packing_gadget {
+                    "on"
+                } else {
+                    "off"
+                }
+            ));
+        }
         crs.validate()?;
         Ok(crs)
     }

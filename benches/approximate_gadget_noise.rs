@@ -16,8 +16,8 @@
 //! does not have. Only that row and the server's decomposition differ.
 //!
 //! `cargo test` leaves bench targets alone and the test is ignored, so this file
-//! runs only when named. The option is off in every preset; a preset or served table
-//! that turns it on needs a CI lane running this bench first.
+//! runs only when named, by the ignored-test CI lane: `d2048_approximate_gadget` turns
+//! the option on, so a change to the gadget, the recursion or the noise must pass here.
 
 #![allow(clippy::expect_used, clippy::print_stderr)]
 
@@ -161,10 +161,7 @@ mod served {
 
     fn measure(entry_size: usize, secrets: usize, per_secret: usize, seed: u64) -> [Cell; 2] {
         let exact = InspireParams::d2048();
-        let approximate = InspireParams {
-            approximate_packing_gadget: true,
-            ..exact.clone()
-        };
+        let approximate = InspireParams::d2048_approximate_gadget();
         let gamma = raven_inspire::num_columns(entry_size);
         let (d, q, p) = (exact.ring_dim, exact.q, exact.p);
         let target = MOD_SWITCH_TARGET_36BIT;

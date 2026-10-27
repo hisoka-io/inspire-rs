@@ -187,8 +187,8 @@ pub struct InspireParams {
     /// The server rounds that digit away before decomposing, so the key is
     /// `packing_gadget_len - 1` polynomials and the rounding residual, at most half a
     /// base, takes the place of the digit's own key-error term. Key-switching matrices
-    /// keep every digit. Off in every preset. Both sides read it from the parameter
-    /// set, and a set with it on serializes to a layout of its own.
+    /// keep every digit. On only in `d2048_approximate_gadget`. Both sides read it from
+    /// the parameter set, and a set with it on serializes to a layout of its own.
     pub approximate_packing_gadget: bool,
 
     /// A label; serialized but not validated or dispatched on.
@@ -367,6 +367,25 @@ impl InspireParams {
             packing_gadget_len: gadget_len,
             approximate_packing_gadget: false,
             params_label: ParamsLabel::Primary,
+        }
+    }
+
+    /// [`d2048`](Self::d2048) with the approximate packing gadget: a packing key of two
+    /// polynomials instead of three, so a server seat is 32 KiB instead of 48 KiB. Its
+    /// mask expands on a stream bound to the packing width, and its CRS and parameter
+    /// bytes have layouts of their own.
+    ///
+    /// ```
+    /// use raven_inspire::params::InspireParams;
+    ///
+    /// let params = InspireParams::d2048_approximate_gadget();
+    /// assert_eq!(params.packing_key_rows(), 2);
+    /// assert!(params.validate().is_ok());
+    /// ```
+    pub fn d2048_approximate_gadget() -> Self {
+        Self {
+            approximate_packing_gadget: true,
+            ..Self::d2048()
         }
     }
 
